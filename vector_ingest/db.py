@@ -69,6 +69,11 @@ class Database:
             application_name="vector-ingest",
         )
         self._conn.autocommit = False
+        # Pin the session timezone to UTC so TIMESTAMPTZ values round-trip
+        # without any implicit local offset (the process may run in CEST, etc.).
+        with self._conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC'")
+        self._conn.commit()
 
     def close(self) -> None:
         if self._conn is not None:
@@ -100,6 +105,19 @@ class Database:
             self.conn.commit()
 
     # ------------------------------------------------------------------ checkpoints
+    @staticmethod
+    def _to_naive_utc(ts: datetime) -> datetime:
+        """Return ts as a naive datetime whose wall-clock is UTC.
+
+        Accepts either an aware datetime (in any offset) or an already-naive
+        datetime that the caller asserts is UTC. All checkpoint values must
+        be naive UTC so they can be embedded directly in the O365 Management
+        API startTime/endTime query params without a local-tz shift.
+        """
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        return ts
+
     def get_checkpoint(self, tenant_id: str, content_type: str) -> datetime | None:
         with self.conn.cursor() as cur:
             cur.execute(
@@ -112,10 +130,9 @@ class Database:
             )
             row = cur.fetchone()
         if row and row[0] is not None:
-            ts: datetime = row[0]
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            return ts
+            # psycopg2 returns TIMESTAMPTZ as an aware datetime in the session
+            # timezone. We've pinned the session to UTC, but normalize defensively.
+            return self._to_naive_utc(row[0])
         return None
 
     def update_checkpoint(
@@ -125,6 +142,7 @@ class Database:
         content_type: str,
         last_ingested_at: datetime,
     ) -> None:
+        checkpoint_utc = self._to_naive_utc(last_ingested_at)
         with self.conn.cursor() as cur:
             cur.execute(
                 """
@@ -138,7 +156,7 @@ class Database:
                     client_name      = EXCLUDED.client_name,
                     updated_at       = now()
                 """,
-                (tenant_id, client_name, content_type, last_ingested_at),
+                (tenant_id, client_name, content_type, checkpoint_utc),
             )
         self.conn.commit()
 

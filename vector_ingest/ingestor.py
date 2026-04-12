@@ -174,7 +174,13 @@ class TenantIngestor:
     def _poll_content_type(self, content_type: str) -> None:
         self._ensure_subscription(content_type)
 
-        now = datetime.now(timezone.utc).replace(microsecond=0)
+        # Work in naive UTC throughout this function so that both the DB
+        # checkpoint write and the O365 API startTime/endTime params are
+        # always plain UTC wall-clock, regardless of the container's local
+        # timezone. Mixing an aware local-tz datetime with strftime() silently
+        # produced a local-offset window (e.g. +02:00 CEST) against the API,
+        # which is why the fix here is to strip tzinfo after converting to UTC.
+        now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
         checkpoint = self.db.get_checkpoint(self.tenant_id, content_type)
 
         if checkpoint is None:
