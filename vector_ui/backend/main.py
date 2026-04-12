@@ -1,6 +1,6 @@
 """NERO Vector UI backend (FastAPI).
 
-Serves the /api/* JSON endpoints that power the operator dashboard, plus
+Serves the /api/* JSON endpoints that power the operator dashboard plus
 the pre-built React SPA bundle as static files. Everything runs on a
 single port so the full UI fits behind a single Cloudflare Access app.
 """
@@ -26,7 +26,7 @@ logger = logging.getLogger("vector_ui")
 
 app = FastAPI(title="NERO Vector UI", version="0.1.0")
 
-# CORS is wide-open because access is gated by Cloudflare Access upstream.
+# Wide-open CORS: access is gated by Cloudflare Access upstream.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,7 +46,9 @@ def _shutdown() -> None:
     db.close_pool()
 
 
-# ----- health ---------------------------------------------------------------
+# ============================================================================
+# health
+# ============================================================================
 
 @app.get("/health")
 def health() -> dict:
@@ -58,7 +60,9 @@ def health() -> dict:
         return {"status": "degraded", "error": str(exc)}
 
 
-# ----- /api -----------------------------------------------------------------
+# ============================================================================
+# global stats + breakdowns
+# ============================================================================
 
 @app.get("/api/stats")
 def stats() -> dict:
@@ -80,12 +84,18 @@ def stats() -> dict:
     }
 
 
+# ----- /api/events/recent -- used by the Dashboard feed AND the Events page.
+# IMPORTANT: keep this route (and /by-*, /users) above /api/events/{event_id}
+# so FastAPI matches the literal segments before the path-variable fallback.
+
 @app.get("/api/events/recent")
 def events_recent(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     tenant: str | None = Query(None),
     event_type: str | None = Query(None),
+    workload: str | None = Query(None),
+    user: str | None = Query(None, description="substring search over user_id"),
 ) -> list[dict]:
     return db.fetch_all(
         """
@@ -102,10 +112,12 @@ def events_recent(
         FROM vector_events
         WHERE (%s::text IS NULL OR client_name = %s)
           AND (%s::text IS NULL OR event_type  = %s)
+          AND (%s::text IS NULL OR workload    = %s)
+          AND (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
         ORDER BY timestamp DESC
         LIMIT %s OFFSET %s
         """,
-        (tenant, tenant, event_type, event_type, limit, offset),
+        (tenant, tenant, event_type, event_type, workload, workload, user, user, limit, offset),
     )
 
 
@@ -135,6 +147,18 @@ def events_by_type(limit: int = Query(20, ge=1, le=200)) -> list[dict]:
     )
 
 
+@app.get("/api/events/by-workload")
+def events_by_workload() -> list[dict]:
+    return db.fetch_all(
+        """
+        SELECT workload, COUNT(*)::bigint AS count
+        FROM vector_events
+        GROUP BY workload
+        ORDER BY count DESC
+        """
+    )
+
+
 @app.get("/api/events/users")
 def events_users(
     tenant: str | None = Query(None),
@@ -158,7 +182,127 @@ def events_users(
     )
 
 
-# ----- static SPA -----------------------------------------------------------
+# ----- single-event detail (declared AFTER the literal /api/events/* routes)
+
+@app.get("/api/events/{event_id}")
+def event_detail(event_id: str) -> dict:
+    row = db.fetch_one(
+        """
+        SELECT id::text,
+               timestamp,
+               client_name,
+               tenant_id,
+               user_id,
+               entity_key,
+               event_type,
+               workload,
+               result_status,
+               client_ip,
+               user_agent,
+               raw_json
+        FROM vector_events
+        WHERE id = %s
+        """,
+        (event_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="event not found")
+    return row
+
+
+# ============================================================================
+# per-user detail
+# ============================================================================
+
+@app.get("/api/users/{entity_key}")
+def user_profile(entity_key: str) -> dict:
+    row = db.fetch_one(
+        """
+        SELECT
+            MAX(user_id)                       AS user_id,
+            MAX(client_name)                   AS client_name,
+            MAX(tenant_id)                     AS tenant_id,
+            MIN(timestamp)                     AS first_seen,
+            MAX(timestamp)                     AS last_seen,
+            COUNT(*)::bigint                   AS total_events,
+            COUNT(DISTINCT event_type)::bigint AS unique_event_types,
+            COUNT(DISTINCT client_ip)::bigint  AS unique_ips,
+            COUNT(DISTINCT (
+                SELECT dp->>'Value'
+                FROM jsonb_array_elements(
+                    COALESCE(raw_json->'DeviceProperties', '[]'::jsonb)
+                ) dp
+                WHERE dp->>'Name' = 'DisplayName'
+                LIMIT 1
+            ))::bigint                         AS unique_devices
+        FROM vector_events
+        WHERE entity_key = %s
+        """,
+        (entity_key,),
+    )
+    if not row or not row.get("total_events"):
+        raise HTTPException(status_code=404, detail="user not found")
+    row["entity_key"] = entity_key
+    return row
+
+
+@app.get("/api/users/{entity_key}/events")
+def user_events(
+    entity_key: str,
+    workloads: str | None = Query(None, description="comma-separated"),
+    event_types: str | None = Query(None, description="comma-separated"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> list[dict]:
+    return db.fetch_all(
+        """
+        SELECT id::text,
+               timestamp,
+               event_type,
+               workload,
+               result_status,
+               client_ip,
+               user_agent,
+               raw_json
+        FROM vector_events
+        WHERE entity_key = %s
+          AND (%s::text IS NULL OR workload   = ANY(string_to_array(%s, ',')))
+          AND (%s::text IS NULL OR event_type = ANY(string_to_array(%s, ',')))
+        ORDER BY timestamp DESC
+        LIMIT %s OFFSET %s
+        """,
+        (entity_key, workloads, workloads, event_types, event_types, limit, offset),
+    )
+
+
+@app.get("/api/users/{entity_key}/stats")
+def user_stats(entity_key: str) -> dict:
+    by_event_type = db.fetch_all(
+        """
+        SELECT event_type, COUNT(*)::bigint AS count
+        FROM vector_events
+        WHERE entity_key = %s
+        GROUP BY event_type
+        ORDER BY count DESC
+        """,
+        (entity_key,),
+    )
+    by_workload = db.fetch_all(
+        """
+        SELECT workload, COUNT(*)::bigint AS count
+        FROM vector_events
+        WHERE entity_key = %s
+        GROUP BY workload
+        ORDER BY count DESC
+        """,
+        (entity_key,),
+    )
+    return {"by_event_type": by_event_type, "by_workload": by_workload}
+
+
+# ============================================================================
+# static SPA
+# ============================================================================
 
 _static_path = Path(os.environ.get("VECTOR_UI_STATIC", "/app/frontend_dist"))
 
@@ -172,15 +316,14 @@ if (_static_path / "assets").is_dir():
 
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa(full_path: str = "") -> FileResponse:
-    """Catch-all for the React SPA shell.
+    """Catch-all that serves the React SPA shell.
 
-    Any /api/* path that didn't match an explicit route above falls through
-    here and returns 404 (so clients see a real API error, not the HTML
-    shell). Everything else either serves a matching file from the built
-    Vite bundle (favicon, vite.svg, …) or returns index.html so React
-    Router can take over client-side routing.
+    Any /api/* path that didn't match an explicit route above returns 404
+    here (so clients see a real API error, not the HTML shell). Everything
+    else either serves a matching file from the built Vite bundle or
+    returns index.html so React Router can take over client-side routing.
     """
-    if full_path.startswith("api/") or full_path.startswith("api"):
+    if full_path.startswith("api/") or full_path == "api":
         raise HTTPException(status_code=404)
     if not _static_path.is_dir():
         raise HTTPException(status_code=503, detail="frontend bundle not built")

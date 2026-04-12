@@ -2,10 +2,18 @@ import { NavLink, Outlet } from "react-router-dom";
 
 const nav = [
   { to: "/dashboard", label: "Dashboard" },
+  { to: "/incidents", label: "Incidents" },
+  { to: "/watchlist", label: "Watchlist" },
   { to: "/events",    label: "Events"    },
   { to: "/users",     label: "Users"     },
+  { to: "/baseline",  label: "Baseline"  },
   { to: "/sources",   label: "Sources"   },
+  { to: "/governance",label: "Governance"},
 ];
+
+// Active item style: left 2px accent bar + accent-tinted background.
+// Using inline style so the tint matches the rgba spec exactly.
+const ACTIVE_BG = "rgba(88,166,255,0.08)";
 
 export default function Layout() {
   return (
@@ -26,13 +34,17 @@ export default function Layout() {
             <NavLink
               key={item.to}
               to={item.to}
+              end={item.to === "/users" ? false : undefined}
               className={({ isActive }) =>
-                `block px-5 py-2 text-xs uppercase tracking-[0.2em] border-l-2 transition-colors ${
+                `block px-5 py-2 text-[11px] uppercase tracking-[0.22em] border-l-2 transition-colors ${
                   isActive
-                    ? "border-accent text-accent bg-black/40"
+                    ? "border-accent text-accent"
                     : "border-transparent text-muted hover:text-slate-100 hover:border-border"
                 }`
               }
+              style={({ isActive }) => ({
+                backgroundColor: isActive ? ACTIVE_BG : "transparent",
+              })}
             >
               {item.label}
             </NavLink>

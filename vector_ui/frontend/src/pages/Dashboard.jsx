@@ -1,25 +1,11 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api.js";
 import StatCard from "../components/StatCard.jsx";
-
-function fmtNumber(n) {
-  if (n === null || n === undefined) return "—";
-  return Number(n).toLocaleString("en-US");
-}
-
-function fmtTime(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().replace("T", " ").slice(0, 19) + "Z";
-}
-
-function resultClass(r) {
-  if (r === "Succeeded") return "text-success";
-  if (r === "Failed") return "text-critical";
-  return "text-muted";
-}
+import StatusBadge from "../components/StatusBadge.jsx";
+import TenantBadge from "../components/TenantBadge.jsx";
+import { fmtNumber, fmtTime } from "../utils/format.js";
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -87,6 +73,7 @@ export default function Dashboard() {
         <StatCard label="Unique Users" value={fmtNumber(stats?.unique_users)} />
       </div>
 
+      {/* breakdowns */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-surface border border-border p-4">
           <div className="text-[10px] uppercase tracking-[0.25em] text-muted mb-3">
@@ -94,9 +81,15 @@ export default function Dashboard() {
           </div>
           <div className="space-y-2">
             {byType.slice(0, 10).map((row) => (
-              <div key={row.event_type ?? "(none)"}>
+              <Link
+                key={row.event_type ?? "(none)"}
+                to={`/events?event_type=${encodeURIComponent(row.event_type ?? "")}`}
+                className="block group"
+              >
                 <div className="flex justify-between text-xs">
-                  <span className="truncate">{row.event_type ?? "(none)"}</span>
+                  <span className="truncate group-hover:text-accent transition-colors">
+                    {row.event_type ?? "(none)"}
+                  </span>
                   <span className="text-muted">{fmtNumber(row.count)}</span>
                 </div>
                 <div className="h-1 bg-black/60 mt-1">
@@ -105,7 +98,7 @@ export default function Dashboard() {
                     style={{ width: `${(Number(row.count) / maxType) * 100}%` }}
                   />
                 </div>
-              </div>
+              </Link>
             ))}
             {byType.length === 0 && (
               <div className="text-muted text-xs">no data</div>
@@ -119,9 +112,15 @@ export default function Dashboard() {
           </div>
           <div className="space-y-2">
             {byTenant.map((row) => (
-              <div key={row.client_name}>
+              <Link
+                key={row.client_name}
+                to={`/events?tenant=${encodeURIComponent(row.client_name)}`}
+                className="block group"
+              >
                 <div className="flex justify-between text-xs">
-                  <span>{row.client_name}</span>
+                  <span className="group-hover:text-accent transition-colors">
+                    <TenantBadge name={row.client_name} />
+                  </span>
                   <span className="text-muted">{fmtNumber(row.count)}</span>
                 </div>
                 <div className="h-1 bg-black/60 mt-1">
@@ -130,7 +129,7 @@ export default function Dashboard() {
                     style={{ width: `${(Number(row.count) / maxTenant) * 100}%` }}
                   />
                 </div>
-              </div>
+              </Link>
             ))}
             {byTenant.length === 0 && (
               <div className="text-muted text-xs">no data</div>
@@ -139,25 +138,47 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* recent feed */}
       <div className="bg-surface border border-border">
-        <div className="px-4 py-3 border-b border-border text-[10px] uppercase tracking-[0.25em] text-muted">
-          Recent Events
+        <div className="px-4 py-3 border-b border-border text-[10px] uppercase tracking-[0.25em] text-muted flex items-center justify-between">
+          <span>Recent Events</span>
+          <Link to="/events" className="text-[10px] text-accent hover:underline">
+            open events →
+          </Link>
         </div>
         <div className="divide-y divide-border">
           {recent.map((ev) => (
             <div
               key={ev.id}
-              className="px-4 py-2 flex items-center text-[11px] gap-4"
+              className="px-4 py-2 flex items-center text-[11px] gap-4 hover:bg-white/[0.03]"
             >
-              <span className="text-muted shrink-0 w-44">{fmtTime(ev.timestamp)}</span>
-              <span className="text-accent shrink-0 w-32 truncate">
-                {ev.client_name}
+              <span className="text-muted shrink-0 w-44 whitespace-nowrap">
+                {fmtTime(ev.timestamp)}
               </span>
-              <span className="shrink-0 w-52 truncate">{ev.user_id}</span>
-              <span className="text-slate-200 flex-1 truncate">{ev.event_type}</span>
-              <span className="shrink-0 text-muted w-36 truncate">{ev.workload}</span>
-              <span className={`shrink-0 w-20 ${resultClass(ev.result_status)}`}>
-                {ev.result_status ?? ""}
+              <span className="shrink-0 w-40 truncate">
+                <TenantBadge name={ev.client_name} />
+              </span>
+              <Link
+                to={`/users/${encodeURIComponent(ev.entity_key)}`}
+                className="shrink-0 w-56 truncate hover:text-accent"
+                title={ev.user_id}
+              >
+                {ev.user_id}
+              </Link>
+              <Link
+                to={`/events?event_type=${encodeURIComponent(ev.event_type ?? "")}`}
+                className="text-slate-200 flex-1 truncate hover:text-accent"
+              >
+                {ev.event_type}
+              </Link>
+              <span className="shrink-0 text-muted w-36 truncate">
+                {ev.workload}
+              </span>
+              <span className="shrink-0 w-24">
+                <StatusBadge status={ev.result_status} />
+              </span>
+              <span className="shrink-0 text-muted w-32 truncate">
+                {ev.client_ip ?? ""}
               </span>
             </div>
           ))}

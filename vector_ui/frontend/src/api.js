@@ -1,6 +1,5 @@
-// Tiny fetch wrapper used by every page. All endpoints are same-origin
-// (the FastAPI backend serves the SPA bundle too), so there are no
-// cross-origin concerns and no auth header - Cloudflare Access gates
+// Tiny fetch wrapper used by every page. Same-origin (FastAPI serves the
+// SPA bundle too) so no cross-origin concerns - Cloudflare Access gates
 // the whole app upstream.
 
 async function get(path) {
@@ -23,17 +22,25 @@ function qs(params) {
   return s ? `?${s}` : "";
 }
 
+function path(entityKey) {
+  return encodeURIComponent(entityKey);
+}
+
 export const api = {
-  stats: () => get("/api/stats"),
+  // global
+  stats:      () => get("/api/stats"),
+  recent:     (limit = 50) => get(`/api/events/recent${qs({ limit })}`),
+  events:     ({ limit = 50, offset = 0, tenant, event_type, workload, user } = {}) =>
+                get(`/api/events/recent${qs({ limit, offset, tenant, event_type, workload, user })}`),
+  eventById:  (id) => get(`/api/events/${encodeURIComponent(id)}`),
+  byTenant:   () => get("/api/events/by-tenant"),
+  byType:     (limit = 100) => get(`/api/events/by-type${qs({ limit })}`),
+  byWorkload: () => get("/api/events/by-workload"),
+  users:      (tenant) => get(`/api/events/users${qs({ tenant })}`),
 
-  recent: (limit = 50) => get(`/api/events/recent${qs({ limit })}`),
-
-  events: ({ limit = 50, offset = 0, tenant, event_type } = {}) =>
-    get(`/api/events/recent${qs({ limit, offset, tenant, event_type })}`),
-
-  byTenant: () => get("/api/events/by-tenant"),
-
-  byType: (limit = 20) => get(`/api/events/by-type${qs({ limit })}`),
-
-  users: (tenant) => get(`/api/events/users${qs({ tenant })}`),
+  // per-user detail
+  userProfile: (entityKey) => get(`/api/users/${path(entityKey)}`),
+  userEvents:  (entityKey, { workloads, event_types, limit = 100, offset = 0 } = {}) =>
+                 get(`/api/users/${path(entityKey)}/events${qs({ workloads, event_types, limit, offset })}`),
+  userStats:   (entityKey) => get(`/api/users/${path(entityKey)}/stats`),
 };

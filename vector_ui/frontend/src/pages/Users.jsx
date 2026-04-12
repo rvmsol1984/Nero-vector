@@ -1,18 +1,9 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api.js";
-
-function fmtTime(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().replace("T", " ").slice(0, 19) + "Z";
-}
-
-function fmtNumber(n) {
-  if (n === null || n === undefined) return "—";
-  return Number(n).toLocaleString("en-US");
-}
+import TenantBadge from "../components/TenantBadge.jsx";
+import { fmtNumber, fmtTime } from "../utils/format.js";
 
 export default function Users() {
   const [tenant, setTenant] = useState("");
@@ -80,7 +71,7 @@ export default function Users() {
         <table className="min-w-full text-[11px]">
           <thead className="text-muted uppercase text-[10px] tracking-[0.2em]">
             <tr>
-              <th className="text-left px-3 py-2">Entity Key</th>
+              <th className="text-left px-3 py-2">User</th>
               <th className="text-left px-3 py-2">Client</th>
               <th className="text-right px-3 py-2">Events</th>
               <th className="text-left px-3 py-2">Top Event Type</th>
@@ -89,15 +80,21 @@ export default function Users() {
           </thead>
           <tbody className="divide-y divide-border">
             {users.map((u) => (
-              <tr key={u.entity_key} className="hover:bg-black/30">
-                <td
-                  className="px-3 py-1.5 truncate max-w-[460px]"
-                  title={u.entity_key}
-                >
-                  {u.entity_key}
+              <tr
+                key={u.entity_key}
+                className="hover:bg-white/[0.03] cursor-pointer"
+              >
+                <td className="px-3 py-1.5 truncate max-w-[460px]">
+                  <Link
+                    to={`/users/${encodeURIComponent(u.entity_key)}`}
+                    className="hover:text-accent"
+                    title={u.entity_key}
+                  >
+                    {u.user_id}
+                  </Link>
                 </td>
-                <td className="px-3 py-1.5 text-accent whitespace-nowrap">
-                  {u.client_name}
+                <td className="px-3 py-1.5 whitespace-nowrap">
+                  <TenantBadge name={u.client_name} />
                 </td>
                 <td className="px-3 py-1.5 text-right tabular-nums">
                   {fmtNumber(u.event_count)}
