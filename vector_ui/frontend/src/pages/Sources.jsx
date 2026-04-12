@@ -12,45 +12,45 @@ const SOURCES = [
   },
   {
     name: "SaaS Alerts",
-    status: "live",
-    label: "LIVE",
+    status: "planned",
+    label: "PLANNED",
     description:
-      "SaaS posture and alert ingestion for O365, Google Workspace and Dropbox.",
+      "Identity anomaly alerts and Fortify enforcement actions. Integration planned for Phase 2.",
   },
   {
     name: "INKY MailShield",
     status: "pending",
-    label: "PENDING — webhook integration",
+    label: "PENDING",
     description:
-      "Inbound email threat intel and phishing verdicts. Webhook receiver wired next sprint.",
+      "Inbound email threat verdicts and AiTM phishing detection. Webhook integration pending — contact Dave Baggett.",
   },
   {
     name: "Datto EDR",
-    status: "live",
-    label: "LIVE",
+    status: "planned",
+    label: "PLANNED",
     description:
-      "Endpoint detections and response actions across the managed Datto EDR fleet.",
+      "Endpoint behavioral telemetry and threat detections. REST API integration planned for Phase 2.",
   },
   {
     name: "FeedLattice / OpenCTI",
-    status: "live",
-    label: "LIVE",
+    status: "planned",
+    label: "PLANNED",
     description:
-      "External threat intelligence feed normalizer driving indicator enrichment.",
+      "IOC enrichment and threat intelligence correlation. Internal platform available — ingestion pipeline planned.",
   },
   {
     name: "Defender ATP",
     status: "e5",
     label: "E5 TENANTS ONLY",
     description:
-      "Advanced hunting + incident stream. Available on tenants with an E5 entitlement.",
+      "Advanced Hunting email and endpoint stream. Available on GameChange Solar (E5). Integration planned.",
   },
   {
     name: "KSIEM",
     status: "passthrough",
     label: "PASSTHROUGH",
     description:
-      "Legacy SIEM forwarder. Events are mirrored without enrichment for continuity.",
+      "Legacy Kaseya SIEM. Events mirrored without enrichment for continuity.",
   },
 ];
 
@@ -58,6 +58,7 @@ const COLOR = {
   live:        "#10B981",
   pending:     "#EAB308",
   e5:          "#3B82F6",
+  planned:     "rgba(255,255,255,0.35)",
   passthrough: "rgba(255,255,255,0.35)",
 };
 
