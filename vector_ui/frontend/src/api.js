@@ -27,7 +27,7 @@ function path(entityKey) {
 }
 
 export const api = {
-  // global
+  // ----- global ---------------------------------------------------------
   stats:      () => get("/api/stats"),
   recent:     (limit = 50) => get(`/api/events/recent${qs({ limit })}`),
   events:     ({ limit = 50, offset = 0, tenant, event_type, workload, user } = {}) =>
@@ -38,9 +38,14 @@ export const api = {
   byWorkload: () => get("/api/events/by-workload"),
   users:      (tenant) => get(`/api/events/users${qs({ tenant })}`),
 
-  // per-user detail
+  // ----- per-user detail ------------------------------------------------
   userProfile: (entityKey) => get(`/api/users/${path(entityKey)}`),
   userEvents:  (entityKey, { workloads, event_types, limit = 100, offset = 0 } = {}) =>
                  get(`/api/users/${path(entityKey)}/events${qs({ workloads, event_types, limit, offset })}`),
   userStats:   (entityKey) => get(`/api/users/${path(entityKey)}/stats`),
+
+  // ----- governance (GCS only for now) ----------------------------------
+  govDlp:             (tenant) => get(`/api/governance/dlp${qs({ tenant })}`),
+  govExternalSharing: (tenant) => get(`/api/governance/external-sharing${qs({ tenant })}`),
+  govBulkDownloads:   (tenant) => get(`/api/governance/bulk-downloads${qs({ tenant })}`),
 };

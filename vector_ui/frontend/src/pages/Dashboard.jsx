@@ -5,6 +5,7 @@ import { api } from "../api.js";
 import StatCard from "../components/StatCard.jsx";
 import StatusBadge from "../components/StatusBadge.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
+import EventTypeBadge from "../components/EventTypeBadge.jsx";
 import { fmtNumber, fmtTime } from "../utils/format.js";
 
 export default function Dashboard() {
@@ -73,7 +74,6 @@ export default function Dashboard() {
         <StatCard label="Unique Users" value={fmtNumber(stats?.unique_users)} />
       </div>
 
-      {/* breakdowns */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-surface border border-border p-4">
           <div className="text-[10px] uppercase tracking-[0.25em] text-muted mb-3">
@@ -138,7 +138,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* recent feed */}
       <div className="bg-surface border border-border">
         <div className="px-4 py-3 border-b border-border text-[10px] uppercase tracking-[0.25em] text-muted flex items-center justify-between">
           <span>Recent Events</span>
@@ -165,12 +164,9 @@ export default function Dashboard() {
               >
                 {ev.user_id}
               </Link>
-              <Link
-                to={`/events?event_type=${encodeURIComponent(ev.event_type ?? "")}`}
-                className="text-slate-200 flex-1 truncate hover:text-accent"
-              >
-                {ev.event_type}
-              </Link>
+              <div className="flex-1 min-w-0">
+                <EventTypeBadge type={ev.event_type} workload={ev.workload} />
+              </div>
               <span className="shrink-0 text-muted w-36 truncate">
                 {ev.workload}
               </span>

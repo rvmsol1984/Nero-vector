@@ -1,12 +1,15 @@
-export default function Placeholder({ title, blurb }) {
+// Single-line empty state used by the four Phase-2 nav items. Matches
+// the spec: centered icon + one muted line of text, nothing else.
+
+export default function Placeholder({ message }) {
   return (
-    <div className="flex flex-col items-center justify-center text-center py-24 text-muted">
+    <div className="flex flex-col items-center justify-center text-center py-28 text-muted">
       <svg
         width="84"
         height="84"
         viewBox="0 0 84 84"
         fill="none"
-        className="opacity-40 mb-5"
+        className="opacity-30 mb-5"
       >
         <rect
           x="12"
@@ -26,17 +29,7 @@ export default function Placeholder({ title, blurb }) {
           strokeLinecap="round"
         />
       </svg>
-      <div className="font-display text-xl tracking-[0.25em] text-slate-200">
-        {title.toUpperCase()}
-      </div>
-      <div className="text-[11px] uppercase tracking-[0.3em] mt-2 text-muted">
-        Coming in Phase 2
-      </div>
-      {blurb && (
-        <div className="text-xs mt-6 max-w-md leading-relaxed opacity-70">
-          {blurb}
-        </div>
-      )}
+      <div className="text-xs text-muted">{message}</div>
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../api.js";
+import EventTypeBadge from "../components/EventTypeBadge.jsx";
 import JsonBlock from "../components/JsonBlock.jsx";
 import StatusBadge from "../components/StatusBadge.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
@@ -18,7 +19,6 @@ export default function Events() {
   const userQuery = searchParams.get("user") || "";
   const offset = Number(searchParams.get("offset") || 0);
 
-  // Debounced copy of the user input so we don't hit the API on every keystroke.
   const [userInput, setUserInput] = useState(userQuery);
 
   useEffect(() => {
@@ -33,7 +33,6 @@ export default function Events() {
     const p = new URLSearchParams(searchParams);
     if (value) p.set(key, value);
     else p.delete(key);
-    // Any filter change rewinds pagination.
     p.delete("offset");
     setSearchParams(p, { replace: true });
   }
@@ -87,8 +86,7 @@ export default function Events() {
     };
   }, [offset, tenant, eventType, workload, userQuery]);
 
-  // ----- inline row expansion ------------------------------------------------
-  const [expanded, setExpanded] = useState(null); // { id, data | null }
+  const [expanded, setExpanded] = useState(null);
 
   async function toggleExpand(id) {
     if (expanded && expanded.id === id) {
@@ -130,7 +128,6 @@ export default function Events() {
         )}
       </div>
 
-      {/* filter bar */}
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <select
           value={tenant}
@@ -173,10 +170,10 @@ export default function Events() {
 
         <input
           type="search"
-          placeholder="search user…"
+          placeholder="search user email…"
           value={userInput}
           onChange={(e) => setUserInput(e.target.value)}
-          className="bg-surface border border-border px-2 py-1 text-slate-100 focus:outline-none focus:border-accent w-56 placeholder:text-muted"
+          className="bg-surface border border-border px-2 py-1 text-slate-100 focus:outline-none focus:border-accent w-64 placeholder:text-muted"
         />
 
         <div className="ml-auto flex items-center gap-2">
@@ -250,7 +247,9 @@ export default function Events() {
                         {r.user_id}
                       </Link>
                     </td>
-                    <td className="px-3 py-1.5">{r.event_type}</td>
+                    <td className="px-3 py-1.5">
+                      <EventTypeBadge type={r.event_type} workload={r.workload} />
+                    </td>
                     <td className="px-3 py-1.5 text-muted">{r.workload}</td>
                     <td className="px-3 py-1.5">
                       <StatusBadge status={r.result_status} />

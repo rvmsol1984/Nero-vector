@@ -2,16 +2,20 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../api.js";
+import EventTypeBadge from "../components/EventTypeBadge.jsx";
 import JsonBlock from "../components/JsonBlock.jsx";
 import StatusBadge from "../components/StatusBadge.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
 import {
-  emailLabel,
-  extractDeviceName,
-  extractFolder,
-  extractObjectId,
+  deviceBrowser,
+  deviceName,
+  deviceOs,
+  emailEventLabel,
+  extractMailFolder,
+  filenameFromObjectId,
   fmtNumber,
   fmtTime,
+  siteDomain,
 } from "../utils/format.js";
 
 const TABS = [
@@ -22,21 +26,21 @@ const TABS = [
   { id: "raw",      label: "Raw"      },
 ];
 
-const PAGE = 100;
-
-// Each tab drives the backend /api/users/{key}/events call with a
-// different filter. The backend honours workloads/event_types as
-// comma-separated lists.
+// Backend filter per tab (comma-separated lists honoured by
+// /api/users/{key}/events).
 const TAB_QUERY = {
   timeline: {},
   files:    { workloads: "OneDrive,SharePoint" },
   email:    { workloads: "Exchange" },
   logins:   {
     workloads: "AzureActiveDirectory",
-    event_types: "UserLoggedIn,UserLoginFailed",
+    event_types: "UserLoggedIn,UserLoginFailed,UserLoggedOut",
   },
   raw:      {},
 };
+
+// Raw tab gets a tighter page size per spec; everything else loads 100.
+const TAB_PAGE = { raw: 25 };
 
 export default function UserDetail() {
   const { entityKey: rawKey } = useParams();
@@ -51,7 +55,8 @@ export default function UserDetail() {
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(null);
 
-  // Load profile once per entity key.
+  const pageSize = TAB_PAGE[tab] || 100;
+
   useEffect(() => {
     setProfile(null);
     setProfileErr(null);
@@ -61,19 +66,17 @@ export default function UserDetail() {
       .catch((e) => setProfileErr(e.message));
   }, [entityKey]);
 
-  // Tab change rewinds pagination + collapses any expanded row.
   useEffect(() => {
     setOffset(0);
     setExpanded(null);
   }, [tab, entityKey]);
 
-  // Load the event slice for the current tab.
   useEffect(() => {
     let cancel = false;
     setLoading(true);
     const q = TAB_QUERY[tab] || {};
     api
-      .userEvents(entityKey, { ...q, limit: PAGE, offset })
+      .userEvents(entityKey, { ...q, limit: pageSize, offset })
       .then((r) => {
         if (!cancel) setEvents(r);
       })
@@ -86,7 +89,7 @@ export default function UserDetail() {
     return () => {
       cancel = true;
     };
-  }, [entityKey, tab, offset]);
+  }, [entityKey, tab, offset, pageSize]);
 
   function toggleExpand(id) {
     setExpanded((prev) => (prev === id ? null : id));
@@ -101,9 +104,7 @@ export default function UserDetail() {
       );
     }
     if (!profile) {
-      return (
-        <div className="text-muted text-xs">loading user…</div>
-      );
+      return <div className="text-muted text-xs">loading user…</div>;
     }
     return (
       <div className="bg-surface border border-border p-5">
@@ -117,9 +118,7 @@ export default function UserDetail() {
             </div>
             <div className="mt-2 flex items-center gap-3 text-[11px]">
               <TenantBadge name={profile.client_name} />
-              <span className="text-muted">
-                {profile.tenant_id}
-              </span>
+              <span className="text-muted">{profile.tenant_id}</span>
             </div>
           </div>
           <div className="text-right text-[11px]">
@@ -156,8 +155,7 @@ export default function UserDetail() {
 
       {header}
 
-      {/* tabs */}
-      <div className="border-b border-border flex items-center gap-1">
+      <div className="border-b border-border flex items-center gap-1 flex-wrap">
         {TABS.map((t) => {
           const active = tab === t.id;
           return (
@@ -179,7 +177,7 @@ export default function UserDetail() {
           <button
             type="button"
             disabled={offset === 0 || loading}
-            onClick={() => setOffset(Math.max(0, offset - PAGE))}
+            onClick={() => setOffset(Math.max(0, offset - pageSize))}
             className="border border-border px-3 py-1 disabled:opacity-30 hover:border-accent hover:text-accent"
           >
             prev
@@ -189,8 +187,8 @@ export default function UserDetail() {
           </span>
           <button
             type="button"
-            disabled={events.length < PAGE || loading}
-            onClick={() => setOffset(offset + PAGE)}
+            disabled={events.length < pageSize || loading}
+            onClick={() => setOffset(offset + pageSize)}
             className="border border-border px-3 py-1 disabled:opacity-30 hover:border-accent hover:text-accent"
           >
             next
@@ -198,7 +196,6 @@ export default function UserDetail() {
         </div>
       </div>
 
-      {/* tab body */}
       {tab === "timeline" && (
         <TimelineTable events={events} expanded={expanded} onToggle={toggleExpand} loading={loading} />
       )}
@@ -231,11 +228,17 @@ function Stat({ label, value }) {
   );
 }
 
-function EventTypeBadge({ type }) {
-  if (!type) return null;
+function RemovableMediaBadge() {
   return (
-    <span className="inline-block px-2 py-0.5 text-[10px] uppercase tracking-[0.15em] border border-accent/30 bg-accent/10 text-accent">
-      {type}
+    <span
+      className="inline-block px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] border"
+      style={{
+        color: "#d29922",
+        borderColor: "#d2992255",
+        backgroundColor: "#d2992214",
+      }}
+    >
+      Removable Media
     </span>
   );
 }
@@ -299,7 +302,7 @@ function TimelineTable({ events, expanded, onToggle, loading }) {
       renderRow={(r) => (
         <>
           <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
-          <td className="px-3 py-1.5"><EventTypeBadge type={r.event_type} /></td>
+          <td className="px-3 py-1.5"><EventTypeBadge type={r.event_type} workload={r.workload} /></td>
           <td className="px-3 py-1.5 text-muted">{r.workload}</td>
           <td className="px-3 py-1.5"><StatusBadge status={r.result_status} /></td>
           <td className="px-3 py-1.5 text-muted">{r.client_ip ?? ""}</td>
@@ -314,25 +317,38 @@ function TimelineTable({ events, expanded, onToggle, loading }) {
 function FilesTable({ events, expanded, onToggle, loading }) {
   return (
     <ExpandableTable
-      columns={["Timestamp", "Event Type", "Object", "Client IP"]}
+      columns={["Timestamp", "Event", "Filename", "Site", "Client IP"]}
       rows={events}
       expanded={expanded}
       onToggle={onToggle}
       loading={loading}
       emptyLabel="no file activity"
-      renderRow={(r) => (
-        <>
-          <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
-          <td className="px-3 py-1.5"><EventTypeBadge type={r.event_type} /></td>
-          <td
-            className="px-3 py-1.5 truncate max-w-[520px]"
-            title={extractObjectId(r.raw_json)}
-          >
-            {extractObjectId(r.raw_json) || <span className="text-muted">—</span>}
-          </td>
-          <td className="px-3 py-1.5 text-muted">{r.client_ip ?? ""}</td>
-        </>
-      )}
+      renderRow={(r) => {
+        const filename = filenameFromObjectId(r.raw_json?.ObjectId);
+        const site = siteDomain(r.raw_json);
+        const isRemovable = r.event_type === "FileCreatedOnRemovableMedia";
+        return (
+          <>
+            <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
+            <td className="px-3 py-1.5">
+              <div className="flex items-center gap-2">
+                <EventTypeBadge type={r.event_type} workload={r.workload} />
+                {isRemovable && <RemovableMediaBadge />}
+              </div>
+            </td>
+            <td
+              className="px-3 py-1.5 truncate max-w-[360px]"
+              title={r.raw_json?.ObjectId || ""}
+            >
+              {filename || <span className="text-muted">—</span>}
+            </td>
+            <td className="px-3 py-1.5 text-muted truncate max-w-[260px]">
+              {site || <span className="text-muted">—</span>}
+            </td>
+            <td className="px-3 py-1.5 text-muted">{r.client_ip ?? ""}</td>
+          </>
+        );
+      }}
     />
   );
 }
@@ -341,29 +357,34 @@ function FilesTable({ events, expanded, onToggle, loading }) {
 
 function EmailTable({ events, expanded, onToggle, loading }) {
   return (
-    <ExpandableTable
-      columns={["Timestamp", "Event", "Folder", "Client IP"]}
-      rows={events}
-      expanded={expanded}
-      onToggle={onToggle}
-      loading={loading}
-      emptyLabel="no mailbox activity"
-      renderRow={(r) => (
-        <>
-          <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
-          <td className="px-3 py-1.5">
-            <EventTypeBadge type={emailLabel(r.event_type)} />
-          </td>
-          <td
-            className="px-3 py-1.5 truncate max-w-[420px]"
-            title={extractFolder(r.raw_json)}
-          >
-            {extractFolder(r.raw_json) || <span className="text-muted">—</span>}
-          </td>
-          <td className="px-3 py-1.5 text-muted">{r.client_ip ?? ""}</td>
-        </>
-      )}
-    />
+    <div className="space-y-3">
+      <div className="text-[11px] text-muted border border-border bg-black/20 px-3 py-2">
+        Send/attachment data available after 24h — mailbox audit enabled 2026-04-12
+      </div>
+      <ExpandableTable
+        columns={["Timestamp", "Event", "Folder", "Client IP"]}
+        rows={events}
+        expanded={expanded}
+        onToggle={onToggle}
+        loading={loading}
+        emptyLabel="no mailbox activity"
+        renderRow={(r) => (
+          <>
+            <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
+            <td className="px-3 py-1.5">
+              <EventTypeBadge type={emailEventLabel(r.event_type)} workload={r.workload} />
+            </td>
+            <td
+              className="px-3 py-1.5 truncate max-w-[420px]"
+              title={extractMailFolder(r.raw_json)}
+            >
+              {extractMailFolder(r.raw_json) || <span className="text-muted">—</span>}
+            </td>
+            <td className="px-3 py-1.5 text-muted">{r.client_ip ?? ""}</td>
+          </>
+        )}
+      />
+    </div>
   );
 }
 
@@ -372,30 +393,35 @@ function EmailTable({ events, expanded, onToggle, loading }) {
 function LoginsTable({ events, expanded, onToggle, loading }) {
   return (
     <ExpandableTable
-      columns={["Timestamp", "Result", "Client IP", "Device", "User Agent"]}
+      columns={["Timestamp", "Result", "Client IP", "Device", "OS", "Browser"]}
       rows={events}
       expanded={expanded}
       onToggle={onToggle}
       loading={loading}
       emptyLabel="no login events"
-      renderRow={(r) => (
-        <>
-          <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
-          <td className="px-3 py-1.5">
-            <StatusBadge
-              status={r.event_type === "UserLoggedIn" ? "Succeeded" : "Failed"}
-            />
-          </td>
-          <td className="px-3 py-1.5 text-muted">{r.client_ip ?? ""}</td>
-          <td className="px-3 py-1.5">{extractDeviceName(r.raw_json) || <span className="text-muted">—</span>}</td>
-          <td
-            className="px-3 py-1.5 text-muted truncate max-w-[360px]"
-            title={r.user_agent ?? ""}
-          >
-            {r.user_agent ?? ""}
-          </td>
-        </>
-      )}
+      renderRow={(r) => {
+        // Spec: Succeeded/Failed/LoggedOut -> green / red / muted
+        let status;
+        if (r.event_type === "UserLoggedIn") status = "Succeeded";
+        else if (r.event_type === "UserLoginFailed") status = "Failed";
+        else status = "Logged Out";
+        return (
+          <>
+            <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
+            <td className="px-3 py-1.5"><StatusBadge status={status} /></td>
+            <td className="px-3 py-1.5 text-muted">{r.client_ip ?? ""}</td>
+            <td className="px-3 py-1.5">
+              {deviceName(r.raw_json) || <span className="text-muted">—</span>}
+            </td>
+            <td className="px-3 py-1.5 text-muted">
+              {deviceOs(r.raw_json) || "—"}
+            </td>
+            <td className="px-3 py-1.5 text-muted">
+              {deviceBrowser(r.raw_json, r.user_agent) || "—"}
+            </td>
+          </>
+        );
+      }}
     />
   );
 }
@@ -414,7 +440,9 @@ function RawTable({ events, expanded, onToggle, loading }) {
       renderRow={(r) => (
         <>
           <td className="px-3 py-1.5 text-muted whitespace-nowrap">{fmtTime(r.timestamp)}</td>
-          <td className="px-3 py-1.5">{r.event_type}</td>
+          <td className="px-3 py-1.5">
+            <EventTypeBadge type={r.event_type} workload={r.workload} />
+          </td>
           <td className="px-3 py-1.5 text-muted">{r.workload}</td>
           <td className="px-3 py-1.5"><StatusBadge status={r.result_status} /></td>
         </>
