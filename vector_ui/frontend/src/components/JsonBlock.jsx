@@ -33,17 +33,49 @@ function highlight(obj) {
   });
 }
 
+// Writes `text` to the clipboard, using the async Clipboard API when it's
+// available (HTTPS / secure contexts) and falling back to the hidden-
+// textarea + execCommand trick everywhere else. Returns true on success.
+async function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext !== false) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      /* fall through to the textarea fallback */
+    }
+  }
+  try {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.setAttribute("readonly", "");
+    el.style.position = "absolute";
+    el.style.left = "-9999px";
+    el.style.top = "0";
+    document.body.appendChild(el);
+    el.select();
+    // execCommand is deprecated but still the only universal fallback
+    // for non-HTTPS origins and older browsers.
+    const ok = document.execCommand("copy");
+    document.body.removeChild(el);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export default function JsonBlock({ data, loading = false, copyable = true }) {
   const [copied, setCopied] = useState(false);
 
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard may be unavailable */
-    }
+  async function handleCopy(event) {
+    // Stop the click from bubbling up into any parent "row toggle" button
+    // that may have spawned this JsonBlock.
+    event.stopPropagation();
+    event.preventDefault();
+    const ok = await copyToClipboard(JSON.stringify(data, null, 2));
+    if (!ok) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   }
 
   if (loading) {
@@ -66,10 +98,14 @@ export default function JsonBlock({ data, loading = false, copyable = true }) {
       {copyable && (
         <button
           type="button"
-          onClick={copy}
-          className="absolute top-2 right-2 text-[10px] uppercase tracking-wide px-2 py-1 border border-white/10 bg-white/5 text-white/70 hover:text-white hover:border-white/30 rounded-md transition-colors active:scale-95"
+          onClick={handleCopy}
+          className={`absolute top-2 right-2 text-[10px] font-semibold uppercase tracking-wide px-2.5 py-1 border rounded-md transition-colors active:scale-95 ${
+            copied
+              ? "border-status-resolved/50 bg-status-resolved/15 text-status-resolved"
+              : "border-white/10 bg-white/5 text-white/70 hover:text-white hover:border-white/30"
+          }`}
         >
-          {copied ? "copied" : "copy"}
+          {copied ? "Copied!" : "Copy"}
         </button>
       )}
       <pre
