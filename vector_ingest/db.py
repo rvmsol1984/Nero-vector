@@ -1,0 +1,175 @@
+"""PostgreSQL access layer for the UAL ingest service.
+
+Owns a single long-lived connection and exposes:
+    - migrations runner
+    - checkpoint read / write
+    - bulk insert of normalized events with dedup
+
+All writes use ON CONFLICT DO NOTHING against dedup_fingerprint so
+re-running the poller against overlapping windows is safe.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+import psycopg2
+import psycopg2.extras
+
+logger = logging.getLogger(__name__)
+
+
+INSERT_EVENT_SQL = """
+INSERT INTO vector_events (
+    tenant_id,
+    client_name,
+    user_id,
+    entity_key,
+    event_type,
+    workload,
+    result_status,
+    client_ip,
+    user_agent,
+    timestamp,
+    source,
+    dedup_fingerprint,
+    raw_json
+) VALUES %s
+ON CONFLICT (dedup_fingerprint) DO NOTHING
+"""
+
+
+class Database:
+    def __init__(self) -> None:
+        self._conn: psycopg2.extensions.connection | None = None
+
+    # ------------------------------------------------------------------ connection
+    def connect(self) -> None:
+        host = os.environ.get("POSTGRES_HOST", "postgres")
+        port = int(os.environ.get("POSTGRES_PORT", "5432"))
+        dbname = os.environ.get("POSTGRES_DB", "nero_vector")
+        user = os.environ.get("POSTGRES_USER", "nero_vector")
+        password = os.environ.get("POSTGRES_PASSWORD", "")
+
+        logger.info(
+            "connecting to postgres",
+            extra={"host": host, "port": port, "db": dbname, "user": user},
+        )
+        self._conn = psycopg2.connect(
+            host=host,
+            port=port,
+            dbname=dbname,
+            user=user,
+            password=password,
+            application_name="vector-ingest",
+        )
+        self._conn.autocommit = False
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    @property
+    def conn(self) -> psycopg2.extensions.connection:
+        if self._conn is None:
+            raise RuntimeError("Database.connect() has not been called")
+        return self._conn
+
+    # ------------------------------------------------------------------ migrations
+    def run_migrations(self, migrations_dir: str | Path) -> None:
+        migrations_path = Path(migrations_dir)
+        if not migrations_path.is_dir():
+            logger.warning(
+                "migrations directory missing, skipping",
+                extra={"path": str(migrations_path)},
+            )
+            return
+
+        files = sorted(p for p in migrations_path.iterdir() if p.suffix == ".sql")
+        for sql_file in files:
+            logger.info("applying migration", extra={"file": sql_file.name})
+            sql = sql_file.read_text(encoding="utf-8")
+            with self.conn.cursor() as cur:
+                cur.execute(sql)
+            self.conn.commit()
+
+    # ------------------------------------------------------------------ checkpoints
+    def get_checkpoint(self, tenant_id: str, content_type: str) -> datetime | None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT last_ingested_at
+                FROM vector_ingest_state
+                WHERE tenant_id = %s AND content_type = %s
+                """,
+                (tenant_id, content_type),
+            )
+            row = cur.fetchone()
+        if row and row[0] is not None:
+            ts: datetime = row[0]
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts
+        return None
+
+    def update_checkpoint(
+        self,
+        tenant_id: str,
+        client_name: str,
+        content_type: str,
+        last_ingested_at: datetime,
+    ) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO vector_ingest_state (
+                    tenant_id, client_name, content_type,
+                    last_ingested_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (tenant_id, content_type) DO UPDATE
+                SET last_ingested_at = EXCLUDED.last_ingested_at,
+                    client_name      = EXCLUDED.client_name,
+                    updated_at       = now()
+                """,
+                (tenant_id, client_name, content_type, last_ingested_at),
+            )
+        self.conn.commit()
+
+    # ------------------------------------------------------------------ event insert
+    def insert_events(self, events: Iterable[dict]) -> int:
+        """Bulk insert normalized events. Returns the count actually written."""
+        rows = []
+        for ev in events:
+            rows.append(
+                (
+                    ev["tenant_id"],
+                    ev["client_name"],
+                    ev.get("user_id"),
+                    ev["entity_key"],
+                    ev.get("event_type"),
+                    ev.get("workload"),
+                    ev.get("result_status"),
+                    ev.get("client_ip"),
+                    ev.get("user_agent"),
+                    ev["timestamp"],
+                    ev.get("source", "UAL"),
+                    ev["dedup_fingerprint"],
+                    json.dumps(ev["raw_json"]),
+                )
+            )
+
+        if not rows:
+            return 0
+
+        with self.conn.cursor() as cur:
+            psycopg2.extras.execute_values(cur, INSERT_EVENT_SQL, rows)
+            written = cur.rowcount
+        self.conn.commit()
+        return max(written, 0)

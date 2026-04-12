@@ -1,0 +1,33 @@
+version: "3.8"
+
+# NERO Vector - UAL ingest service
+#
+# Assumes the existing Hetzner stack already provides a PostgreSQL
+# instance reachable on the 'nero' overlay network as host 'postgres'.
+# Override POSTGRES_HOST in .env if your Postgres service name differs.
+
+services:
+  vector-ingest:
+    build: .
+    image: nero-vector/vector-ingest:latest
+    container_name: vector-ingest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VECTOR_TENANTS_FILE: /app/tenants.json
+      VECTOR_MIGRATIONS_DIR: /app/migrations
+    volumes:
+      - ./tenants.json:/app/tenants.json:ro
+      - ./migrations:/app/migrations:ro
+    networks:
+      - nero
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  nero:
+    external: true
