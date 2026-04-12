@@ -1,7 +1,9 @@
+import { getEventLabel } from "../utils/eventLabels.js";
 import { workloadColor } from "../utils/format.js";
 
 // Workload-tinted event-type badge. Inline hex styles because the four
-// workload colors aren't in the Tailwind theme.
+// workload colors aren't in the Tailwind theme. The displayed text always
+// goes through getEventLabel so the operator never sees a raw UAL name.
 
 export default function EventTypeBadge({ type, workload }) {
   if (!type) return null;
@@ -14,8 +16,9 @@ export default function EventTypeBadge({ type, workload }) {
         borderColor: `${color}55`,
         backgroundColor: `${color}1a`,
       }}
+      title={type}
     >
-      {type}
+      {getEventLabel(type)}
     </span>
   );
 }

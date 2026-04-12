@@ -5,6 +5,7 @@ import Avatar from "../components/Avatar.jsx";
 import EventCard from "../components/EventCard.jsx";
 import StatRing from "../components/StatRing.jsx";
 import { api } from "../api.js";
+import { getEventLabel } from "../utils/eventLabels.js";
 import { fmtNumber } from "../utils/format.js";
 import { tenantColor } from "../utils/tenantColor.js";
 
@@ -178,8 +179,11 @@ export default function Dashboard() {
                   className="block group"
                 >
                   <div className="flex justify-between text-sm">
-                    <span className="truncate group-hover:text-primary-light transition-colors">
-                      {row.event_type ?? "(none)"}
+                    <span
+                      className="truncate group-hover:text-primary-light transition-colors"
+                      title={row.event_type ?? ""}
+                    >
+                      {row.event_type ? getEventLabel(row.event_type) : "(none)"}
                     </span>
                     <span className="text-white/50 tabular-nums">
                       {fmtNumber(row.count)}

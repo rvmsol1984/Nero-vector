@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import Avatar from "../components/Avatar.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
+import { getEventLabel } from "../utils/eventLabels.js";
 import { fmtNumber, fmtRelative } from "../utils/format.js";
 
 export default function Users() {
@@ -103,7 +104,9 @@ export default function Users() {
                   {fmtNumber(u.event_count)} events
                 </span>
                 <span className="opacity-60">·</span>
-                <span className="truncate">{u.top_event_type}</span>
+                <span className="truncate" title={u.top_event_type ?? ""}>
+                  {getEventLabel(u.top_event_type)}
+                </span>
                 <span className="opacity-60">·</span>
                 <span>last seen {fmtRelative(u.last_seen)}</span>
               </div>

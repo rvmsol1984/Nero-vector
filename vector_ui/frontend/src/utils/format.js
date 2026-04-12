@@ -100,11 +100,6 @@ export function extractMailFolder(raw) {
   return "";
 }
 
-export function emailEventLabel(eventType) {
-  if (eventType === "FolderBind") return "Mailbox Access";
-  return eventType;
-}
-
 // ---- Azure AD / login device info -----------------------------------------
 
 export function deviceProp(raw, name) {

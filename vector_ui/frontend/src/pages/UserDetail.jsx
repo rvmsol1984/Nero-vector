@@ -11,7 +11,6 @@ import {
   deviceBrowser,
   deviceName,
   deviceOs,
-  emailEventLabel,
   extractMailFolder,
   filenameFromObjectId,
   fmtNumber,
@@ -409,7 +408,7 @@ function EmailRow({ row }) {
   const folder = extractMailFolder(row.raw_json);
   return (
     <div className="flex items-center gap-3 flex-wrap">
-      <EventTypeBadge type={emailEventLabel(row.event_type)} workload={row.workload} />
+      <EventTypeBadge type={row.event_type} workload={row.workload} />
       <div className="flex-1 min-w-0 text-sm text-white/80 truncate">
         {folder || <span className="text-white/40">—</span>}
       </div>

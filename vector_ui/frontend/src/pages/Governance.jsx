@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import Avatar from "../components/Avatar.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
+import { getEventLabel } from "../utils/eventLabels.js";
 import { filenameFromObjectId, fmtNumber, fmtRelative } from "../utils/format.js";
 
 const TENANT = "GameChange Solar";
@@ -102,7 +103,9 @@ export default function Governance() {
                 {fmtNumber(row.event_count)} events
               </span>
               <span className="opacity-60">·</span>
-              <span>{row.event_type}</span>
+              <span title={row.event_type ?? ""}>
+                {getEventLabel(row.event_type)}
+              </span>
               <span className="opacity-60">·</span>
               <span>last seen {fmtRelative(row.last_seen)}</span>
             </div>

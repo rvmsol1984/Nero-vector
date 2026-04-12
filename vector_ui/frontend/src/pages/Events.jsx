@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 
 import EventCard from "../components/EventCard.jsx";
 import { api } from "../api.js";
+import { getEventLabel } from "../utils/eventLabels.js";
 
 const PAGE = 50;
 
@@ -171,7 +172,7 @@ export default function Events() {
             <option value="">all event types</option>
             {byType.map((t) => (
               <option key={t.event_type ?? ""} value={t.event_type ?? ""}>
-                {t.event_type ?? "(none)"}
+                {t.event_type ? getEventLabel(t.event_type) : "(none)"}
               </option>
             ))}
           </select>
