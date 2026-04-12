@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-slate-100 font-mono antialiased;
+  font-feature-settings: "ss01", "cv11";
+}
+
+::selection {
+  background: #58a6ff33;
+}
+
+/* subtle scrollbars for the terminal aesthetic */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: #07090d;
+}
+*::-webkit-scrollbar-thumb {
+  background: #161b22;
+  border-radius: 2px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #30363d;
+}

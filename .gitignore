@@ -5,3 +5,5 @@ __pycache__/
 .idea/
 .vscode/
 *.log
+node_modules/
+vector_ui/frontend/dist/

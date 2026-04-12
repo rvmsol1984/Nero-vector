@@ -1,0 +1,35 @@
+version: "3.8"
+
+# NERO Vector - operator-facing web UI
+#
+# Deploy alongside the existing vector-ingest container. Shares the
+# nero-vector_default compose network so it can reach the PostgreSQL
+# instance used by vector-ingest. Runs on port 3005; intended to sit
+# behind Cloudflare Access for authentication.
+#
+# Usage:
+#   cd vector_ui && docker compose up -d --build
+
+services:
+  vector-ui:
+    build: .
+    image: nero-vector/vector-ui:latest
+    container_name: vector-ui
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      VECTOR_UI_LOG_LEVEL: INFO
+    ports:
+      - "3005:3005"
+    networks:
+      - nero-vector_default
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  nero-vector_default:
+    external: true
