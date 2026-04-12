@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
+import Avatar from "../components/Avatar.jsx";
+import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
-import { filenameFromObjectId, fmtNumber, fmtTime } from "../utils/format.js";
+import { filenameFromObjectId, fmtNumber, fmtRelative } from "../utils/format.js";
 
 const TENANT = "GameChange Solar";
 
@@ -19,8 +21,8 @@ export default function Governance() {
     setErr(null);
     Promise.all([
       api.govDlp(TENANT),
-      api.govExternalSharing(TENANT),
-      api.govBulkDownloads(TENANT),
+      api.govSharing(TENANT),
+      api.govDownloads(TENANT),
     ])
       .then(([d, s, b]) => {
         if (cancel) return;
@@ -40,186 +42,152 @@ export default function Governance() {
   }, []);
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="font-display text-2xl tracking-[0.2em]">
-          GOVERNANCE — GAMECHANGE SOLAR
-        </h1>
-        <p className="text-muted text-xs mt-1">
-          UAL-derived policy findings. Review queue for the operator.
-        </p>
+    <div className="space-y-5 animate-fade-in">
+      <div className="flex items-center gap-3 flex-wrap">
+        <h1 className="text-2xl font-bold">Governance</h1>
+        <TenantBadge name={TENANT} />
       </div>
+      <p className="text-white/50 text-sm -mt-3">
+        UAL-derived policy findings. Review queue for the operator.
+      </p>
 
       {err && (
-        <div className="border border-critical/40 bg-critical/10 text-critical text-xs px-3 py-2">
+        <div className="card border-critical/30 text-critical text-sm px-4 py-3">
           load error: {err}
         </div>
       )}
 
-      <GovSection
+      {/* ----- DLP Risk ----- */}
+      <Section
         title="DLP Risk"
         subtitle="Users who copied files onto removable media"
         count={dlp.length}
         loading={loading}
         empty="no removable-media activity detected"
       >
-        <table className="min-w-full text-[11px]">
-          <thead className="text-muted uppercase text-[10px] tracking-[0.2em]">
-            <tr>
-              <th className="text-left px-3 py-2">User</th>
-              <th className="text-right px-3 py-2">Events</th>
-              <th className="text-left px-3 py-2">Last Seen</th>
-              <th className="text-left px-3 py-2">Files Copied</th>
-              <th className="text-left px-3 py-2">Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {dlp.map((row) => (
-              <tr key={row.entity_key} className="hover:bg-white/[0.03]">
-                <td className="px-3 py-1.5 truncate max-w-[280px]">
-                  <Link
-                    to={`/users/${encodeURIComponent(row.entity_key)}?tab=files`}
-                    className="hover:text-accent"
-                  >
-                    {row.user_id}
-                  </Link>
-                </td>
-                <td className="px-3 py-1.5 text-right tabular-nums">
-                  {fmtNumber(row.event_count)}
-                </td>
-                <td className="px-3 py-1.5 text-muted whitespace-nowrap">
-                  {fmtTime(row.last_seen)}
-                </td>
-                <td className="px-3 py-1.5 text-muted">
-                  <FileList ids={row.object_ids} />
-                </td>
-                <td className="px-3 py-1.5">
-                  <ReviewBadge />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </GovSection>
+        {dlp.map((row) => (
+          <GovRow
+            key={row.entity_key}
+            row={row}
+            rightPill={<ReviewPill />}
+          >
+            <div className="text-[11px] text-white/50 mt-0.5 flex items-center gap-3 flex-wrap">
+              <span className="tabular-nums">
+                {fmtNumber(row.event_count)} events
+              </span>
+              <span className="opacity-60">·</span>
+              <span>last seen {fmtRelative(row.last_seen)}</span>
+              <FileList ids={row.files} />
+            </div>
+          </GovRow>
+        ))}
+      </Section>
 
-      <GovSection
+      {/* ----- External Sharing ----- */}
+      <Section
         title="External Sharing"
         subtitle="Anonymous or generated share links used"
         count={sharing.length}
         loading={loading}
         empty="no external link usage detected"
       >
-        <table className="min-w-full text-[11px]">
-          <thead className="text-muted uppercase text-[10px] tracking-[0.2em]">
-            <tr>
-              <th className="text-left px-3 py-2">User</th>
-              <th className="text-right px-3 py-2">Events</th>
-              <th className="text-left px-3 py-2">Last Seen</th>
-              <th className="text-left px-3 py-2">Event Type</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {sharing.map((row) => (
-              <tr key={row.entity_key} className="hover:bg-white/[0.03]">
-                <td className="px-3 py-1.5 truncate max-w-[320px]">
-                  <Link
-                    to={`/users/${encodeURIComponent(row.entity_key)}?tab=files`}
-                    className="hover:text-accent"
-                  >
-                    {row.user_id}
-                  </Link>
-                </td>
-                <td className="px-3 py-1.5 text-right tabular-nums">
-                  {fmtNumber(row.event_count)}
-                </td>
-                <td className="px-3 py-1.5 text-muted whitespace-nowrap">
-                  {fmtTime(row.last_seen)}
-                </td>
-                <td className="px-3 py-1.5 text-muted">{row.top_event_type}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </GovSection>
+        {sharing.map((row) => (
+          <GovRow
+            key={`${row.entity_key}-${row.event_type}`}
+            row={row}
+            rightPill={<MonitorPill />}
+          >
+            <div className="text-[11px] text-white/50 mt-0.5 flex items-center gap-3 flex-wrap">
+              <span className="tabular-nums">
+                {fmtNumber(row.event_count)} events
+              </span>
+              <span className="opacity-60">·</span>
+              <span>{row.event_type}</span>
+              <span className="opacity-60">·</span>
+              <span>last seen {fmtRelative(row.last_seen)}</span>
+            </div>
+          </GovRow>
+        ))}
+      </Section>
 
-      <GovSection
+      {/* ----- Bulk Downloads ----- */}
+      <Section
         title="Bulk Downloads"
-        subtitle="FileDownloadedFromBrowser > 10 in the last 24h"
+        subtitle="FileDownloadedFromBrowser > 5 in the last 24h"
         count={downloads.length}
         loading={loading}
         empty="no bulk download activity in the last 24h"
       >
-        <table className="min-w-full text-[11px]">
-          <thead className="text-muted uppercase text-[10px] tracking-[0.2em]">
-            <tr>
-              <th className="text-left px-3 py-2">User</th>
-              <th className="text-right px-3 py-2">Downloads</th>
-              <th className="text-left px-3 py-2">Last Seen</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {downloads.map((row) => (
-              <tr key={row.entity_key} className="hover:bg-white/[0.03]">
-                <td className="px-3 py-1.5 truncate max-w-[320px]">
-                  <Link
-                    to={`/users/${encodeURIComponent(row.entity_key)}?tab=files`}
-                    className="hover:text-accent"
-                  >
-                    {row.user_id}
-                  </Link>
-                </td>
-                <td className="px-3 py-1.5 text-right tabular-nums">
-                  {fmtNumber(row.download_count)}
-                </td>
-                <td className="px-3 py-1.5 text-muted whitespace-nowrap">
-                  {fmtTime(row.last_seen)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </GovSection>
+        {downloads.map((row) => (
+          <GovRow
+            key={row.entity_key}
+            row={{ ...row, event_count: row.download_count }}
+            rightPill={<MonitorPill />}
+          >
+            <div className="text-[11px] text-white/50 mt-0.5 flex items-center gap-3 flex-wrap">
+              <span className="tabular-nums">
+                {fmtNumber(row.download_count)} downloads
+              </span>
+              <span className="opacity-60">·</span>
+              <span>last seen {fmtRelative(row.last_seen)}</span>
+            </div>
+          </GovRow>
+        ))}
+      </Section>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
 
-function GovSection({ title, subtitle, count, loading, empty, children }) {
+function Section({ title, subtitle, count, loading, empty, children }) {
+  const isEmpty = !loading && count === 0;
   return (
-    <div className="bg-surface border border-border">
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+    <div className="card overflow-hidden">
+      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
         <div>
-          <div className="font-display text-sm tracking-[0.2em]">{title.toUpperCase()}</div>
-          <div className="text-[10px] text-muted mt-1 uppercase tracking-[0.15em]">
-            {subtitle}
-          </div>
+          <div className="text-base font-bold">{title}</div>
+          <div className="text-[11px] text-white/50 mt-0.5">{subtitle}</div>
         </div>
-        <span
-          className="inline-block px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] border border-accent/30 bg-accent/10 text-accent tabular-nums"
-        >
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-semibold bg-primary/15 border border-primary/40 text-primary-light tabular-nums">
           {count} {count === 1 ? "finding" : "findings"}
         </span>
       </div>
       {loading ? (
-        <div className="px-4 py-6 text-muted text-xs text-center">loading…</div>
-      ) : count === 0 ? (
-        <div className="px-4 py-6 text-muted text-xs text-center">{empty}</div>
+        <div className="px-5 py-8 text-white/40 text-sm text-center">loading…</div>
+      ) : isEmpty ? (
+        <div className="px-5 py-8 text-white/40 text-sm text-center">{empty}</div>
       ) : (
-        <div className="overflow-x-auto">{children}</div>
+        <div className="divide-y divide-white/5">{children}</div>
       )}
     </div>
   );
 }
 
-function ReviewBadge() {
+function GovRow({ row, rightPill, children }) {
+  return (
+    <Link
+      to={`/users/${encodeURIComponent(row.entity_key)}`}
+      className="flex items-center gap-3 px-5 py-4 hover:bg-white/[0.03] active:scale-[0.997] transition-all"
+    >
+      <Avatar email={row.user_id} tenant={row.client_name} size={36} />
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-sm truncate">{row.user_id}</div>
+        {children}
+      </div>
+      {rightPill}
+    </Link>
+  );
+}
+
+function ReviewPill() {
   return (
     <span
-      className="inline-block px-2 py-0.5 text-[10px] uppercase tracking-[0.15em] border whitespace-nowrap"
+      className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border whitespace-nowrap"
       style={{
-        color: "#d29922",
-        borderColor: "#d2992255",
-        backgroundColor: "#d2992214",
+        color: "#F97316",
+        borderColor: "#F9731655",
+        backgroundColor: "#F9731615",
       }}
     >
       Review Required
@@ -227,19 +195,32 @@ function ReviewBadge() {
   );
 }
 
-function FileList({ ids }) {
-  if (!ids || ids.length === 0) {
-    return <span className="text-muted">—</span>;
-  }
-  const first = ids.slice(0, 3).map(filenameFromObjectId).filter(Boolean);
-  const extra = ids.length - first.length;
-  const joined = first.join(", ");
+function MonitorPill() {
   return (
-    <span className="truncate inline-block max-w-[440px] align-bottom" title={ids.join("\n")}>
-      {joined}
-      {extra > 0 && (
-        <span className="text-muted"> · +{extra} more</span>
-      )}
+    <span
+      className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border whitespace-nowrap"
+      style={{
+        color: "#EAB308",
+        borderColor: "#EAB30855",
+        backgroundColor: "#EAB30815",
+      }}
+    >
+      Monitor
     </span>
+  );
+}
+
+function FileList({ ids }) {
+  if (!ids || ids.length === 0) return null;
+  const first = ids.slice(0, 2).map(filenameFromObjectId).filter(Boolean);
+  const extra = ids.length - first.length;
+  return (
+    <>
+      <span className="opacity-60">·</span>
+      <span className="truncate max-w-[340px]" title={ids.join("\n")}>
+        {first.join(", ")}
+        {extra > 0 && <span className="text-white/30"> · +{extra}</span>}
+      </span>
+    </>
   );
 }

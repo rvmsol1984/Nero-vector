@@ -40,12 +40,12 @@ export const api = {
 
   // ----- per-user detail ------------------------------------------------
   userProfile: (entityKey) => get(`/api/users/${path(entityKey)}`),
-  userEvents:  (entityKey, { workloads, event_types, limit = 100, offset = 0 } = {}) =>
-                 get(`/api/users/${path(entityKey)}/events${qs({ workloads, event_types, limit, offset })}`),
+  userEvents:  (entityKey, { workloads, event_types, workload, event_type, limit = 100, offset = 0 } = {}) =>
+                 get(`/api/users/${path(entityKey)}/events${qs({ workloads, event_types, workload, event_type, limit, offset })}`),
   userStats:   (entityKey) => get(`/api/users/${path(entityKey)}/stats`),
 
-  // ----- governance (GCS only for now) ----------------------------------
-  govDlp:             (tenant) => get(`/api/governance/dlp${qs({ tenant })}`),
-  govExternalSharing: (tenant) => get(`/api/governance/external-sharing${qs({ tenant })}`),
-  govBulkDownloads:   (tenant) => get(`/api/governance/bulk-downloads${qs({ tenant })}`),
+  // ----- governance -----------------------------------------------------
+  govDlp:       (tenant) => get(`/api/governance/dlp${qs({ tenant })}`),
+  govSharing:   (tenant) => get(`/api/governance/sharing${qs({ tenant })}`),
+  govDownloads: (tenant) => get(`/api/governance/downloads${qs({ tenant })}`),
 };

@@ -1,12 +1,18 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
+import Avatar from "../components/Avatar.jsx";
+import EventCard from "../components/EventCard.jsx";
+import StatRing from "../components/StatRing.jsx";
 import { api } from "../api.js";
-import StatCard from "../components/StatCard.jsx";
-import StatusBadge from "../components/StatusBadge.jsx";
-import TenantBadge from "../components/TenantBadge.jsx";
-import EventTypeBadge from "../components/EventTypeBadge.jsx";
-import { fmtNumber, fmtTime } from "../utils/format.js";
+import { fmtNumber } from "../utils/format.js";
+import { tenantColor } from "../utils/tenantColor.js";
+
+const TABS = [
+  { id: "feed",    label: "Feed"       },
+  { id: "types",   label: "By Type"    },
+  { id: "tenants", label: "By Tenant"  },
+];
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -14,6 +20,7 @@ export default function Dashboard() {
   const [byType, setByType] = useState([]);
   const [recent, setRecent] = useState([]);
   const [err, setErr] = useState(null);
+  const [tab, setTab] = useState("feed");
 
   useEffect(() => {
     let cancelled = false;
@@ -49,138 +56,185 @@ export default function Dashboard() {
   const maxType = Math.max(1, ...byType.map((r) => Number(r.count) || 0));
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fade-in">
       <div>
-        <h1 className="font-display text-2xl tracking-[0.2em]">OPERATIONS</h1>
-        <p className="text-muted text-xs mt-1">
+        <h1 className="text-2xl font-bold">Operations</h1>
+        <p className="text-white/50 text-sm mt-1">
           Unified audit telemetry across managed tenants.
         </p>
       </div>
 
       {err && (
-        <div className="border border-critical/40 bg-critical/10 text-critical text-xs px-3 py-2">
+        <div className="card border-critical/30 text-critical text-sm px-4 py-3">
           load error: {err}
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        <StatCard label="Total Events" value={fmtNumber(stats?.total_events)} />
-        <StatCard label="Active Tenants" value={fmtNumber(stats?.unique_tenants)} />
-        <StatCard
-          label="Events · 24h"
-          value={fmtNumber(stats?.events_24h)}
-          hint="rolling window"
+      {/* ----- tenant bubbles row ----- */}
+      <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
+        {byTenant.map((row) => {
+          const color = tenantColor(row.client_name);
+          return (
+            <Link
+              key={row.client_name}
+              to={`/events?tenant=${encodeURIComponent(row.client_name)}`}
+              className="card flex items-center gap-3 px-4 py-3 shrink-0 hover:bg-white/[0.03] active:scale-95 transition-all"
+            >
+              <Avatar email={row.client_name} tenant={row.client_name} size={40} />
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="h-1.5 w-1.5 rounded-full shrink-0"
+                    style={{ background: color }}
+                  />
+                  <span className="text-sm font-semibold truncate max-w-[180px]">
+                    {row.client_name}
+                  </span>
+                </div>
+                <div className="text-[11px] text-white/50 mt-0.5 tabular-nums">
+                  {fmtNumber(row.count)} events
+                </div>
+              </div>
+            </Link>
+          );
+        })}
+        {byTenant.length === 0 && (
+          <div className="text-white/40 text-sm">no tenants</div>
+        )}
+      </div>
+
+      {/* ----- 4 stat rings ----- */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatRing
+          value={stats?.total_events}
+          label="Total Events"
+          color="#2563EB"
         />
-        <StatCard label="Unique Users" value={fmtNumber(stats?.unique_users)} />
+        <StatRing
+          value={stats?.events_24h}
+          label="Events · 24h"
+          color="#10B981"
+        />
+        <StatRing
+          value={stats?.unique_users}
+          label="Unique Users"
+          color="#8B5CF6"
+        />
+        <StatRing
+          value={stats?.unique_tenants}
+          label="Active Tenants"
+          color="#F97316"
+        />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-surface border border-border p-4">
-          <div className="text-[10px] uppercase tracking-[0.25em] text-muted mb-3">
-            Event Types
-          </div>
-          <div className="space-y-2">
-            {byType.slice(0, 10).map((row) => (
-              <Link
-                key={row.event_type ?? "(none)"}
-                to={`/events?event_type=${encodeURIComponent(row.event_type ?? "")}`}
-                className="block group"
+      {/* ----- feed / by type / by tenant switcher ----- */}
+      <div className="card">
+        <div className="px-4 pt-3 flex items-center gap-2 border-b border-white/5">
+          {TABS.map((t) => {
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTab(t.id)}
+                className={`px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors ${
+                  active
+                    ? "border-primary text-primary-light"
+                    : "border-transparent text-white/50 hover:text-white"
+                }`}
               >
-                <div className="flex justify-between text-xs">
-                  <span className="truncate group-hover:text-accent transition-colors">
-                    {row.event_type ?? "(none)"}
-                  </span>
-                  <span className="text-muted">{fmtNumber(row.count)}</span>
-                </div>
-                <div className="h-1 bg-black/60 mt-1">
-                  <div
-                    className="h-1 bg-accent"
-                    style={{ width: `${(Number(row.count) / maxType) * 100}%` }}
-                  />
-                </div>
-              </Link>
-            ))}
-            {byType.length === 0 && (
-              <div className="text-muted text-xs">no data</div>
-            )}
-          </div>
-        </div>
-
-        <div className="bg-surface border border-border p-4">
-          <div className="text-[10px] uppercase tracking-[0.25em] text-muted mb-3">
-            By Tenant
-          </div>
-          <div className="space-y-2">
-            {byTenant.map((row) => (
-              <Link
-                key={row.client_name}
-                to={`/events?tenant=${encodeURIComponent(row.client_name)}`}
-                className="block group"
-              >
-                <div className="flex justify-between text-xs">
-                  <span className="group-hover:text-accent transition-colors">
-                    <TenantBadge name={row.client_name} />
-                  </span>
-                  <span className="text-muted">{fmtNumber(row.count)}</span>
-                </div>
-                <div className="h-1 bg-black/60 mt-1">
-                  <div
-                    className="h-1 bg-success"
-                    style={{ width: `${(Number(row.count) / maxTenant) * 100}%` }}
-                  />
-                </div>
-              </Link>
-            ))}
-            {byTenant.length === 0 && (
-              <div className="text-muted text-xs">no data</div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-surface border border-border">
-        <div className="px-4 py-3 border-b border-border text-[10px] uppercase tracking-[0.25em] text-muted flex items-center justify-between">
-          <span>Recent Events</span>
-          <Link to="/events" className="text-[10px] text-accent hover:underline">
+                {t.label}
+              </button>
+            );
+          })}
+          <Link
+            to="/events"
+            className="ml-auto text-[11px] text-primary-light hover:underline py-2"
+          >
             open events →
           </Link>
         </div>
-        <div className="divide-y divide-border">
-          {recent.map((ev) => (
-            <div
-              key={ev.id}
-              className="px-4 py-2 flex items-center text-[11px] gap-4 hover:bg-white/[0.03]"
-            >
-              <span className="text-muted shrink-0 w-44 whitespace-nowrap">
-                {fmtTime(ev.timestamp)}
-              </span>
-              <span className="shrink-0 w-40 truncate">
-                <TenantBadge name={ev.client_name} />
-              </span>
-              <Link
-                to={`/users/${encodeURIComponent(ev.entity_key)}`}
-                className="shrink-0 w-56 truncate hover:text-accent"
-                title={ev.user_id}
-              >
-                {ev.user_id}
-              </Link>
-              <div className="flex-1 min-w-0">
-                <EventTypeBadge type={ev.event_type} workload={ev.workload} />
-              </div>
-              <span className="shrink-0 text-muted w-36 truncate">
-                {ev.workload}
-              </span>
-              <span className="shrink-0 w-24">
-                <StatusBadge status={ev.result_status} />
-              </span>
-              <span className="shrink-0 text-muted w-32 truncate">
-                {ev.client_ip ?? ""}
-              </span>
+
+        <div className="p-4">
+          {tab === "feed" && (
+            <div className="space-y-3">
+              {recent.map((ev) => (
+                <EventCard key={ev.id} event={ev} />
+              ))}
+              {recent.length === 0 && (
+                <div className="text-white/40 text-sm text-center py-8">
+                  no events yet — waiting for ingest
+                </div>
+              )}
             </div>
-          ))}
-          {recent.length === 0 && (
-            <div className="px-4 py-6 text-muted text-xs text-center">
-              no events yet — waiting for ingest
+          )}
+
+          {tab === "types" && (
+            <div className="space-y-3">
+              {byType.slice(0, 12).map((row) => (
+                <Link
+                  key={row.event_type ?? "(none)"}
+                  to={`/events?event_type=${encodeURIComponent(row.event_type ?? "")}`}
+                  className="block group"
+                >
+                  <div className="flex justify-between text-sm">
+                    <span className="truncate group-hover:text-primary-light transition-colors">
+                      {row.event_type ?? "(none)"}
+                    </span>
+                    <span className="text-white/50 tabular-nums">
+                      {fmtNumber(row.count)}
+                    </span>
+                  </div>
+                  <div className="h-1.5 bg-black/30 mt-2 rounded-full overflow-hidden">
+                    <div
+                      className="h-1.5 bg-primary rounded-full"
+                      style={{ width: `${(Number(row.count) / maxType) * 100}%` }}
+                    />
+                  </div>
+                </Link>
+              ))}
+              {byType.length === 0 && (
+                <div className="text-white/40 text-sm text-center py-8">no data</div>
+              )}
+            </div>
+          )}
+
+          {tab === "tenants" && (
+            <div className="space-y-3">
+              {byTenant.map((row) => {
+                const color = tenantColor(row.client_name);
+                return (
+                  <Link
+                    key={row.client_name}
+                    to={`/events?tenant=${encodeURIComponent(row.client_name)}`}
+                    className="block group"
+                  >
+                    <div className="flex justify-between text-sm">
+                      <span
+                        className="group-hover:underline transition-colors"
+                        style={{ color }}
+                      >
+                        {row.client_name}
+                      </span>
+                      <span className="text-white/50 tabular-nums">
+                        {fmtNumber(row.count)}
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-black/30 mt-2 rounded-full overflow-hidden">
+                      <div
+                        className="h-1.5 rounded-full"
+                        style={{
+                          width: `${(Number(row.count) / maxTenant) * 100}%`,
+                          background: color,
+                        }}
+                      />
+                    </div>
+                  </Link>
+                );
+              })}
+              {byTenant.length === 0 && (
+                <div className="text-white/40 text-sm text-center py-8">no data</div>
+              )}
             </div>
           )}
         </div>

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../api.js";
+import Avatar from "../components/Avatar.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
-import { fmtNumber, fmtTime } from "../utils/format.js";
+import { api } from "../api.js";
+import { fmtNumber, fmtRelative } from "../utils/format.js";
 
 export default function Users() {
   const [tenant, setTenant] = useState("");
@@ -37,83 +38,83 @@ export default function Users() {
   }, [tenant]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 animate-fade-in">
       <div>
-        <h1 className="font-display text-2xl tracking-[0.2em]">USERS</h1>
-        <p className="text-muted text-xs mt-1">
+        <h1 className="text-2xl font-bold">Users</h1>
+        <p className="text-white/50 text-sm mt-1">
           Per-identity activity rollup across the audit stream.
         </p>
       </div>
 
-      <div className="flex items-center gap-3 text-xs">
-        <select
-          value={tenant}
-          onChange={(e) => setTenant(e.target.value)}
-          className="bg-surface border border-border px-2 py-1 text-slate-100 focus:outline-none focus:border-accent"
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={() => setTenant("")}
+          className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all active:scale-95 ${
+            !tenant
+              ? "bg-primary text-white"
+              : "bg-white/10 text-white/70 hover:bg-white/15"
+          }`}
         >
-          <option value="">all tenants</option>
-          {byTenant.map((t) => (
-            <option key={t.client_name} value={t.client_name}>
-              {t.client_name}
-            </option>
-          ))}
-        </select>
-        <span className="text-muted">{users.length} identities</span>
+          all tenants
+        </button>
+        {byTenant.map((t) => (
+          <button
+            key={t.client_name}
+            type="button"
+            onClick={() => setTenant(t.client_name)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all active:scale-95 ${
+              tenant === t.client_name
+                ? "bg-primary text-white"
+                : "bg-white/10 text-white/70 hover:bg-white/15"
+            }`}
+          >
+            {t.client_name}
+          </button>
+        ))}
+        <span className="ml-auto text-xs text-white/50 tabular-nums">
+          {users.length} identities
+        </span>
       </div>
 
       {err && (
-        <div className="border border-critical/40 bg-critical/10 text-critical text-xs px-3 py-2">
+        <div className="card border-critical/30 text-critical text-sm px-4 py-3">
           load error: {err}
         </div>
       )}
 
-      <div className="bg-surface border border-border overflow-x-auto">
-        <table className="min-w-full text-[11px]">
-          <thead className="text-muted uppercase text-[10px] tracking-[0.2em]">
-            <tr>
-              <th className="text-left px-3 py-2">User</th>
-              <th className="text-left px-3 py-2">Client</th>
-              <th className="text-right px-3 py-2">Events</th>
-              <th className="text-left px-3 py-2">Top Event Type</th>
-              <th className="text-left px-3 py-2">Last Seen</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {users.map((u) => (
-              <tr
-                key={u.entity_key}
-                className="hover:bg-white/[0.03] cursor-pointer"
-              >
-                <td className="px-3 py-1.5 truncate max-w-[460px]">
-                  <Link
-                    to={`/users/${encodeURIComponent(u.entity_key)}`}
-                    className="hover:text-accent"
-                    title={u.entity_key}
-                  >
-                    {u.user_id}
-                  </Link>
-                </td>
-                <td className="px-3 py-1.5 whitespace-nowrap">
-                  <TenantBadge name={u.client_name} />
-                </td>
-                <td className="px-3 py-1.5 text-right tabular-nums">
-                  {fmtNumber(u.event_count)}
-                </td>
-                <td className="px-3 py-1.5 text-muted">{u.top_event_type}</td>
-                <td className="px-3 py-1.5 text-muted whitespace-nowrap">
-                  {fmtTime(u.last_seen)}
-                </td>
-              </tr>
-            ))}
-            {!loading && users.length === 0 && (
-              <tr>
-                <td colSpan={5} className="px-3 py-6 text-muted text-center">
-                  no users
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <div className="space-y-2">
+        {users.map((u) => (
+          <Link
+            key={u.entity_key}
+            to={`/users/${encodeURIComponent(u.entity_key)}`}
+            className="card flex items-center gap-3 p-4 hover:bg-white/[0.03] active:scale-[0.997] transition-all"
+          >
+            <Avatar email={u.user_id} tenant={u.client_name} size={40} />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-semibold text-sm truncate max-w-[280px]">
+                  {u.user_id}
+                </span>
+                <TenantBadge name={u.client_name} />
+              </div>
+              <div className="flex items-center gap-3 mt-1 text-[11px] text-white/50">
+                <span className="tabular-nums">
+                  {fmtNumber(u.event_count)} events
+                </span>
+                <span className="opacity-60">·</span>
+                <span className="truncate">{u.top_event_type}</span>
+                <span className="opacity-60">·</span>
+                <span>last seen {fmtRelative(u.last_seen)}</span>
+              </div>
+            </div>
+          </Link>
+        ))}
+        {!loading && users.length === 0 && (
+          <div className="card text-white/50 text-sm text-center py-10">
+            no users
+          </div>
+        )}
       </div>
     </div>
   );

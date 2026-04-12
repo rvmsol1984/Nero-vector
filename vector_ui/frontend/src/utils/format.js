@@ -1,6 +1,6 @@
-// Shared formatting helpers + raw_json field extractors for O365 UAL events.
-// Nothing in here throws: if a payload doesn't match the expected shape the
-// extractor returns "" so the UI degrades to a blank cell.
+// Display + raw_json field extraction helpers for the O365 UAL shape.
+// Nothing in here throws: if the payload doesn't match the expected
+// shape the extractor returns "" so the UI degrades to a blank cell.
 
 // ---- display ---------------------------------------------------------------
 
@@ -16,28 +16,57 @@ export function fmtTime(iso) {
   return d.toISOString().replace("T", " ").slice(0, 19) + "Z";
 }
 
+export function fmtRelative(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const delta = (Date.now() - d.getTime()) / 1000;
+  if (delta < 60)      return `${Math.floor(delta)}s ago`;
+  if (delta < 3600)    return `${Math.floor(delta / 60)}m ago`;
+  if (delta < 86400)   return `${Math.floor(delta / 3600)}h ago`;
+  if (delta < 604800)  return `${Math.floor(delta / 86400)}d ago`;
+  return d.toISOString().slice(0, 10);
+}
+
+// Build a 2-letter avatar label out of an email address.
+//
+//   jane.doe@x.com  -> JD
+//   admin@x.com     -> AD
+//   (falsy)         -> ??
+export function initialsFrom(email) {
+  if (!email) return "??";
+  const name = String(email).split("@")[0];
+  const parts = name.split(/[._\-+]/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return name.slice(0, 2).toUpperCase();
+}
+
 // ---- workload -> accent color ---------------------------------------------
+// These are the FieldDesk-rebuild colors used as the left-border of event
+// cards, as the border/fill of EventTypeBadge, and anywhere else we tint by
+// workload.
 
 export const WORKLOAD_COLORS = {
-  AzureActiveDirectory: "#c084fc",
-  Exchange:             "#f0883e",
-  SharePoint:           "#58a6ff",
-  OneDrive:             "#3fb950",
+  AzureActiveDirectory: "#8B5CF6",
+  Exchange:             "#F97316",
+  SharePoint:           "#3B82F6",
+  OneDrive:             "#22C55E",
+  OneDriveForBusiness:  "#22C55E",
 };
 
 export function workloadColor(workload) {
-  return WORKLOAD_COLORS[workload] || "#8b949e";
+  return WORKLOAD_COLORS[workload] || "rgba(255,255,255,0.3)";
 }
 
 // ---- ObjectId / SharePoint helpers ----------------------------------------
 
-// ObjectId typically looks like
-//   https://<tenant>.sharepoint.com/sites/<site>/Shared%20Documents/path/file.docx
-// Strip query + fragment, take the trailing path segment, and URI-decode.
+// Take everything after the last / or \ and URI-decode it.
 export function filenameFromObjectId(id) {
   if (!id) return "";
   const clean = String(id).split("?")[0].split("#")[0];
-  const parts = clean.split("/");
+  const parts = clean.split(/[\\/]/);
   const last = parts[parts.length - 1] || clean;
   try {
     return decodeURIComponent(last);
@@ -46,7 +75,6 @@ export function filenameFromObjectId(id) {
   }
 }
 
-// Domain of the SharePoint / OneDrive site the event touched.
 export function siteDomain(raw) {
   const url = raw?.SiteUrl || raw?.Site;
   if (!url) return "";
@@ -108,12 +136,3 @@ export function deviceBrowser(raw, userAgent) {
   if (bt) return bt;
   return parseBrowser(userAgent);
 }
-
-// ---- legacy compatibility shim --------------------------------------------
-// (nothing new calls these, but keeps imports from older pages compiling
-// if anything is still around that imports them)
-
-export const extractDeviceName = deviceName;
-export const extractFolder = extractMailFolder;
-export const extractObjectId = (raw) => raw?.ObjectId ?? "";
-export const emailLabel = emailEventLabel;

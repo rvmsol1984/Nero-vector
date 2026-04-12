@@ -1,12 +1,18 @@
 import { tenantColor } from "../utils/tenantColor.js";
 
-export default function TenantBadge({ name, dim = false }) {
-  if (!name) return <span className="text-muted">—</span>;
+// Compact pill showing a tenant's brand color + name.
+export default function TenantBadge({ name }) {
+  if (!name) return <span className="text-white/40">—</span>;
   const color = tenantColor(name);
   return (
     <span
-      className="inline-flex items-center gap-1.5 whitespace-nowrap"
-      style={{ color, opacity: dim ? 0.8 : 1 }}
+      className="pill whitespace-nowrap"
+      style={{
+        color,
+        borderColor: `${color}55`,
+        backgroundColor: `${color}14`,
+        border: "1px solid",
+      }}
     >
       <span
         className="h-1.5 w-1.5 rounded-full"

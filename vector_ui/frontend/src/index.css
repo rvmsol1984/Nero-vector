@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: dark;
+}
+
 html,
 body,
 #root {
@@ -9,26 +13,88 @@ body,
 }
 
 body {
-  @apply bg-bg text-slate-100 font-mono antialiased;
-  font-feature-settings: "ss01", "cv11";
+  background: #0a0f1e;
+  color: #ffffff;
+  font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-::selection {
-  background: #58a6ff33;
+/* --------------------------------------------------------------------------
+ * Component classes -- referenced by className="card" / "bottom-nav-item"
+ * ------------------------------------------------------------------------ */
+
+.card {
+  background-color: #1a2235;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  box-shadow:
+    0 10px 15px -3px rgba(0, 0, 0, 0.35),
+    0 4px  6px -4px rgba(0, 0, 0, 0.35);
 }
 
-/* subtle scrollbars for the terminal aesthetic */
+.card-elevated {
+  background-color: #1e2d4a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+
+.bottom-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 16px;
+  border-radius: 12px;
+  transition: all 200ms ease-out;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+.bottom-nav-item:active {
+  transform: scale(0.95);
+}
+.bottom-nav-item.active {
+  color: #2563eb;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.pill-outline {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* --------------------------------------------------------------------------
+ * Scrollbars
+ * ------------------------------------------------------------------------ */
+
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-track {
-  background: #07090d;
+  background: transparent;
 }
 *::-webkit-scrollbar-thumb {
-  background: #161b22;
-  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: #30363d;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+::selection {
+  background: rgba(37, 99, 235, 0.35);
 }

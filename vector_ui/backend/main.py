@@ -301,43 +301,40 @@ def user_stats(entity_key: str) -> dict:
 
 
 # ============================================================================
-# governance (MVP: GCS only, all findings are UAL-derived)
+# governance (all findings are UAL-derived, tenant scoping handled by caller)
 # ============================================================================
-
-# Default tenant for the v0.1 governance board. Overridable via query param
-# once we expose tenant scoping in the UI.
-_DEFAULT_GOV_TENANT = "GameChange Solar"
 
 
 @app.get("/api/governance/dlp")
-def governance_dlp(tenant: str = Query(_DEFAULT_GOV_TENANT)) -> list[dict]:
+def governance_dlp(tenant: str | None = Query(None)) -> list[dict]:
     """Users who copied files onto removable media."""
     return db.fetch_all(
         """
         SELECT
             entity_key,
             user_id,
+            client_name,
             COUNT(*)::bigint AS event_count,
             MAX(timestamp)   AS last_seen,
             COALESCE(
                 array_agg(DISTINCT raw_json->>'ObjectId')
                     FILTER (WHERE raw_json->>'ObjectId' IS NOT NULL),
                 ARRAY[]::text[]
-            )                AS object_ids
+            )                AS files
         FROM vector_events
-        WHERE client_name = %s
-          AND event_type  = 'FileCreatedOnRemovableMedia'
-        GROUP BY entity_key, user_id
+        WHERE event_type  = 'FileCreatedOnRemovableMedia'
+          AND (%s::text IS NULL OR client_name = %s)
+        GROUP BY entity_key, user_id, client_name
         ORDER BY event_count DESC
         LIMIT 100
         """,
-        (tenant,),
+        (tenant, tenant),
     )
 
 
-@app.get("/api/governance/external-sharing")
-def governance_external_sharing(
-    tenant: str = Query(_DEFAULT_GOV_TENANT),
+@app.get("/api/governance/sharing")
+def governance_sharing(
+    tenant: str | None = Query(None),
 ) -> list[dict]:
     """Users who used anonymous or generated sharing links."""
     return db.fetch_all(
@@ -345,24 +342,25 @@ def governance_external_sharing(
         SELECT
             entity_key,
             user_id,
-            COUNT(*)::bigint                          AS event_count,
-            MAX(timestamp)                            AS last_seen,
-            mode() WITHIN GROUP (ORDER BY event_type) AS top_event_type
+            client_name,
+            event_type,
+            COUNT(*)::bigint AS event_count,
+            MAX(timestamp)   AS last_seen
         FROM vector_events
-        WHERE client_name = %s
-          AND event_type IN ('AnonymousLinkUsed', 'SharingLinkUsed')
-        GROUP BY entity_key, user_id
+        WHERE event_type IN ('AnonymousLinkUsed', 'SharingLinkUsed')
+          AND (%s::text IS NULL OR client_name = %s)
+        GROUP BY entity_key, user_id, client_name, event_type
         ORDER BY event_count DESC
         LIMIT 100
         """,
-        (tenant,),
+        (tenant, tenant),
     )
 
 
-@app.get("/api/governance/bulk-downloads")
-def governance_bulk_downloads(
-    tenant: str = Query(_DEFAULT_GOV_TENANT),
-    threshold: int = Query(10, ge=1, le=1000),
+@app.get("/api/governance/downloads")
+def governance_downloads(
+    tenant: str | None = Query(None),
+    threshold: int = Query(5, ge=1, le=1000),
 ) -> list[dict]:
     """Users running FileDownloadedFromBrowser > threshold in the last 24h."""
     return db.fetch_all(
@@ -370,18 +368,19 @@ def governance_bulk_downloads(
         SELECT
             entity_key,
             user_id,
+            client_name,
             COUNT(*)::bigint AS download_count,
             MAX(timestamp)   AS last_seen
         FROM vector_events
-        WHERE client_name = %s
-          AND event_type  = 'FileDownloadedFromBrowser'
+        WHERE event_type = 'FileDownloadedFromBrowser'
           AND timestamp >= now() - INTERVAL '24 hours'
-        GROUP BY entity_key, user_id
+          AND (%s::text IS NULL OR client_name = %s)
+        GROUP BY entity_key, user_id, client_name
         HAVING COUNT(*) > %s
         ORDER BY download_count DESC
         LIMIT 100
         """,
-        (tenant, threshold),
+        (tenant, tenant, threshold),
     )
 
 

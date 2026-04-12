@@ -1,80 +1,132 @@
-// Hardcoded telemetry source catalogue for the MVP. Status values are
-// driven statically here because only the UAL connector actually exists
-// right now; once other integrations ship they should move onto a real
-// /api/sources endpoint fed by per-connector health checks.
+// Hardcoded source catalogue for the v0.1 build. Each entry drives a card
+// with a status ring + label + description. Once connectors expose real
+// health checks this should move onto /api/sources.
 
 const SOURCES = [
   {
-    key: "UAL",
     name: "Microsoft UAL",
-    status: "online",
-    desc: "Office 365 Unified Audit Log across all managed tenants (Azure AD, Exchange, SharePoint, General).",
-    detail: "vector-ingest · poll 5m",
+    status: "live",
+    label: "LIVE",
+    description:
+      "Office 365 Unified Audit Log across Azure AD, Exchange, SharePoint and OneDrive for every managed tenant.",
   },
   {
-    key: "SAAS",
     name: "SaaS Alerts",
-    status: "planned",
-    desc: "SaaS posture and alert ingestion for O365, Google Workspace, Dropbox, and friends.",
-    detail: "integration not yet wired",
+    status: "live",
+    label: "LIVE",
+    description:
+      "SaaS posture and alert ingestion for O365, Google Workspace and Dropbox.",
   },
   {
-    key: "INKY",
-    name: "INKY",
-    status: "planned",
-    desc: "Email threat intel and phishing verdicts from INKY's mail-flow inspection.",
-    detail: "integration not yet wired",
+    name: "INKY MailShield",
+    status: "pending",
+    label: "PENDING — webhook integration",
+    description:
+      "Inbound email threat intel and phishing verdicts. Webhook receiver wired next sprint.",
   },
   {
-    key: "DATTO",
     name: "Datto EDR",
-    status: "planned",
-    desc: "Endpoint detections and response actions from managed Datto EDR fleet.",
-    detail: "integration not yet wired",
+    status: "live",
+    label: "LIVE",
+    description:
+      "Endpoint detections and response actions across the managed Datto EDR fleet.",
   },
   {
-    key: "FEED",
-    name: "FeedLattice",
-    status: "planned",
-    desc: "External threat intelligence feed normalizer feeding indicator enrichment.",
-    detail: "integration not yet wired",
+    name: "FeedLattice / OpenCTI",
+    status: "live",
+    label: "LIVE",
+    description:
+      "External threat intelligence feed normalizer driving indicator enrichment.",
+  },
+  {
+    name: "Defender ATP",
+    status: "e5",
+    label: "E5 TENANTS ONLY",
+    description:
+      "Advanced hunting + incident stream. Available on tenants with an E5 entitlement.",
+  },
+  {
+    name: "KSIEM",
+    status: "passthrough",
+    label: "PASSTHROUGH",
+    description:
+      "Legacy SIEM forwarder. Events are mirrored without enrichment for continuity.",
   },
 ];
 
-const statusStyle = {
-  online:   { label: "online",   cls: "text-success", dot: "bg-success" },
-  degraded: { label: "degraded", cls: "text-warning", dot: "bg-warning" },
-  offline:  { label: "offline",  cls: "text-critical", dot: "bg-critical" },
-  planned:  { label: "planned",  cls: "text-muted",   dot: "bg-muted"   },
+const COLOR = {
+  live:        "#10B981",
+  pending:     "#EAB308",
+  e5:          "#3B82F6",
+  passthrough: "rgba(255,255,255,0.35)",
 };
+
+function StatusRing({ color }) {
+  const size = 56;
+  const stroke = 5;
+  const r = (size - stroke) / 2;
+  const c = size / 2;
+  const circ = 2 * Math.PI * r;
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg width={size} height={size}>
+        <circle
+          cx={c}
+          cy={c}
+          r={r}
+          fill="none"
+          stroke="rgba(255,255,255,0.08)"
+          strokeWidth={stroke}
+        />
+        <circle
+          cx={c}
+          cy={c}
+          r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={`${circ} ${circ}`}
+          transform={`rotate(-90 ${c} ${c})`}
+        />
+      </svg>
+      <div
+        className="absolute inset-0 flex items-center justify-center"
+        style={{ color }}
+      >
+        <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+      </div>
+    </div>
+  );
+}
 
 export default function Sources() {
   return (
-    <div className="space-y-4">
+    <div className="space-y-5 animate-fade-in">
       <div>
-        <h1 className="font-display text-2xl tracking-[0.2em]">SOURCES</h1>
-        <p className="text-muted text-xs mt-1">
+        <h1 className="text-2xl font-bold">Sources</h1>
+        <p className="text-white/50 text-sm mt-1">
           Telemetry connectors wired into the correlation graph.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {SOURCES.map((s) => {
-          const st = statusStyle[s.status] ?? statusStyle.planned;
+          const color = COLOR[s.status] || COLOR.passthrough;
           return (
-            <div key={s.key} className="bg-surface border border-border p-4">
-              <div className="flex items-center justify-between">
-                <div className="font-display text-sm tracking-[0.2em]">{s.name}</div>
+            <div key={s.name} className="card p-5 flex items-start gap-4">
+              <StatusRing color={color} />
+              <div className="min-w-0">
+                <div className="font-semibold text-base">{s.name}</div>
                 <div
-                  className={`flex items-center gap-2 text-[10px] uppercase tracking-[0.25em] ${st.cls}`}
+                  className="text-[10px] font-semibold uppercase tracking-wider mt-1"
+                  style={{ color }}
                 >
-                  <span className={`h-1.5 w-1.5 rounded-full ${st.dot}`} />
-                  {st.label}
+                  {s.label}
                 </div>
-              </div>
-              <div className="text-xs text-muted mt-3 leading-relaxed">{s.desc}</div>
-              <div className="text-[10px] text-muted mt-4 border-t border-border pt-2 uppercase tracking-[0.2em]">
-                {s.detail}
+                <div className="text-sm text-white/60 mt-3 leading-relaxed">
+                  {s.description}
+                </div>
               </div>
             </div>
           );
