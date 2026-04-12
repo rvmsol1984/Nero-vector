@@ -12,7 +12,12 @@ version: "3.8"
 
 services:
   vector-ui:
-    build: .
+    build:
+      # Build context is the repo root so the Dockerfile can pull
+      # vector_ingest/inky_receiver.py into the image alongside the
+      # vector_ui backend + frontend bundle.
+      context: ..
+      dockerfile: vector_ui/Dockerfile
     image: nero-vector/vector-ui:latest
     container_name: vector-ui
     restart: unless-stopped

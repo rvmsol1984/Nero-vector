@@ -83,3 +83,19 @@ def fetch_one(sql: str, params: tuple[Any, ...] | None = None) -> dict | None:
         cur.execute(sql, params or ())
         row = cur.fetchone()
         return dict(row) if row else None
+
+
+def execute_returning(sql: str, params: tuple[Any, ...] | None = None) -> dict | None:
+    """Execute a mutation with RETURNING and hand back the first row as a dict.
+
+    Used by the INKY receiver to INSERT ... RETURNING id. Because the
+    shared pool runs every connection in autocommit, no explicit commit
+    is needed -- the row is durable the moment execute() returns.
+    """
+    with _cursor() as cur:
+        cur.execute(sql, params or ())
+        try:
+            row = cur.fetchone()
+        except psycopg2.ProgrammingError:
+            row = None
+    return dict(row) if row else None

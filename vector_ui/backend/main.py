@@ -18,6 +18,15 @@ from fastapi.staticfiles import StaticFiles
 
 from backend import db
 
+# ---------------------------------------------------------------------------
+# Routers from sibling packages. vector_ingest.inky_receiver is copied into
+# the vector-ui image so the webhook can share this process's db pool.
+# ---------------------------------------------------------------------------
+try:
+    from vector_ingest.inky_receiver import router as inky_router
+except ImportError:  # pragma: no cover - local dev without the file
+    inky_router = None
+
 logging.basicConfig(
     level=os.environ.get("VECTOR_UI_LOG_LEVEL", "INFO").upper(),
     format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
@@ -25,6 +34,9 @@ logging.basicConfig(
 logger = logging.getLogger("vector_ui")
 
 app = FastAPI(title="NERO Vector UI", version="0.1.0")
+
+if inky_router is not None:
+    app.include_router(inky_router)
 
 # Wide-open CORS: access is gated by Cloudflare Access upstream.
 app.add_middleware(
