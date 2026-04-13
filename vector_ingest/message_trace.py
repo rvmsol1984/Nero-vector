@@ -1,23 +1,30 @@
-"""Office 365 Reporting Web Service -- MessageTrace poller.
+"""Microsoft Graph-based message metadata ingestion.
 
-Polls every 15 minutes per tenant to pull email envelope metadata
-(from / to / subject / size / status / direction) into
-vector_message_trace. Uses the same client_credentials flow as the
-UAL poller but requests a token scoped to manage.office.com.
+Replaces the deprecated reports.office365.com MessageTrace endpoint
+(which doesn't support app-only auth) with a two-track Graph approach
+depending on the tenant's license tier:
 
-Pagination: the Reporting Web Service returns at most 1000 rows per
-page; we walk $skip until a short page (or an empty page) comes back.
+    E5             -> POST /v1.0/security/runHuntingQuery with an
+                      EmailEvents KQL query. Returns up to 1000 rows
+                      per cycle with real from/to/subject and
+                      Defender threat classifications. Requires
+                      ThreatHunting.Read.All plus a Microsoft 365
+                      Defender / XDR entitlement.
 
-Endpoint:
-    https://reports.office365.com/ecp/reportingwebservice/reporting.svc/MessageTrace
-        ?$format=json
-        &StartDate=YYYY-MM-DDTHH:MM:SSZ
-        &EndDate=YYYY-MM-DDTHH:MM:SSZ
-        &$skip=<int>
-        &$top=1000
+    BizPremium etc -> GET /v1.0/reports/getEmailActivityUserDetail
+                      (period='D7'). Returns per-user send/receive/
+                      read counts -- no individual messages, but
+                      available on every license tier with
+                      Reports.Read.All. Rows are stored in
+                      vector_message_trace as one synthetic "activity"
+                      row per user per report refresh date.
 
-Checkpoint stored as content_type = 'MessageTrace' in
-vector_ingest_state.
+Auth: client_credentials against https://graph.microsoft.com/.default
+(same pattern as the UAL ingestor, different scope). Token cached
+per-instance with a 5-minute refresh skew.
+
+Polls every 15 minutes per tenant. Checkpoint lives in
+vector_ingest_state with content_type='MessageTrace'.
 """
 
 from __future__ import annotations
@@ -33,37 +40,42 @@ from vector_ingest.db import Database
 logger = logging.getLogger(__name__)
 
 
-REPORTING_BASE = "https://reports.office365.com/ecp/reportingwebservice/reporting.svc"
-REPORTING_MT_URL = f"{REPORTING_BASE}/MessageTrace"
-MANAGE_RESOURCE = "https://manage.office.com"
+GRAPH_RESOURCE = "https://graph.microsoft.com"
+GRAPH_HUNTING_URL = f"{GRAPH_RESOURCE}/v1.0/security/runHuntingQuery"
+GRAPH_EMAIL_ACTIVITY_URL = (
+    f"{GRAPH_RESOURCE}/v1.0/reports/getEmailActivityUserDetail(period='D7')"
+    "?$format=application/json"
+)
 
 TOKEN_REFRESH_SKEW = timedelta(minutes=5)
 POLL_INTERVAL = timedelta(minutes=15)
-PAGE_SIZE = 1000
-# Safety cap: ~20k messages per tenant per cycle before we bail out and
-# rely on the next tick to catch up.
-MAX_PAGES_PER_CYCLE = 20
-DEFAULT_LOOKBACK = timedelta(hours=1)
+
+HUNTING_QUERY = (
+    "EmailEvents "
+    "| where Timestamp > ago(1h) "
+    "| project Timestamp, SenderFromAddress, RecipientEmailAddress, "
+    "Subject, DeliveryAction, ThreatTypes, DetectionMethods "
+    "| limit 1000"
+)
+
+
+class HuntingUnavailable(Exception):
+    """Raised when the E5 hunting path can't be used and we should fall back."""
 
 
 def _parse_iso(value: Any) -> datetime | None:
-    """Parse a MessageTrace timestamp into a naive-UTC datetime."""
     if not value:
         return None
     raw = str(value)
-    # Reporting API sometimes wraps Date fields as /Date(1713000000000)/
-    if raw.startswith("/Date(") and raw.endswith(")/"):
-        try:
-            millis = int(raw[6:-2].split("+", 1)[0].split("-", 1)[0])
-            return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).replace(tzinfo=None)
-        except Exception:
-            return None
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(raw)
     except ValueError:
-        return None
+        try:
+            dt = datetime.fromisoformat(raw.split(".")[0] + "+00:00")
+        except ValueError:
+            return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
@@ -88,26 +100,33 @@ class MessageTraceIngestor:
         client_id: str,
         client_secret: str,
         db: Database,
+        license_tier: str = "BizPremium",
     ) -> None:
         self.tenant_id = tenant_id
         self.client_name = client_name
         self.client_id = client_id
         self.client_secret = client_secret
         self.db = db
+        self.license_tier = str(license_tier or "").upper()
 
         self._token: str | None = None
         self._token_expiry: datetime = datetime.fromtimestamp(0, tz=timezone.utc)
         self._session = requests.Session()
         self._last_poll: datetime = datetime.fromtimestamp(0, tz=timezone.utc)
 
-    # ---------- auth
+        # Sticky method choice. Set after the first successful cycle so we
+        # don't pay the hunting 403 round-trip on every poll for tenants
+        # that don't have the XDR entitlement.
+        self._method: str | None = None
+
+    # ------------------------------------------------------------------ auth
     def _get_token(self) -> str:
         now = datetime.now(timezone.utc)
         if self._token and now + TOKEN_REFRESH_SKEW < self._token_expiry:
             return self._token
 
         logger.info(
-            "message_trace token refresh",
+            "[message_trace] token refresh",
             extra={"tenant_id": self.tenant_id, "client_name": self.client_name},
         )
         url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
@@ -117,7 +136,7 @@ class MessageTraceIngestor:
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
-                "scope": f"{MANAGE_RESOURCE}/.default",
+                "scope": f"{GRAPH_RESOURCE}/.default",
             },
             timeout=30,
         )
@@ -134,172 +153,319 @@ class MessageTraceIngestor:
             "Accept": "application/json",
         }
 
-    # ---------- extraction helpers
-    def _extract_direction(self, msg: dict) -> str | None:
-        """Infer IN/OUT from sender/recipient when Direction isn't explicit."""
-        direct = msg.get("Direction") or msg.get("direction")
-        if direct:
-            s = str(direct).strip().lower()
-            if s.startswith("in"):
-                return "IN"
-            if s.startswith("out"):
-                return "OUT"
-            return str(direct)
-        # Heuristic: if original_client_ip is present and sender domain != tenant
-        # verified domain list we don't know, so leave null.
-        return None
+    # ------------------------------------------------------------------ hunting path (E5)
+    def _poll_hunting(self) -> int:
+        """Run the EmailEvents KQL query. Returns the number of rows written.
 
-    def _normalize(self, msg: dict) -> dict | None:
-        if not isinstance(msg, dict):
-            return None
-        message_id = (
-            msg.get("MessageId")
-            or msg.get("message_id")
-            or msg.get("MessageTraceId")
-            or msg.get("messageTraceId")
+        Raises HuntingUnavailable on any response that looks like "your
+        tenant doesn't have this feature" (401/403, or a Graph error
+        body mentioning the subscription) so the caller can fall back
+        to the activity report.
+        """
+        logger.info(
+            "[message_trace] hunting poll start",
+            extra={
+                "tenant_id": self.tenant_id,
+                "client_name": self.client_name,
+                "method": "graph_hunting",
+            },
         )
-        if not message_id:
+
+        try:
+            resp = self._session.post(
+                GRAPH_HUNTING_URL,
+                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                json={"Query": HUNTING_QUERY},
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "[message_trace] hunting request failed",
+                extra={"tenant_id": self.tenant_id, "error": str(exc)},
+            )
+            raise HuntingUnavailable(str(exc)) from exc
+
+        if resp.status_code in (401, 403):
+            logger.warning(
+                "[message_trace] hunting denied, tenant likely not licensed",
+                extra={
+                    "tenant_id": self.tenant_id,
+                    "status": resp.status_code,
+                    "body_head": resp.text[:200],
+                },
+            )
+            # Clear the token so the next attempt re-auths cleanly.
+            if resp.status_code == 401:
+                self._token = None
+            raise HuntingUnavailable(
+                f"{resp.status_code}: {resp.text[:200]}"
+            )
+        if resp.status_code >= 400:
+            logger.error(
+                "[message_trace] hunting http error",
+                extra={
+                    "tenant_id": self.tenant_id,
+                    "status": resp.status_code,
+                    "body_head": resp.text[:200],
+                },
+            )
+            raise HuntingUnavailable(
+                f"{resp.status_code}: {resp.text[:200]}"
+            )
+
+        try:
+            body = resp.json() or {}
+        except ValueError:
+            logger.error(
+                "[message_trace] hunting non-json response",
+                extra={"tenant_id": self.tenant_id, "body_head": resp.text[:200]},
+            )
+            raise HuntingUnavailable("non-json response")
+
+        results = body.get("results") or body.get("Results") or []
+        written = 0
+        max_received = None
+        for r in results:
+            row = self._normalize_hunting(r)
+            if not row:
+                continue
+            try:
+                if self.db.insert_message_trace(row):
+                    written += 1
+                received = row.get("received")
+                if received and (max_received is None or received > max_received):
+                    max_received = received
+            except Exception:
+                logger.exception(
+                    "[message_trace] hunting insert failed",
+                    extra={"tenant_id": self.tenant_id},
+                )
+
+        if max_received is not None:
+            self.db.update_checkpoint(
+                self.tenant_id, self.client_name, "MessageTrace", max_received
+            )
+
+        logger.info(
+            "[message_trace] hunting poll complete",
+            extra={
+                "tenant_id": self.tenant_id,
+                "client_name": self.client_name,
+                "method": "graph_hunting",
+                "seen": len(results),
+                "written": written,
+            },
+        )
+        return written
+
+    def _normalize_hunting(self, r: dict) -> dict | None:
+        if not isinstance(r, dict):
             return None
-        received = _parse_iso(msg.get("Received") or msg.get("received") or msg.get("DateReceived"))
+        received = _parse_iso(r.get("Timestamp"))
+        if received is None:
+            return None
+        sender = r.get("SenderFromAddress") or ""
+        recipient = r.get("RecipientEmailAddress") or ""
+        # Hunting rows don't give us a stable message id, so compose one
+        # from the tenant + timestamp + sender + recipient + subject. The
+        # ON CONFLICT (message_id) DO NOTHING then handles retry dedup.
+        subject = r.get("Subject") or ""
+        composite_id = (
+            f"graph-hunt-{self.tenant_id}-{received.isoformat()}"
+            f"-{sender}-{recipient}-{hash(subject) & 0xffffffff:08x}"
+        )[:500]
+        # Direction derived from DeliveryAction -- this field is always
+        # from the mailbox owner's perspective.
+        delivery_action = str(r.get("DeliveryAction") or "").lower()
+        if delivery_action:
+            direction = "IN"  # EmailEvents is inbound-focused
+        else:
+            direction = None
+
+        threat_types = r.get("ThreatTypes") or ""
+        status = str(r.get("DeliveryAction") or threat_types or "").strip() or None
+
         return {
             "tenant_id":         self.tenant_id,
             "client_name":       self.client_name,
-            "message_id":        str(message_id),
-            "sender_address":    msg.get("SenderAddress") or msg.get("Sender"),
-            "recipient_address": msg.get("RecipientAddress") or msg.get("Recipient"),
-            "subject":           msg.get("Subject"),
+            "message_id":        composite_id,
+            "sender_address":    sender or None,
+            "recipient_address": recipient or None,
+            "subject":           subject or None,
             "received":          received,
-            "status":            msg.get("Status"),
-            "size_bytes":        _to_int(msg.get("Size") or msg.get("SizeBytes")),
-            "direction":         self._extract_direction(msg),
-            "original_client_ip": msg.get("OriginalClientIp") or msg.get("FromIP"),
+            "status":            status,
+            "size_bytes":        None,
+            "direction":         direction,
+            "original_client_ip": None,
         }
 
-    # ---------- orchestration
+    # ------------------------------------------------------------------ activity report (fallback)
+    def _poll_activity_report(self) -> int:
+        """Per-user 7-day email activity rollup. Available on every tier
+        with Reports.Read.All. Stored as one synthetic row per user per
+        refresh date so downstream joins still work even though we don't
+        have individual messages on this path."""
+        logger.info(
+            "[message_trace] activity-report poll start",
+            extra={
+                "tenant_id": self.tenant_id,
+                "client_name": self.client_name,
+                "method": "graph_activity_report",
+            },
+        )
+
+        try:
+            resp = self._session.get(
+                GRAPH_EMAIL_ACTIVITY_URL,
+                headers=self._auth_headers(),
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "[message_trace] activity-report request failed",
+                extra={"tenant_id": self.tenant_id, "error": str(exc)},
+            )
+            return 0
+
+        if resp.status_code == 401:
+            self._token = None
+            try:
+                resp = self._session.get(
+                    GRAPH_EMAIL_ACTIVITY_URL,
+                    headers=self._auth_headers(),
+                    timeout=60,
+                )
+            except requests.RequestException as exc:
+                logger.error(
+                    "[message_trace] activity-report retry failed",
+                    extra={"tenant_id": self.tenant_id, "error": str(exc)},
+                )
+                return 0
+
+        if resp.status_code >= 400:
+            logger.error(
+                "[message_trace] activity-report http error",
+                extra={
+                    "tenant_id": self.tenant_id,
+                    "status": resp.status_code,
+                    "body_head": resp.text[:200],
+                },
+            )
+            return 0
+
+        try:
+            body = resp.json() or {}
+        except ValueError:
+            logger.error(
+                "[message_trace] activity-report non-json response",
+                extra={"tenant_id": self.tenant_id, "body_head": resp.text[:200]},
+            )
+            return 0
+
+        values = body.get("value") or []
+        written = 0
+        for u in values:
+            row = self._normalize_activity(u)
+            if not row:
+                continue
+            try:
+                if self.db.insert_message_trace(row):
+                    written += 1
+            except Exception:
+                logger.exception(
+                    "[message_trace] activity-report insert failed",
+                    extra={"tenant_id": self.tenant_id},
+                )
+
+        # Use the report refresh date as the checkpoint so we don't
+        # re-ingest the same daily rollup over and over. The activity
+        # report is a daily snapshot, so once per UTC day is enough.
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        self.db.update_checkpoint(
+            self.tenant_id, self.client_name, "MessageTrace", today
+        )
+
+        logger.info(
+            "[message_trace] activity-report poll complete",
+            extra={
+                "tenant_id": self.tenant_id,
+                "client_name": self.client_name,
+                "method": "graph_activity_report",
+                "users": len(values),
+                "written": written,
+            },
+        )
+        return written
+
+    def _normalize_activity(self, u: dict) -> dict | None:
+        if not isinstance(u, dict):
+            return None
+        upn = u.get("userPrincipalName")
+        refresh = u.get("reportRefreshDate")
+        if not upn or not refresh:
+            return None
+        received = _parse_iso(refresh) or datetime.utcnow().replace(microsecond=0)
+
+        send = _to_int(u.get("sendCount")) or 0
+        recv = _to_int(u.get("receiveCount")) or 0
+        read = _to_int(u.get("readCount")) or 0
+        subject = f"Activity D7: send={send} recv={recv} read={read}"
+
+        # Synthetic idempotent id: one row per user per refresh date.
+        message_id = f"activity-{self.tenant_id}-{upn}-{refresh}"[:500]
+
+        return {
+            "tenant_id":         self.tenant_id,
+            "client_name":       self.client_name,
+            "message_id":        message_id,
+            "sender_address":    upn,
+            "recipient_address": upn,
+            "subject":           subject,
+            "received":          received,
+            "status":            "ACTIVITY",
+            "size_bytes":        send + recv,
+            "direction":         "ACTIVITY",
+            "original_client_ip": None,
+        }
+
+    # ------------------------------------------------------------------ orchestration
     def poll_once(self) -> None:
         now = datetime.now(timezone.utc)
         if now - self._last_poll < POLL_INTERVAL:
             return
         self._last_poll = now
 
-        checkpoint = self.db.get_checkpoint(self.tenant_id, "MessageTrace")
-        if checkpoint is None:
-            checkpoint = (now - DEFAULT_LOOKBACK).replace(tzinfo=None)
-        start = checkpoint
-        end = now.replace(tzinfo=None, microsecond=0)
-        if end <= start:
-            return
-
-        logger.info(
-            "[message_trace] starting poll",
-            extra={
-                "tenant_id": self.tenant_id,
-                "client_name": self.client_name,
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-            },
-        )
-
-        skip = 0
-        pages = 0
-        written = 0
-        seen = 0
-        max_received = start
-
-        while pages < MAX_PAGES_PER_CYCLE:
-            params = {
-                "$format": "json",
-                "StartDate": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "EndDate":   end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "$skip":     skip,
-                "$top":      PAGE_SIZE,
-            }
+        # License-tier routing. E5 gets the real hunting query; everything
+        # else (BizPremium, E3, …) gets the activity rollup fallback.
+        if self.license_tier == "E5" and self._method != "activity":
+            logger.info(
+                "[message_trace] using hunting path for E5 tenant",
+                extra={"tenant_id": self.tenant_id, "client_name": self.client_name},
+            )
             try:
-                resp = self._session.get(
-                    REPORTING_MT_URL,
-                    headers=self._auth_headers(),
-                    params=params,
-                    timeout=60,
-                )
-                if resp.status_code == 401:
-                    self._token = None
-                    resp = self._session.get(
-                        REPORTING_MT_URL,
-                        headers=self._auth_headers(),
-                        params=params,
-                        timeout=60,
-                    )
-                resp.raise_for_status()
-            except requests.HTTPError as exc:
-                logger.error(
-                    "message_trace fetch failed",
+                self._poll_hunting()
+                self._method = "hunting"
+                return
+            except HuntingUnavailable as exc:
+                logger.warning(
+                    "[message_trace] hunting unavailable, falling back to activity report",
                     extra={
                         "tenant_id": self.tenant_id,
-                        "status": exc.response.status_code if exc.response is not None else None,
+                        "client_name": self.client_name,
                         "error": str(exc),
                     },
                 )
-                return
-            except requests.RequestException as exc:
-                logger.error(
-                    "message_trace request error",
-                    extra={"tenant_id": self.tenant_id, "error": str(exc)},
-                )
-                return
-
-            try:
-                payload = resp.json() or {}
-            except ValueError:
-                logger.error(
-                    "message_trace non-json response",
-                    extra={"tenant_id": self.tenant_id, "body_head": resp.text[:200]},
-                )
-                return
-
-            # Response envelope variants across OData versions.
-            messages = (
-                payload.get("value")
-                or (payload.get("d") or {}).get("results")
-                or (payload.get("d") or {}).get("value")
-                or []
-            )
-            if not messages:
-                break
-
-            for msg in messages:
-                seen += 1
-                row = self._normalize(msg)
-                if not row:
-                    continue
-                try:
-                    if self.db.insert_message_trace(row):
-                        written += 1
-                    received = row.get("received")
-                    if received and received > max_received:
-                        max_received = received
-                except Exception:
-                    logger.exception(
-                        "message_trace insert failed",
-                        extra={"tenant_id": self.tenant_id, "message_id": row.get("message_id")},
-                    )
-
-            if len(messages) < PAGE_SIZE:
-                break
-            skip += len(messages)
-            pages += 1
-
-        if max_received > start:
-            self.db.update_checkpoint(
-                self.tenant_id, self.client_name, "MessageTrace", max_received
-            )
+                self._method = "activity"
+                # fall through to activity report below
 
         logger.info(
-            "[message_trace] poll complete",
+            "[message_trace] using activity-report path",
             extra={
                 "tenant_id": self.tenant_id,
                 "client_name": self.client_name,
-                "seen": seen,
-                "written": written,
-                "pages": pages + 1,
+                "license_tier": self.license_tier,
             },
         )
+        self._poll_activity_report()
+        if self._method is None:
+            self._method = "activity"

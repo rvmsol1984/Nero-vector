@@ -96,6 +96,7 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                 client_id=client_id,
                 client_secret=client_secret,
                 db=db,
+                license_tier=t.get("license_tier", "BizPremium"),
             )
         )
         if str(t.get("license_tier", "")).upper() == "E5":
