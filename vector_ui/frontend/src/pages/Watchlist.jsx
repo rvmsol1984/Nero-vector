@@ -43,31 +43,56 @@ function StatusPill({ status }) {
   );
 }
 
-// Live-updating countdown cell. Re-renders every second until the pin
-// expires, then flips to "expired".
-function Countdown({ expiresAt }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
+// 48-hour correlation windows are too long for a live MM:SS counter,
+// so we render a two-line cell instead:
+//   line 1: "in Xh Ym" (remaining time, recomputed on 30s auto-refresh)
+//   line 2: absolute expiry timestamp, e.g. "Expires Apr 15, 2026 at 4:00 PM"
+// The parent Watchlist page reloads every 30 seconds so the values stay
+// current without a per-second setInterval on every row.
+function ExpiresCell({ expiresAt }) {
   if (!expiresAt) return <span className="text-white/40">—</span>;
-  const target = new Date(expiresAt).getTime();
-  if (Number.isNaN(target)) return <span className="text-white/40">—</span>;
-  const diffMs = target - now;
-  if (diffMs <= 0) {
-    return <span className="text-white/40 font-mono text-[11px]">expired</span>;
+  const target = new Date(expiresAt);
+  if (Number.isNaN(target.getTime())) {
+    return <span className="text-white/40">—</span>;
   }
-  const mins = Math.floor(diffMs / 60000);
-  const secs = Math.floor((diffMs % 60000) / 1000);
-  const close = diffMs < 5 * 60 * 1000; // last 5 minutes => highlight
+
+  const diffMs = target.getTime() - Date.now();
+  if (diffMs <= 0) {
+    return (
+      <span className="font-mono text-[11px] text-white/40">expired</span>
+    );
+  }
+
+  const totalMinutes = Math.floor(diffMs / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const remaining =
+    hours > 0 ? `in ${hours}h ${minutes}m` : `in ${minutes}m`;
+  const closing = diffMs < 60 * 60 * 1000; // last hour glows red
+
+  const dateStr = target.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const timeStr = target.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+
   return (
-    <span
-      className="font-mono text-[11px] tabular-nums"
-      style={{ color: close ? "#EF4444" : "#EAB308" }}
-    >
-      {String(mins).padStart(2, "0")}:{String(secs).padStart(2, "0")}
-    </span>
+    <div className="leading-tight whitespace-nowrap">
+      <div
+        className="text-[11px] font-medium tabular-nums"
+        style={{ color: closing ? "#EF4444" : "#EAB308" }}
+      >
+        {remaining}
+      </div>
+      <div className="text-[10px] text-white/40 tabular-nums">
+        Expires {dateStr} at {timeStr}
+      </div>
+    </div>
   );
 }
 
@@ -214,7 +239,7 @@ export default function Watchlist() {
                         {sender || <span className="text-white/30">—</span>}
                       </td>
                       <td className="px-4 py-2.5 whitespace-nowrap">
-                        <Countdown expiresAt={row.expires_at} />
+                        <ExpiresCell expiresAt={row.expires_at} />
                       </td>
                       <td className="px-4 py-2.5">
                         <StatusPill status={row.status} />
@@ -226,7 +251,7 @@ export default function Watchlist() {
             </table>
           </div>
           <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40 flex items-center justify-between">
-            <span>Auto-refreshes every 30s · live countdowns tick every second</span>
+            <span>Correlation windows are 48h · auto-refreshes every 30s</span>
             <span className="tabular-nums">
               last updated {fmtTime(new Date().toISOString())}
             </span>

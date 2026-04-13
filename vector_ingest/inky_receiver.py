@@ -80,7 +80,7 @@ def _shutdown() -> None:
 # constants
 # ---------------------------------------------------------------------------
 
-CORRELATION_WINDOW = timedelta(minutes=60)
+CORRELATION_WINDOW = timedelta(hours=48)
 
 # Map INKY SIEM feed eventType strings to our canonical event_type values.
 EVENT_TYPE_MAP = {
@@ -359,7 +359,7 @@ async def ingest_inky(
                 _db_insert(INSERT_WATCHLIST_SQL, watchlist_row)
                 staged += 1
                 logger.info(
-                    "inky watchlist pin staged type=%s user=%s expires_in=60m",
+                    "inky watchlist pin staged type=%s user=%s expires_in=48h",
                     trigger_type,
                     recipient,
                 )
