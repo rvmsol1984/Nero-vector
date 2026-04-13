@@ -1212,6 +1212,212 @@ def _graph_get(path_with_query: str) -> dict:
         raise HTTPException(status_code=502, detail=f"graph failed: {exc}")
 
 
+# ---- Defender Advanced Hunting client -------------------------------------
+#
+# Separate from the Graph helper because Defender uses a different audience
+# (api.securitycenter.microsoft.com) and therefore a different token. Cached
+# per-process with the usual refresh skew.
+
+_DEFENDER_RESOURCE = "https://api.securitycenter.microsoft.com"
+_DEFENDER_HUNTING_URL = f"{_DEFENDER_RESOURCE}/api/advancedqueries/run"
+_DEFENDER_TOKEN_CACHE: dict = {"token": None, "expires_at": 0.0}
+
+
+def _get_defender_token() -> str:
+    now = time.monotonic()
+    cached = _DEFENDER_TOKEN_CACHE.get("token")
+    if cached and _DEFENDER_TOKEN_CACHE.get("expires_at", 0.0) > now + 60:
+        return cached
+
+    client_id = os.environ.get("VECTOR_CLIENT_ID")
+    client_secret = os.environ.get("VECTOR_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="VECTOR_CLIENT_ID / VECTOR_CLIENT_SECRET not configured",
+        )
+
+    url = f"https://login.microsoftonline.com/{_GCS_TENANT_ID}/oauth2/v2.0/token"
+    body = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": f"{_DEFENDER_RESOURCE}/.default",
+            "grant_type": "client_credentials",
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        logger.exception("defender token request failed")
+        raise HTTPException(status_code=502, detail=f"defender token failed: {exc}")
+
+    token = data.get("access_token")
+    if not token:
+        raise HTTPException(
+            status_code=502, detail="defender token response missing access_token"
+        )
+    _DEFENDER_TOKEN_CACHE["token"] = token
+    _DEFENDER_TOKEN_CACHE["expires_at"] = now + int(data.get("expires_in", 3600))
+    return token
+
+
+def _defender_run_hunting(query: str) -> list[dict]:
+    """POST a KQL query to /api/advancedqueries/run and return the Results array."""
+    token = _get_defender_token()
+    body = json.dumps({"Query": query}).encode("utf-8")
+    req = urllib.request.Request(_DEFENDER_HUNTING_URL, data=body, method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            resp_body = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            resp_body = ""
+        logger.error(
+            "defender hunting %s %s", exc.code, resp_body
+        )
+        raise HTTPException(
+            status_code=502, detail=f"defender {exc.code}: {resp_body}"
+        )
+    except Exception as exc:
+        logger.exception("defender hunting request failed")
+        raise HTTPException(status_code=502, detail=f"defender failed: {exc}")
+    return data.get("Results") or data.get("results") or []
+
+
+# ---- AI Activity governance endpoint --------------------------------------
+
+_AI_DOMAINS_SUMMARY_QUERY = """
+DeviceNetworkEvents
+| where Timestamp > ago(7d)
+| where RemoteUrl has_any (
+    "chat.openai.com", "api.openai.com", "chatgpt.com",
+    "claude.ai", "anthropic.com",
+    "gemini.google.com", "bard.google.com",
+    "deepseek.com",
+    "perplexity.ai",
+    "copilot.microsoft.com",
+    "huggingface.co",
+    "mistral.ai",
+    "grok.x.ai",
+    "you.com",
+    "poe.com"
+  )
+| summarize
+    visit_count=count(),
+    last_visit=max(Timestamp),
+    devices=make_set(DeviceName)
+  by InitiatingProcessAccountUpn, RemoteUrl
+| where InitiatingProcessAccountUpn != ""
+| order by visit_count desc
+| limit 200
+""".strip()
+
+_AI_DOMAINS_RAW_QUERY = """
+DeviceNetworkEvents
+| where Timestamp > ago(7d)
+| where RemoteUrl has_any (
+    "chat.openai.com", "api.openai.com", "chatgpt.com",
+    "claude.ai", "anthropic.com",
+    "gemini.google.com", "bard.google.com",
+    "deepseek.com",
+    "perplexity.ai",
+    "copilot.microsoft.com",
+    "huggingface.co",
+    "mistral.ai",
+    "grok.x.ai",
+    "you.com",
+    "poe.com"
+  )
+| project Timestamp, DeviceName, InitiatingProcessAccountUpn,
+          InitiatingProcessFileName, RemoteUrl, RemoteIP
+| order by Timestamp desc
+| limit 500
+""".strip()
+
+
+@app.get("/api/governance/ai-activity")
+def governance_ai_activity() -> dict:
+    """Combined Microsoft Copilot usage (from UAL) + external AI tool
+    access (from Defender Advanced Hunting) for the GCS tenant."""
+    copilot = db.fetch_all(
+        """
+        SELECT
+            user_id,
+            COUNT(*)::bigint AS event_count,
+            MAX(timestamp)   AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT event_type)
+                    FILTER (WHERE event_type IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS event_types
+        FROM vector_events
+        WHERE client_name = %s
+          AND workload    = 'Copilot'
+          AND user_id IS NOT NULL
+        GROUP BY user_id
+        ORDER BY event_count DESC
+        LIMIT 200
+        """,
+        (_GCS,),
+    )
+
+    external_ai: list[dict] = []
+    external_error: str | None = None
+    try:
+        rows = _defender_run_hunting(_AI_DOMAINS_SUMMARY_QUERY)
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            visit_raw = r.get("visit_count")
+            try:
+                visit_count = int(visit_raw) if visit_raw is not None else 0
+            except (TypeError, ValueError):
+                visit_count = 0
+            devices_raw = r.get("devices")
+            if isinstance(devices_raw, list):
+                devices = [str(d) for d in devices_raw if d]
+            elif isinstance(devices_raw, str):
+                devices = [devices_raw] if devices_raw else []
+            else:
+                devices = []
+            external_ai.append(
+                {
+                    "user":        r.get("InitiatingProcessAccountUpn"),
+                    "tool":        r.get("RemoteUrl"),
+                    "visit_count": visit_count,
+                    "last_visit":  r.get("last_visit"),
+                    "devices":     devices,
+                }
+            )
+    except HTTPException as exc:
+        external_error = str(exc.detail)
+        logger.warning(
+            "defender hunting failed for AI activity: %s", exc.detail
+        )
+
+    return {
+        "copilot":        copilot,
+        "external_ai":    external_ai,
+        "external_error": external_error,
+    }
+
+
+@app.get("/api/governance/ai-activity/external-raw")
+def governance_ai_activity_external_raw() -> list[dict]:
+    """Raw Defender rows (timestamp, device, upn, url, ip) for drill-down."""
+    rows = _defender_run_hunting(_AI_DOMAINS_RAW_QUERY)
+    return [r for r in rows if isinstance(r, dict)]
+
+
 @app.get("/api/governance/guest-users")
 def governance_guest_users() -> list[dict]:
     """List guest users in the GCS tenant via Microsoft Graph.

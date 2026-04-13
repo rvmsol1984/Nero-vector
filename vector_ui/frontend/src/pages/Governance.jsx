@@ -24,6 +24,7 @@ const TABS = [
   { id: "guestUsers",        label: "Guest Users",       endpoint: "govGuestUsers",        severity: "monitor",  withTenant: false },
   { id: "unmanagedDevices",  label: "Unmanaged Devices", endpoint: "govUnmanagedDevices",  severity: "review",   withTenant: false },
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
+  { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
 ];
 
 // GCS tenant -- hardcoded here because the Governance board is GCS-only and
@@ -200,6 +201,27 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     meta = raw;
   }
 
+  // AI Activity: render both sub-sections together, and only fall through
+  // to the generic empty state when both are empty.
+  if (tabId === "aiActivity") {
+    const copilot = Array.isArray(raw?.copilot) ? raw.copilot : [];
+    const external = Array.isArray(raw?.external_ai) ? raw.external_ai : [];
+    if (copilot.length === 0 && external.length === 0 && !raw?.external_error) {
+      return (
+        <div className="card">
+          <EmptyState message="No AI activity detected" />
+        </div>
+      );
+    }
+    return (
+      <AiActivityTab
+        copilot={copilot}
+        external={external}
+        externalError={raw?.external_error}
+      />
+    );
+  }
+
   // Special case: stale accounts with insufficient data -> informational
   // state instead of the generic green-check empty state.
   if (
@@ -240,6 +262,10 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     case "guestUsers":        return <GuestUsersTable rows={rows} />;
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
+    case "aiActivity":
+      // Handled above -- this branch is unreachable because TabPanel
+      // short-circuits on tabId === "aiActivity" before the switch.
+      return null;
     default: return null;
   }
 }
@@ -253,6 +279,7 @@ const SEVERITY = {
   review:   { label: "REVIEW REQUIRED", color: "#F97316" },
   monitor:  { label: "MONITOR",         color: "#EAB308" },
   clean:    { label: "CLEAN",           color: "#10B981" },
+  active:   { label: "ACTIVE",          color: "#3B82F6" },
 };
 
 function SeverityPill({ severity }) {
@@ -931,6 +958,257 @@ function Chevron({ open }) {
     >
       <polyline points="6 9 12 15 18 9" />
     </svg>
+  );
+}
+
+// ---- AI Activity tab -------------------------------------------------------
+
+// Friendly names for the AI tool domains the Defender KQL query filters on.
+// Keys are the hostnames we expect RemoteUrl to resolve to; anything not in
+// the map falls back to the raw hostname.
+const AI_TOOL_NAMES = {
+  "chat.openai.com":      "ChatGPT",
+  "chatgpt.com":          "ChatGPT",
+  "api.openai.com":       "ChatGPT (API)",
+  "claude.ai":            "Claude",
+  "anthropic.com":        "Anthropic",
+  "gemini.google.com":    "Gemini",
+  "bard.google.com":      "Bard",
+  "deepseek.com":         "DeepSeek",
+  "perplexity.ai":        "Perplexity",
+  "copilot.microsoft.com":"Copilot",
+  "huggingface.co":       "HuggingFace",
+  "mistral.ai":           "Mistral",
+  "grok.x.ai":            "Grok",
+  "you.com":              "You.com",
+  "poe.com":              "Poe",
+};
+
+function aiToolDisplay(remoteUrl) {
+  if (!remoteUrl) return { label: "—", host: "" };
+  const raw = String(remoteUrl).trim();
+  // Defender's RemoteUrl is usually just a hostname; if it's a full URL,
+  // pull the hostname out. Fall back to the raw string on any parse error.
+  let host = raw;
+  try {
+    const parsed = new URL(raw.startsWith("http") ? raw : `https://${raw}`);
+    host = parsed.hostname || raw;
+  } catch {
+    host = raw;
+  }
+  host = host.toLowerCase();
+  // Try exact match, then progressively shorter suffixes (so "www.claude.ai"
+  // still resolves to "Claude").
+  if (AI_TOOL_NAMES[host]) return { label: AI_TOOL_NAMES[host], host };
+  for (const key of Object.keys(AI_TOOL_NAMES)) {
+    if (host === key || host.endsWith(`.${key}`)) {
+      return { label: AI_TOOL_NAMES[key], host };
+    }
+  }
+  return { label: host, host };
+}
+
+function AiActivityTab({ copilot, external, externalError }) {
+  return (
+    <div className="space-y-5">
+      <AiCopilotSection rows={copilot} />
+      <AiExternalSection rows={external} error={externalError} />
+    </div>
+  );
+}
+
+function AiCopilotSection({ rows }) {
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
+        <div>
+          <div className="text-base font-bold">Microsoft Copilot</div>
+          <div className="text-[11px] text-white/50 mt-0.5">
+            Copilot workload usage from UAL for GameChange Solar
+          </div>
+        </div>
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-semibold bg-primary/15 border border-primary/40 text-primary-light tabular-nums">
+          {rows.length} {rows.length === 1 ? "user" : "users"}
+        </span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="px-5 py-8 text-white/40 text-sm text-center">
+          No Copilot activity detected
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-[11px]">
+            <thead>
+              <tr>
+                <Th>User</Th>
+                <Th align="right">Events</Th>
+                <Th>Event Types</Th>
+                <Th>Last Active</Th>
+                <Th>Status</Th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {rows.map((row) => {
+                const entityKey = `${GCS_TENANT_ID}::${row.user_id}`;
+                const types = Array.isArray(row.event_types) ? row.event_types : [];
+                return (
+                  <tr key={row.user_id} className="hover:bg-white/[0.03]">
+                    <td className="px-4 py-2.5">
+                      <UserCell
+                        entityKey={entityKey}
+                        userId={row.user_id}
+                        clientName="GameChange Solar"
+                      />
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">
+                      {fmtNumber(row.event_count)}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex flex-wrap gap-1">
+                        {types.slice(0, 4).map((t) => (
+                          <span
+                            key={t}
+                            className="inline-flex items-center px-1.5 py-[2px] text-[9px] font-semibold uppercase tracking-wide rounded border border-primary-light/30 bg-primary-light/10 text-primary-light whitespace-nowrap"
+                            title={t}
+                          >
+                            {getEventLabel(t)}
+                          </span>
+                        ))}
+                        {types.length > 4 && (
+                          <span className="text-[10px] text-white/40">
+                            +{types.length - 4}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                      {fmtRelative(row.last_seen)}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <SeverityPill severity="active" />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiExternalSection({ rows, error }) {
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
+        <div>
+          <div className="text-base font-bold">External AI Tools</div>
+          <div className="text-[11px] text-white/50 mt-0.5">
+            Users hitting third-party AI domains from managed devices
+          </div>
+        </div>
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-semibold bg-primary/15 border border-primary/40 text-primary-light tabular-nums">
+          {rows.length} {rows.length === 1 ? "user" : "users"}
+        </span>
+      </div>
+
+      <div
+        className="px-5 py-2 text-[11px] text-white/50 border-b border-white/5"
+        style={{ backgroundColor: "rgba(59,130,246,0.05)" }}
+      >
+        Detected via Defender endpoint telemetry. Shows AI tool domains
+        accessed from managed devices.
+      </div>
+
+      {error ? (
+        <div className="px-5 py-8 text-[11px] text-critical text-center">
+          Defender hunting query failed: {error}
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="px-5 py-8 text-white/40 text-sm text-center">
+          No external AI tool access detected on managed devices in the last 7 days
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-[11px]">
+            <thead>
+              <tr>
+                <Th>User</Th>
+                <Th>Tool</Th>
+                <Th align="right">Visits</Th>
+                <Th>Devices</Th>
+                <Th>Last Access</Th>
+                <Th>Status</Th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {rows.map((row, i) => {
+                const entityKey = row.user
+                  ? `${GCS_TENANT_ID}::${row.user}`
+                  : null;
+                const { label: toolLabel, host } = aiToolDisplay(row.tool);
+                const devices = Array.isArray(row.devices) ? row.devices : [];
+                return (
+                  <tr key={`${row.user}-${row.tool}-${i}`} className="hover:bg-white/[0.03]">
+                    <td className="px-4 py-2.5">
+                      {entityKey ? (
+                        <UserCell
+                          entityKey={entityKey}
+                          userId={row.user}
+                          clientName="GameChange Solar"
+                        />
+                      ) : (
+                        <span className="text-white/40">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="font-medium" title={host}>
+                        {toolLabel}
+                      </div>
+                      {host && host !== toolLabel && (
+                        <div
+                          className="text-[10px] text-white/40 font-mono truncate max-w-[240px]"
+                          title={host}
+                        >
+                          {host}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">
+                      {fmtNumber(row.visit_count)}
+                    </td>
+                    <td
+                      className="px-4 py-2.5 text-white/60 truncate max-w-[260px]"
+                      title={devices.join(", ")}
+                    >
+                      {devices.length === 0 ? (
+                        <span className="text-white/30">—</span>
+                      ) : devices.length === 1 ? (
+                        <span className="font-mono text-[10px]">{devices[0]}</span>
+                      ) : (
+                        <>
+                          <span className="font-mono text-[10px]">{devices[0]}</span>
+                          <span className="text-white/30">
+                            {" "}· +{devices.length - 1}
+                          </span>
+                        </>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                      {fmtRelative(row.last_visit)}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <SeverityPill severity="monitor" />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 
