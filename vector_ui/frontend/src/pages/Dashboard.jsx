@@ -32,7 +32,7 @@ export default function Dashboard() {
           api.stats(),
           api.byTenant(),
           api.byType(),
-          api.feedRecent(25),
+          api.dashboardFeed({ ual_limit: 50, inky_limit: 20 }),
         ]);
         if (cancelled) return;
         setStats(s);

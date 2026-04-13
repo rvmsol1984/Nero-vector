@@ -42,8 +42,8 @@ export const api = {
   // ----- global ---------------------------------------------------------
   stats:      () => get("/api/stats"),
   recent:     (limit = 50) => get(`/api/events/recent${qs({ limit })}`),
-  events:     ({ limit = 50, offset = 0, tenant, event_type, workload, user } = {}) =>
-                get(`/api/events/recent${qs({ limit, offset, tenant, event_type, workload, user })}`),
+  events:     ({ limit = 50, offset = 0, tenant, event_type, workload, user, source } = {}) =>
+                get(`/api/events/recent${qs({ limit, offset, tenant, event_type, workload, user, source })}`),
   eventById:  (id) => get(`/api/events/${encodeURIComponent(id)}`),
   byTenant:   () => get("/api/events/by-tenant"),
   byType:     (limit = 100) => get(`/api/events/by-type${qs({ limit })}`),
@@ -60,6 +60,9 @@ export const api = {
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
+  dashboardFeed: ({ ual_limit = 50, inky_limit = 20 } = {}) =>
+    get(`/api/dashboard/feed${qs({ ual_limit, inky_limit })}`),
+  inkyCount:   () => get("/api/sources/inky-count"),
   watchlist:   (status) => get(`/api/watchlist${qs({ status })}`),
 
   // ----- governance -----------------------------------------------------

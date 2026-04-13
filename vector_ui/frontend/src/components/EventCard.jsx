@@ -44,7 +44,10 @@ export default function EventCard({ event }) {
   const [open, setOpen] = useState(false);
   const [raw, setRaw] = useState(null);
 
-  const isInky = event.kind === "inky";
+  // Accept either the new `source` field (dashboard feed) or the legacy
+  // `kind` field (older /api/feed/recent rows) so EventCard renders
+  // correctly regardless of which endpoint the caller used.
+  const isInky = event.source === "inky" || event.kind === "inky";
   const color = isInky ? INKY_COLOR : workloadColor(event.workload);
 
   async function toggle() {

@@ -109,7 +109,49 @@ def events_recent(
     event_type: str | None = Query(None),
     workload: str | None = Query(None),
     user: str | None = Query(None, description="substring search over user_id"),
+    source: str | None = Query(
+        None,
+        description="'ual' (default) for vector_events, 'inky' to read from vector_inky_events",
+    ),
 ) -> list[dict]:
+    normalized_source = (source or "ual").strip().lower()
+    if normalized_source == "inky":
+        # Source = INKY: pull from vector_inky_events and project into
+        # the same row shape EventCard / Events page expects. user_id is
+        # the recipient, entity_key is synthesized tenant::recipient,
+        # workload is fixed to "INKY", and the verdict field doubles as
+        # result_status so the status pill still has something to show.
+        return db.fetch_all(
+            """
+            SELECT id::text,
+                   timestamp,
+                   client_name,
+                   tenant_id,
+                   recipient AS user_id,
+                   CASE
+                       WHEN tenant_id IS NOT NULL AND recipient IS NOT NULL
+                       THEN tenant_id || '::' || recipient
+                       ELSE NULL
+                   END       AS entity_key,
+                   event_type,
+                   'INKY'::text AS workload,
+                   verdict   AS result_status,
+                   NULL::text AS client_ip,
+                   'inky'::text AS source,
+                   subject,
+                   sender,
+                   verdict,
+                   aitm_detected
+            FROM vector_inky_events
+            WHERE (%s::text IS NULL OR client_name = %s)
+              AND (%s::text IS NULL OR event_type  = %s)
+              AND (%s::text IS NULL OR recipient ILIKE '%%' || %s || '%%')
+            ORDER BY timestamp DESC
+            LIMIT %s OFFSET %s
+            """,
+            (tenant, tenant, event_type, event_type, user, user, limit, offset),
+        )
+
     return db.fetch_all(
         """
         SELECT id::text,
@@ -121,7 +163,8 @@ def events_recent(
                event_type,
                workload,
                result_status,
-               client_ip
+               client_ip,
+               'ual'::text AS source
         FROM vector_events
         WHERE (%s::text IS NULL OR client_name = %s)
           AND (%s::text IS NULL OR event_type  = %s)
@@ -360,17 +403,17 @@ def user_emails(
 # unified feed (UAL + INKY together, sorted by timestamp)
 # ============================================================================
 
-@app.get("/api/feed/recent")
-def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
-    """Combined recent-activity feed. UAL and INKY rows are unioned into
-    a single list so the Dashboard feed can render both in one stream.
-    Each row carries a ``kind`` of "ual" or "inky" which the frontend
-    uses to pick the right card treatment."""
-    ual_rows = db.fetch_all(
+def _fetch_ual_feed_rows(limit: int) -> list[dict]:
+    """UAL rows projected into the shared feed shape. Carries both
+    ``kind`` and ``source`` set to ``"ual"`` so frontends still using
+    the original ``kind`` field (EventCard) keep working while new code
+    can prefer the ``source`` alias."""
+    return db.fetch_all(
         """
         SELECT
             id::text,
             'ual'::text      AS kind,
+            'ual'::text      AS source,
             timestamp,
             client_name,
             tenant_id,
@@ -390,11 +433,19 @@ def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
         """,
         (limit,),
     )
-    inky_rows = db.fetch_all(
+
+
+def _fetch_inky_feed_rows(limit: int) -> list[dict]:
+    """INKY rows projected into the shared feed shape. ``user_id``
+    is set to the recipient email and ``entity_key`` is synthesized
+    as ``tenant_id::recipient`` so the dashboard can deep-link to the
+    existing user detail page."""
+    return db.fetch_all(
         """
         SELECT
             id::text,
             'inky'::text     AS kind,
+            'inky'::text     AS source,
             timestamp,
             client_name,
             tenant_id,
@@ -418,9 +469,64 @@ def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
         """,
         (limit,),
     )
-    combined = (ual_rows or []) + (inky_rows or [])
+
+
+def _merge_feed(ual_rows: list[dict], inky_rows: list[dict]) -> list[dict]:
+    combined = list(ual_rows or []) + list(inky_rows or [])
     combined.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
+    return combined
+
+
+@app.get("/api/feed/recent")
+def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
+    """Original combined feed used by the v0.1 dashboard -- balanced
+    split between UAL and INKY rows."""
+    combined = _merge_feed(
+        _fetch_ual_feed_rows(limit),
+        _fetch_inky_feed_rows(min(limit, 20)),
+    )
     return combined[:limit]
+
+
+@app.get("/api/dashboard/feed")
+def dashboard_feed(
+    ual_limit: int = Query(50, ge=1, le=500),
+    inky_limit: int = Query(20, ge=0, le=200),
+) -> list[dict]:
+    """Dashboard feed -- pulls the last 50 UAL events plus the last 20
+    INKY events and returns them merged and timestamp-sorted. Each row
+    carries a ``source`` field ("ual" | "inky") that the frontend uses
+    to pick the card treatment."""
+    return _merge_feed(
+        _fetch_ual_feed_rows(ual_limit),
+        _fetch_inky_feed_rows(inky_limit),
+    )
+
+
+# ============================================================================
+# INKY stats (used by the Sources page card)
+# ============================================================================
+
+@app.get("/api/sources/inky-count")
+def sources_inky_count() -> dict:
+    """Total INKY events in vector_inky_events, with a per-verdict
+    breakdown so the Sources card can render both a headline count and
+    a DANGER highlight."""
+    total_row = db.fetch_one(
+        "SELECT COUNT(*)::bigint AS count FROM vector_inky_events"
+    ) or {}
+    by_verdict = db.fetch_all(
+        """
+        SELECT verdict, COUNT(*)::bigint AS count
+        FROM vector_inky_events
+        GROUP BY verdict
+        ORDER BY count DESC
+        """
+    )
+    return {
+        "count":      int(total_row.get("count") or 0),
+        "by_verdict": by_verdict,
+    }
 
 
 # ============================================================================
