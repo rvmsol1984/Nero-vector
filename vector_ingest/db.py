@@ -370,6 +370,55 @@ class Database:
         return written > 0
 
     # ------------------------------------------------------------------ message trace
+    def ensure_message_trace_table(self) -> None:
+        """Safety net: create vector_message_trace + indexes if they're
+        missing, and self-grant on the current role so any follow-up
+        session can still read/write the table. This is idempotent --
+        every statement is an IF NOT EXISTS / OR REPLACE variant -- so
+        it's safe to call on every boot even when migration 005 has
+        already been applied.
+        """
+        sql = """
+        CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+        CREATE TABLE IF NOT EXISTS vector_message_trace (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id           VARCHAR(128) NOT NULL,
+            client_name         VARCHAR(256) NOT NULL,
+            message_id          VARCHAR(512) UNIQUE,
+            sender_address      VARCHAR(512),
+            recipient_address   VARCHAR(512),
+            subject             TEXT,
+            received            TIMESTAMPTZ,
+            status              VARCHAR(64),
+            size_bytes          BIGINT,
+            direction           VARCHAR(32),
+            original_client_ip  VARCHAR(128),
+            ingested_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_message_trace_tenant_received
+            ON vector_message_trace (tenant_id, received DESC);
+        CREATE INDEX IF NOT EXISTS idx_message_trace_sender
+            ON vector_message_trace (sender_address);
+        CREATE INDEX IF NOT EXISTS idx_message_trace_recipient
+            ON vector_message_trace (recipient_address);
+
+        -- Best-effort self-grant so the current role keeps its own
+        -- rights after any table recreate. No-op on failure (e.g. the
+        -- role doesn't exist in some dev fixtures).
+        DO $$
+        BEGIN
+            EXECUTE 'GRANT ALL PRIVILEGES ON TABLE vector_message_trace TO '
+                 || quote_ident(current_user);
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END $$;
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(sql)
+        self.conn.commit()
+
     def insert_message_trace(self, row: dict) -> bool:
         """Insert a single MessageTrace row, de-dup on message_id."""
         with self.conn.cursor() as cur:

@@ -54,9 +54,11 @@ HUNTING_QUERY = (
     "EmailEvents "
     "| where Timestamp > ago(1h) "
     "| project Timestamp, SenderFromAddress, RecipientEmailAddress, "
-    "Subject, DeliveryAction, ThreatTypes, DetectionMethods "
+    "Subject, DeliveryAction, ThreatTypes, NetworkMessageId "
     "| limit 1000"
 )
+
+CHECKPOINT_KEY = "MessageTrace_v2"
 
 
 class HuntingUnavailable(Exception):
@@ -118,6 +120,9 @@ class MessageTraceIngestor:
         # don't pay the hunting 403 round-trip on every poll for tenants
         # that don't have the XDR entitlement.
         self._method: str | None = None
+
+        # One-shot schema self-heal (idempotent), runs on first poll.
+        self._table_ensured: bool = False
 
     # ------------------------------------------------------------------ auth
     def _get_token(self) -> str:
@@ -186,14 +191,23 @@ class MessageTraceIngestor:
             raise HuntingUnavailable(str(exc)) from exc
 
         if resp.status_code in (401, 403):
-            logger.warning(
-                "[message_trace] hunting denied, tenant likely not licensed",
-                extra={
-                    "tenant_id": self.tenant_id,
-                    "status": resp.status_code,
-                    "body_head": resp.text[:200],
-                },
-            )
+            if resp.status_code == 403:
+                logger.warning(
+                    "[message_trace] EmailEvents requires XDR license -- "
+                    "tenant does not have Microsoft 365 Defender / Threat "
+                    "Hunting. Falling back to activity report.",
+                    extra={
+                        "tenant_id": self.tenant_id,
+                        "client_name": self.client_name,
+                        "body_head": resp.text[:200],
+                    },
+                )
+            else:
+                logger.warning(
+                    "[message_trace] hunting auth denied, body: %s",
+                    resp.text[:200],
+                    extra={"tenant_id": self.tenant_id, "status": 401},
+                )
             # Clear the token so the next attempt re-auths cleanly.
             if resp.status_code == 401:
                 self._token = None
@@ -243,7 +257,7 @@ class MessageTraceIngestor:
 
         if max_received is not None:
             self.db.update_checkpoint(
-                self.tenant_id, self.client_name, "MessageTrace", max_received
+                self.tenant_id, self.client_name, CHECKPOINT_KEY, max_received
             )
 
         logger.info(
@@ -266,36 +280,39 @@ class MessageTraceIngestor:
             return None
         sender = r.get("SenderFromAddress") or ""
         recipient = r.get("RecipientEmailAddress") or ""
-        # Hunting rows don't give us a stable message id, so compose one
-        # from the tenant + timestamp + sender + recipient + subject. The
-        # ON CONFLICT (message_id) DO NOTHING then handles retry dedup.
         subject = r.get("Subject") or ""
-        composite_id = (
-            f"graph-hunt-{self.tenant_id}-{received.isoformat()}"
-            f"-{sender}-{recipient}-{hash(subject) & 0xffffffff:08x}"
-        )[:500]
-        # Direction derived from DeliveryAction -- this field is always
-        # from the mailbox owner's perspective.
-        delivery_action = str(r.get("DeliveryAction") or "").lower()
-        if delivery_action:
-            direction = "IN"  # EmailEvents is inbound-focused
+
+        # Use Defender's NetworkMessageId as the canonical message id
+        # (stable across retries, matches the email in the mailbox).
+        # Only fall back to a composite hash if Graph somehow omits it
+        # so the ON CONFLICT dedup still has a unique key.
+        network_message_id = (r.get("NetworkMessageId") or "").strip()
+        if network_message_id:
+            message_id = network_message_id[:500]
         else:
-            direction = None
+            message_id = (
+                f"graph-hunt-{self.tenant_id}-{received.isoformat()}"
+                f"-{sender}-{recipient}-{hash(subject) & 0xffffffff:08x}"
+            )[:500]
 
         threat_types = r.get("ThreatTypes") or ""
-        status = str(r.get("DeliveryAction") or threat_types or "").strip() or None
+        status = (
+            str(r.get("DeliveryAction") or threat_types or "").strip() or None
+        )
 
         return {
             "tenant_id":         self.tenant_id,
             "client_name":       self.client_name,
-            "message_id":        composite_id,
+            "message_id":        message_id,
             "sender_address":    sender or None,
             "recipient_address": recipient or None,
             "subject":           subject or None,
             "received":          received,
             "status":            status,
             "size_bytes":        None,
-            "direction":         direction,
+            # EmailEvents is strictly inbound in the Defender schema, so
+            # hardcode the direction rather than trying to derive it.
+            "direction":         "Inbound",
             "original_client_ip": None,
         }
 
@@ -434,6 +451,20 @@ class MessageTraceIngestor:
         if now - self._last_poll < POLL_INTERVAL:
             return
         self._last_poll = now
+
+        # Safety net: ensure vector_message_trace + indexes exist before
+        # the first insert. Belt-and-braces on top of the migration
+        # runner -- harmless if 005 already ran.
+        if not self._table_ensured:
+            try:
+                self.db.ensure_message_trace_table()
+                self._table_ensured = True
+            except Exception:
+                logger.exception(
+                    "[message_trace] ensure_message_trace_table failed",
+                    extra={"tenant_id": self.tenant_id},
+                )
+                return
 
         # License-tier routing. E5 gets the real hunting query; everything
         # else (BizPremium, E3, …) gets the activity rollup fallback.
