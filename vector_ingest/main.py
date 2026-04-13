@@ -18,6 +18,7 @@ from pathlib import Path
 from pythonjsonlogger import jsonlogger
 
 from vector_ingest.db import Database
+from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
 
 
@@ -61,7 +62,14 @@ def load_tenants(path: str | Path) -> list[dict]:
     return data
 
 
-def build_ingestors(tenants: list[dict], db: Database) -> list[TenantIngestor]:
+def build_ingestors(tenants: list[dict], db: Database) -> list:
+    """Build a flat list of pollers: one TenantIngestor per tenant plus
+    one DefenderIngestor for every tenant whose ``license_tier`` is
+    ``E5`` (Defender requires the advanced hunting SKU).
+
+    Both types expose a ``poll_once()`` method so the main loop can
+    iterate uniformly.
+    """
     client_id = os.environ.get("VECTOR_CLIENT_ID")
     client_secret = os.environ.get("VECTOR_CLIENT_SECRET")
     if not client_id or not client_secret:
@@ -69,16 +77,32 @@ def build_ingestors(tenants: list[dict], db: Database) -> list[TenantIngestor]:
             "VECTOR_CLIENT_ID and VECTOR_CLIENT_SECRET must be set in the environment"
         )
 
-    return [
-        TenantIngestor(
-            tenant_id=t["tenant_id"],
-            client_name=t["name"],
-            client_id=client_id,
-            client_secret=client_secret,
-            db=db,
+    ingestors: list = []
+    for t in tenants:
+        ingestors.append(
+            TenantIngestor(
+                tenant_id=t["tenant_id"],
+                client_name=t["name"],
+                client_id=client_id,
+                client_secret=client_secret,
+                db=db,
+            )
         )
-        for t in tenants
-    ]
+        if str(t.get("license_tier", "")).upper() == "E5":
+            logger.info(
+                "building Defender ingestor for E5 tenant",
+                extra={"tenant_id": t["tenant_id"], "client_name": t["name"]},
+            )
+            ingestors.append(
+                DefenderIngestor(
+                    tenant_id=t["tenant_id"],
+                    client_name=t["name"],
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    db=db,
+                )
+            )
+    return ingestors
 
 
 def main() -> int:
@@ -112,9 +136,11 @@ def main() -> int:
             for ingestor in ingestors:
                 if _SHUTDOWN:
                     break
+                kind = type(ingestor).__name__
                 logger.info(
-                    "polling tenant",
+                    "polling ingestor",
                     extra={
+                        "kind": kind,
                         "tenant_id": ingestor.tenant_id,
                         "client_name": ingestor.client_name,
                     },
@@ -123,8 +149,9 @@ def main() -> int:
                     ingestor.poll_once()
                 except Exception as exc:
                     logger.exception(
-                        "tenant poll crashed",
+                        "ingestor poll crashed",
                         extra={
+                            "kind": kind,
                             "tenant_id": ingestor.tenant_id,
                             "client_name": ingestor.client_name,
                             "error": str(exc),

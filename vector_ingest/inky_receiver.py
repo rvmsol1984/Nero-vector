@@ -1,15 +1,19 @@
-"""INKY MailShield webhook receiver.
+"""INKY MailShield SIEM webhook receiver.
 
-Exposes POST /api/ingest/inky on the vector-ui FastAPI app. Parses the
-two INKY feed event types we currently care about -- "Inbound Analysis
-Results" and "Link Clicks" -- and for any event whose verdict resolves
-to Danger, stages a provisional entry in vector_watchlist with a 60
-minute correlation window so the correlation engine can bind later UAL
-activity to the original verdict while the pin is still live.
+Standalone FastAPI app that runs in its own container alongside the
+vector-ingest poller. Listens on :3007 for INKY SIEM feed webhooks,
+stores every accepted event in ``vector_inky_events``, and for any
+Danger-verdict Inbound Analysis or Link Click, stages a 60-minute
+pin in ``vector_watchlist`` that the Phase-2 correlation engine will
+join against UAL auth anomalies.
 
-Auth is a flat shared secret sent in the X-Vector-Token header, compared
-against the VECTOR_INKY_TOKEN environment variable with a timing-safe
-compare. If the env var is unset the endpoint fails closed with 503.
+Auth is a flat shared secret delivered in the ``X-Vector-Token``
+header, timing-safe-compared against the ``INKY_WEBHOOK_SECRET``
+environment variable (falls back to ``VECTOR_INKY_TOKEN`` for
+backward compat with the v0.1 receiver).
+
+Run with:
+    uvicorn vector_ingest.inky_receiver:app --host 0.0.0.0 --port 3007
 """
 
 from __future__ import annotations
@@ -18,62 +22,123 @@ import hmac
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
+from fastapi import FastAPI, Header, HTTPException, Request
 
-from backend import db  # shares the vector-ui psycopg2 pool
+# ---------------------------------------------------------------------------
+# logging (JSON to stdout so container log drivers pick it up)
+# ---------------------------------------------------------------------------
 
+logging.basicConfig(
+    level=os.environ.get("INKY_LOG_LEVEL", "INFO").upper(),
+    stream=sys.stdout,
+    format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
+)
 logger = logging.getLogger("vector_ingest.inky")
 
-router = APIRouter()
+# ---------------------------------------------------------------------------
+# app + db pool
+# ---------------------------------------------------------------------------
 
-# 60 minute default correlation window. Tuned for MailShield -> UAL
-# binding: INKY fires before the user clicks, and most malicious click
-# / login / share events land within the hour.
+app = FastAPI(title="NERO Vector INKY Receiver", version="0.2.0")
+
+_POOL: psycopg2.pool.ThreadedConnectionPool | None = None
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    global _POOL
+    _POOL = psycopg2.pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=4,
+        host=os.environ.get("POSTGRES_HOST", "postgres"),
+        port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        dbname=os.environ.get("POSTGRES_DB", "nero_vector"),
+        user=os.environ.get("POSTGRES_USER", "nero_vector"),
+        password=os.environ.get("POSTGRES_PASSWORD", ""),
+        application_name="inky-receiver",
+        options="-c timezone=UTC",
+    )
+    logger.info("inky-receiver db pool initialized")
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    global _POOL
+    if _POOL is not None:
+        _POOL.closeall()
+        _POOL = None
+
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
 CORRELATION_WINDOW = timedelta(minutes=60)
 
-# Verdicts we treat as "Danger". INKY has historically used a mix of
-# these strings across mailbox vs. link-click flows; normalise to lower.
-DANGER_VERDICTS = {"danger", "malicious", "phish", "phishing", "aitm"}
-
-SUPPORTED_EVENT_TYPES = {
-    "Inbound Analysis Results",
-    "Link Clicks",
+# Map INKY SIEM feed eventType strings to our canonical event_type values.
+EVENT_TYPE_MAP = {
+    "Inbound Analysis Results":  "InboundAnalysis",
+    "Link Clicks":               "LinkClick",
+    "User Reports":              "UserReport",
+    "Outbound Analysis Results": "OutboundAnalysis",
 }
 
-_INSERT_SQL = """
-INSERT INTO vector_watchlist (
-    tenant_id, source, verdict, recipient, sender, url,
-    event_type, timestamp, correlation_window_expires_at, raw_json
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+SUPPORTED_CANONICAL = set(EVENT_TYPE_MAP.values())
+
+DANGER_VERDICTS  = {"danger", "malicious", "phish", "phishing"}
+CAUTION_VERDICTS = {"caution", "suspicious"}
+NEUTRAL_VERDICTS = {"neutral", "safe", "clean"}
+
+INSERT_INKY_EVENT_SQL = """
+INSERT INTO vector_inky_events (
+    tenant_id, client_name, event_type, recipient, sender, subject,
+    verdict, url, aitm_detected, threat_level, policy, timestamp, raw_json
+) VALUES (
+    %(tenant_id)s, %(client_name)s, %(event_type)s, %(recipient)s,
+    %(sender)s, %(subject)s, %(verdict)s, %(url)s, %(aitm_detected)s,
+    %(threat_level)s, %(policy)s, %(timestamp)s, %(raw_json)s
+)
 RETURNING id
 """
 
+INSERT_WATCHLIST_SQL = """
+INSERT INTO vector_watchlist (
+    tenant_id, client_name, user_email, trigger_type, trigger_details,
+    expires_at, status
+) VALUES (
+    %(tenant_id)s, %(client_name)s, %(user_email)s, %(trigger_type)s,
+    %(trigger_details)s, %(expires_at)s, 'active'
+)
+RETURNING id
+"""
 
 # ---------------------------------------------------------------------------
-# auth
+# helpers
 # ---------------------------------------------------------------------------
 
 def _check_token(token: str | None) -> None:
-    expected = os.environ.get("VECTOR_INKY_TOKEN")
+    expected = (
+        os.environ.get("INKY_WEBHOOK_SECRET")
+        or os.environ.get("VECTOR_INKY_TOKEN")
+    )
     if not expected:
-        logger.error("VECTOR_INKY_TOKEN not configured; refusing all traffic")
+        logger.error("INKY_WEBHOOK_SECRET not configured; refusing all traffic")
         raise HTTPException(status_code=503, detail="receiver not configured")
     if not token or not hmac.compare_digest(str(token), str(expected)):
         raise HTTPException(status_code=401, detail="bad token")
 
 
-# ---------------------------------------------------------------------------
-# payload helpers
-# ---------------------------------------------------------------------------
-
 def _as_events(payload: Any) -> list[dict]:
-    """Normalise the INKY payload to a list of event dicts.
+    """Normalise to a list of event dicts.
 
-    INKY has historically posted either a single event object or an
-    ``{"events": [...]}`` envelope. Accept both; anything else yields [].
+    INKY posts either a bare event object, a list, or ``{"events": [...]}``.
     """
     if isinstance(payload, list):
         return [e for e in payload if isinstance(e, dict)]
@@ -94,61 +159,48 @@ def _parse_timestamp(value: Any) -> datetime:
             raw = raw[:-1] + "+00:00"
         try:
             dt = datetime.fromisoformat(raw)
-        except ValueError:
+        except Exception:
             dt = datetime.now(timezone.utc)
     else:
         dt = datetime.now(timezone.utc)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    # Convert to naive UTC so psycopg2 stores it cleanly in TIMESTAMPTZ
+    # against our UTC-pinned session.
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def _first_string(event: dict, keys: tuple[str, ...]) -> str:
-    for key in keys:
-        v = event.get(key)
+def _first(event: dict, keys: tuple[str, ...]) -> str:
+    for k in keys:
+        v = event.get(k)
         if isinstance(v, str) and v:
             return v
-        if isinstance(v, list) and v:
-            first = v[0]
-            if isinstance(first, str):
-                return first
+        if isinstance(v, list) and v and isinstance(v[0], str):
+            return v[0]
     return ""
 
 
-def _extract_event_type(event: dict) -> str:
-    return _first_string(event, ("eventType", "EventType", "event_type", "type"))
+def _normalize_event_type(raw_type: str) -> str:
+    return EVENT_TYPE_MAP.get(raw_type, raw_type or "Unknown")
 
 
-def _extract_verdict(event: dict) -> str:
-    return _first_string(event, ("verdict", "Verdict", "result", "disposition"))
-
-
-def _extract_tenant_id(event: dict) -> str:
-    return _first_string(
-        event,
-        ("tenantId", "tenant_id", "TenantId", "customerId", "customer_id"),
-    )
-
-
-def _extract_recipient(event: dict) -> str:
-    return _first_string(
-        event,
-        ("recipient", "Recipient", "to", "toAddress", "recipientAddress"),
-    )
-
-
-def _extract_sender(event: dict) -> str:
-    return _first_string(
-        event,
-        ("sender", "Sender", "from", "fromAddress", "senderAddress"),
-    )
+def _normalize_verdict(v: str) -> str:
+    if not v:
+        return ""
+    low = v.strip().lower()
+    if low in DANGER_VERDICTS:
+        return "Danger"
+    if low in CAUTION_VERDICTS:
+        return "Caution"
+    if low in NEUTRAL_VERDICTS:
+        return "Neutral"
+    return v.strip().capitalize()
 
 
 def _extract_url(event: dict) -> str:
-    url = _first_string(event, ("url", "URL", "linkUrl", "clickedUrl", "targetUrl"))
+    url = _first(event, ("url", "URL", "linkUrl", "clickedUrl", "targetUrl"))
     if url:
         return url
-    # Inbound Analysis Results often nests links under "links": [{url: ...}]
     for key in ("links", "Links"):
         links = event.get(key)
         if isinstance(links, list) and links:
@@ -160,15 +212,40 @@ def _extract_url(event: dict) -> str:
     return ""
 
 
-def _is_danger(verdict: str) -> bool:
-    return verdict.strip().lower() in DANGER_VERDICTS
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+    return bool(value)
+
+
+def _db_insert(sql: str, params: dict) -> dict | None:
+    if _POOL is None:
+        raise RuntimeError("db pool not initialized")
+    conn = _POOL.getconn()
+    try:
+        if not conn.autocommit:
+            conn.rollback()
+            conn.autocommit = True
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        _POOL.putconn(conn)
 
 
 # ---------------------------------------------------------------------------
-# route
+# routes
 # ---------------------------------------------------------------------------
 
-@router.post("/api/ingest/inky")
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "service": "vector-inky-receiver"}
+
+
+@app.post("/api/ingest/inky")
 async def ingest_inky(
     request: Request,
     x_vector_token: str | None = Header(default=None, alias="X-Vector-Token"),
@@ -182,68 +259,120 @@ async def ingest_inky(
         raise HTTPException(status_code=400, detail="invalid json body")
 
     events = _as_events(payload)
+
     accepted = 0
+    stored = 0
     staged = 0
     skipped = 0
 
     for event in events:
-        event_type = _extract_event_type(event)
-        if event_type not in SUPPORTED_EVENT_TYPES:
+        raw_type = _first(
+            event, ("eventType", "EventType", "event_type", "type")
+        )
+        event_type = _normalize_event_type(raw_type)
+        if event_type not in SUPPORTED_CANONICAL:
             skipped += 1
             continue
         accepted += 1
 
-        verdict = _extract_verdict(event)
-        if not _is_danger(verdict):
-            # We only stage watchlist pins for Danger. Everything else is
-            # acknowledged but dropped -- future phases may persist the
-            # full audit trail, but today that would just bloat the table.
-            continue
-
-        tenant_id = _extract_tenant_id(event)
-        recipient = _extract_recipient(event)
-        sender = _extract_sender(event)
+        verdict = _normalize_verdict(
+            _first(event, ("verdict", "Verdict", "result", "disposition"))
+        )
+        recipient = _first(
+            event, ("recipient", "Recipient", "to", "toAddress", "recipientAddress")
+        )
+        sender = _first(
+            event, ("sender", "Sender", "from", "fromAddress", "senderAddress")
+        )
+        subject = _first(event, ("subject", "Subject", "mailSubject"))
         url = _extract_url(event)
+        aitm = _as_bool(
+            event.get("aitmDetected")
+            or event.get("AiTMDetected")
+            or event.get("isAiTM")
+            or event.get("aitm")
+        )
+        threat_level = _first(event, ("threatLevel", "ThreatLevel", "severity"))
+        policy = _first(event, ("policy", "Policy", "policyName"))
+        tenant_id = _first(
+            event, ("tenantId", "tenant_id", "TenantId", "customerId", "customer_id")
+        )
+        client_name = _first(
+            event, ("clientName", "client_name", "customerName")
+        ) or None
         timestamp = _parse_timestamp(
             event.get("timestamp") or event.get("eventTime") or event.get("time")
         )
-        expires_at = timestamp + CORRELATION_WINDOW
+
+        event_row = {
+            "tenant_id":     tenant_id or None,
+            "client_name":   client_name,
+            "event_type":    event_type,
+            "recipient":     recipient or None,
+            "sender":        sender or None,
+            "subject":       subject or None,
+            "verdict":       verdict or None,
+            "url":           url or None,
+            "aitm_detected": aitm,
+            "threat_level":  threat_level or None,
+            "policy":        policy or None,
+            "timestamp":     timestamp,
+            "raw_json":      json.dumps(event),
+        }
 
         try:
-            row = db.execute_returning(
-                _INSERT_SQL,
-                (
-                    tenant_id,
-                    "INKY",
-                    verdict,
-                    recipient,
-                    sender,
-                    url,
-                    event_type,
-                    timestamp,
-                    expires_at,
-                    json.dumps(event),
-                ),
-            )
-        except Exception as exc:
+            _db_insert(INSERT_INKY_EVENT_SQL, event_row)
+            stored += 1
+        except Exception:
             logger.exception(
-                "inky stage failed: %s (event_type=%s tenant_id=%s)",
-                exc,
+                "inky event insert failed event_type=%s recipient=%s",
                 event_type,
-                tenant_id,
+                recipient,
             )
-            raise HTTPException(status_code=500, detail="database error")
+            continue
 
-        staged += 1
-        logger.info(
-            "inky watchlist entry staged id=%s tenant_id=%s recipient=%s "
-            "verdict=%s event_type=%s window_expires_at=%s",
-            row.get("id") if row else None,
-            tenant_id,
-            recipient,
-            verdict,
-            event_type,
-            expires_at.isoformat(),
-        )
+        # Watchlist pin for Danger verdicts on delivered mail / clicked links.
+        if verdict == "Danger" and event_type in {"LinkClick", "InboundAnalysis"}:
+            trigger_type = (
+                "inky_click" if event_type == "LinkClick" else "inky_phish_delivered"
+            )
+            trigger_details = {
+                "sender":         sender or None,
+                "subject":        subject or None,
+                "url":            url or None,
+                "verdict":        verdict,
+                "aitm_detected":  aitm,
+                "threat_level":   threat_level or None,
+                "policy":         policy or None,
+                "event_type":     event_type,
+                "timestamp":      timestamp.isoformat() + "Z",
+            }
+            watchlist_row = {
+                "tenant_id":       tenant_id or None,
+                "client_name":     client_name,
+                "user_email":      recipient or None,
+                "trigger_type":    trigger_type,
+                "trigger_details": json.dumps(trigger_details),
+                "expires_at":      timestamp + CORRELATION_WINDOW,
+            }
+            try:
+                _db_insert(INSERT_WATCHLIST_SQL, watchlist_row)
+                staged += 1
+                logger.info(
+                    "inky watchlist pin staged type=%s user=%s expires_in=60m",
+                    trigger_type,
+                    recipient,
+                )
+            except Exception:
+                logger.exception(
+                    "watchlist insert failed type=%s user=%s",
+                    trigger_type,
+                    recipient,
+                )
 
-    return {"accepted": accepted, "staged": staged, "skipped": skipped}
+    return {
+        "accepted": accepted,
+        "stored":   stored,
+        "staged":   staged,
+        "skipped":  skipped,
+    }

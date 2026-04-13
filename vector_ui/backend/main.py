@@ -25,14 +25,9 @@ import jwt
 
 from backend import db
 
-# ---------------------------------------------------------------------------
-# Routers from sibling packages. vector_ingest.inky_receiver is copied into
-# the vector-ui image so the webhook can share this process's db pool.
-# ---------------------------------------------------------------------------
-try:
-    from vector_ingest.inky_receiver import router as inky_router
-except ImportError:  # pragma: no cover - local dev without the file
-    inky_router = None
+# The v0.2 inky-receiver runs as its own FastAPI process in the
+# vector-ingest container on port 3007, so vector-ui no longer mounts
+# any /auth/ingest/inky router.
 
 logging.basicConfig(
     level=os.environ.get("VECTOR_UI_LOG_LEVEL", "INFO").upper(),
@@ -41,9 +36,6 @@ logging.basicConfig(
 logger = logging.getLogger("vector_ui")
 
 app = FastAPI(title="NERO Vector UI", version="0.1.0")
-
-if inky_router is not None:
-    app.include_router(inky_router)
 
 # Wide-open CORS: access is gated by Cloudflare Access upstream.
 app.add_middleware(

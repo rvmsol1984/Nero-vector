@@ -28,6 +28,35 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  inky-receiver:
+    # Same image as vector-ingest -- just runs the FastAPI app in
+    # vector_ingest.inky_receiver instead of the poll loop.
+    image: nero-vector/vector-ingest:latest
+    container_name: vector-inky-receiver
+    restart: unless-stopped
+    depends_on:
+      - vector-ingest
+    env_file:
+      - .env
+    environment:
+      INKY_LOG_LEVEL: INFO
+    command:
+      - uvicorn
+      - vector_ingest.inky_receiver:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "3007"
+    ports:
+      - "3007:3007"
+    networks:
+      - nero
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 networks:
   nero:
     external: true
