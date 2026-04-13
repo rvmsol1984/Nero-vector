@@ -10,6 +10,7 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund --loglevel=error
 
 COPY server.js ./
+COPY users.json ./
 
 USER node
 

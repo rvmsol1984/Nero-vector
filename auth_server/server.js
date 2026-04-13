@@ -16,6 +16,7 @@
  */
 
 const crypto = require("crypto");
+const fs = require("fs");
 const path = require("path");
 
 const axios = require("axios");
@@ -47,22 +48,39 @@ if (!SESSION_SECRET) {
   process.exit(1);
 }
 
-// Domain allowlist. Any signed-in user whose email ends with
-// @nero-consulting.com gets through with role=operator. A small hardcoded
-// set of addresses is bumped to role=admin, which the UI/API will later
-// use to gate containment actions. Anyone outside the domain hits 403.
-const ALLOWED_DOMAIN = "nero-consulting.com";
-const ADMIN_EMAILS = new Set([
-  "roman@nero-consulting.com",
-  "anthony@nero-consulting.com",
-]);
+// Domain allowlist loaded from users.json. The whole file is a tiny
+// config blob:
+//
+//   { "domain": "nero-consulting.com", "defaultRole": "admin" }
+//
+// Anyone whose id_token email ends with "@<domain>" is admitted with
+// role = defaultRole. The role field is still plumbed through to
+// /auth/me so the UI can gate containment actions on it later, but for
+// the current internal test phase there is no per-user override -- a
+// domain match is enough.
+const USERS_FILE = process.env.USERS_FILE || path.join(__dirname, "users.json");
+
+let USERS_CONFIG;
+try {
+  USERS_CONFIG = JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+} catch (err) {
+  console.error(`[auth] failed to load users config at ${USERS_FILE}:`, err.message);
+  process.exit(1);
+}
+
+const ALLOWED_DOMAIN = String(USERS_CONFIG.domain || "").toLowerCase();
+const DEFAULT_ROLE = USERS_CONFIG.defaultRole || "operator";
+
+if (!ALLOWED_DOMAIN) {
+  console.error(`[auth] users config at ${USERS_FILE} is missing "domain"`);
+  process.exit(1);
+}
 
 function resolveRole(email) {
   if (!email) return null;
   const lower = email.toLowerCase();
   if (!lower.endsWith("@" + ALLOWED_DOMAIN)) return null;
-  if (ADMIN_EMAILS.has(lower)) return "admin";
-  return "operator";
+  return DEFAULT_ROLE;
 }
 
 const SCOPE = "openid email profile";
@@ -324,4 +342,5 @@ app.listen(PORT, () => {
   console.log(`[auth] listening on :${PORT}`);
   console.log(`[auth] tenant=${TENANT_ID} client_id=${CLIENT_ID}`);
   console.log(`[auth] redirect_uri=${REDIRECT_URI}`);
+  console.log(`[auth] allowed_domain=@${ALLOWED_DOMAIN} default_role=${DEFAULT_ROLE}`);
 });
