@@ -118,14 +118,22 @@ export default function Governance() {
           const rows = data[t.id];
           const visited = rows !== undefined;
           const isLoading = loadingTabs.has(t.id);
-          // For envelope responses (stale-accounts), count the inner rows.
-          const count = visited
-            ? Array.isArray(rows)
-              ? rows.length
-              : Array.isArray(rows.rows)
-                ? rows.rows.length
-                : 0
-            : 0;
+          // Count: arrays count directly; stale-accounts envelope reads
+          // .rows; AI Activity sums its two sub-lists.
+          let count = 0;
+          if (visited) {
+            if (Array.isArray(rows)) {
+              count = rows.length;
+            } else if (rows && typeof rows === "object") {
+              if (t.id === "aiActivity") {
+                count =
+                  (rows.copilot?.length || 0) +
+                  (rows.external_ai?.length || 0);
+              } else if (Array.isArray(rows.rows)) {
+                count = rows.rows.length;
+              }
+            }
+          }
           const active = activeTab === t.id;
           return (
             <button
