@@ -32,11 +32,13 @@ def init_pool() -> None:
     dbname = os.environ.get("POSTGRES_DB", "nero_vector")
     user = os.environ.get("POSTGRES_USER", "nero_vector")
     password = os.environ.get("POSTGRES_PASSWORD", "")
-    maxconn = int(os.environ.get("VECTOR_UI_DB_POOL", "5"))
+    minconn = int(os.environ.get("VECTOR_UI_DB_POOL_MIN", "2"))
+    maxconn = int(os.environ.get("VECTOR_UI_DB_POOL", "25"))
 
-    logger.info("initializing vector-ui db pool host=%s db=%s", host, dbname)
+    logger.info("initializing vector-ui db pool host=%s db=%s min=%d max=%d",
+                host, dbname, minconn, maxconn)
     _pool = psycopg2.pool.ThreadedConnectionPool(
-        minconn=1,
+        minconn=minconn,
         maxconn=maxconn,
         host=host,
         port=port,

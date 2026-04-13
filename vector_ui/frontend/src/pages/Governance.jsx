@@ -28,42 +28,70 @@ const TABS = [
 // ---------------------------------------------------------------------------
 
 export default function Governance() {
+  // Per-tab cache. data[tabId] === undefined means "never fetched";
+  // data[tabId] === [] is a real empty result. That distinction is
+  // what drives CountBadge's "unvisited" vs "no findings" states.
   const [data, setData] = useState({});
   const [errors, setErrors] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [loadingTabs, setLoadingTabs] = useState(() => new Set());
   const [activeTab, setActiveTab] = useState("dlp");
 
+  // Lazy-load the active tab on first visit only. Switching back to
+  // a previously-viewed tab uses the cached rows and fires no new
+  // request, which keeps the Postgres pool from getting hammered by
+  // 11 simultaneous queries on mount.
   useEffect(() => {
+    // Already cached? nothing to do.
+    if (data[activeTab] !== undefined) return;
+
+    const tab = TABS.find((t) => t.id === activeTab);
+    if (!tab) return;
+    const fn = api[tab.endpoint];
+    if (!fn) return;
+
     let cancel = false;
-    setLoading(true);
-    const calls = TABS.map((t) => {
-      const fn = api[t.endpoint];
-      const promise = t.withTenant ? fn(TENANT) : fn();
-      return { id: t.id, promise };
+    setLoadingTabs((prev) => {
+      const next = new Set(prev);
+      next.add(activeTab);
+      return next;
     });
 
-    Promise.allSettled(calls.map((c) => c.promise)).then((results) => {
-      if (cancel) return;
-      const nextData = {};
-      const nextErrors = {};
-      results.forEach((r, i) => {
-        const id = calls[i].id;
-        if (r.status === "fulfilled") {
-          nextData[id] = r.value || [];
-        } else {
-          nextData[id] = [];
-          nextErrors[id] = String(r.reason?.message || r.reason);
-        }
+    const promise = tab.withTenant ? fn(TENANT) : fn();
+    promise
+      .then((rows) => {
+        if (cancel) return;
+        setData((prev) => ({ ...prev, [activeTab]: rows || [] }));
+        setErrors((prev) => {
+          if (!(activeTab in prev)) return prev;
+          const { [activeTab]: _, ...rest } = prev;
+          return rest;
+        });
+      })
+      .catch((err) => {
+        if (cancel) return;
+        setData((prev) => ({ ...prev, [activeTab]: [] }));
+        setErrors((prev) => ({
+          ...prev,
+          [activeTab]: String(err?.message || err),
+        }));
+      })
+      .finally(() => {
+        if (cancel) return;
+        setLoadingTabs((prev) => {
+          const next = new Set(prev);
+          next.delete(activeTab);
+          return next;
+        });
       });
-      setData(nextData);
-      setErrors(nextErrors);
-      setLoading(false);
-    });
 
     return () => {
       cancel = true;
     };
-  }, []);
+    // The effect intentionally only re-runs on activeTab change; the
+    // in-effect `data[activeTab]` check reads the live snapshot and
+    // bails early if the tab is already cached.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -76,25 +104,33 @@ export default function Governance() {
         UAL-derived policy findings and identity hygiene signals.
       </p>
 
-      {/* ----- horizontal tab bar ----- */}
-      <div className="border-b border-white/5 overflow-x-auto">
-        <div className="flex items-center gap-0 min-w-max">
+      {/* ----- horizontal tab bar (hidden scrollbar, touch-scrollable) ----- */}
+      <div className="border-b border-white/5 overflow-x-auto scrollbar-hidden">
+        <div className="flex items-center gap-0 whitespace-nowrap min-w-max">
           {TABS.map((t) => {
-            const count = (data[t.id] || []).length;
+            const rows = data[t.id];
+            const visited = rows !== undefined;
+            const isLoading = loadingTabs.has(t.id);
+            const count = visited ? rows.length : 0;
             const active = activeTab === t.id;
             return (
               <button
                 key={t.id}
                 type="button"
                 onClick={() => setActiveTab(t.id)}
-                className={`px-4 py-2.5 text-[12px] font-medium border-b-2 -mb-px whitespace-nowrap flex items-center gap-2 transition-colors ${
+                className={`px-4 py-2.5 text-[12px] font-medium border-b-2 -mb-px whitespace-nowrap flex items-center gap-2 transition-colors shrink-0 ${
                   active
                     ? "border-primary text-primary-light"
                     : "border-transparent text-white/55 hover:text-white"
                 }`}
               >
                 <span>{t.label}</span>
-                <CountBadge count={count} active={active} loading={loading} />
+                <CountBadge
+                  count={count}
+                  active={active}
+                  loading={isLoading}
+                  visited={visited}
+                />
               </button>
             );
           })}
@@ -104,8 +140,8 @@ export default function Governance() {
       {/* ----- active tab panel ----- */}
       <TabPanel
         tabId={activeTab}
-        rows={data[activeTab] || []}
-        loading={loading}
+        rows={data[activeTab]}
+        loading={loadingTabs.has(activeTab)}
         error={errors[activeTab]}
       />
     </div>
@@ -117,7 +153,7 @@ export default function Governance() {
 // ---------------------------------------------------------------------------
 
 function TabPanel({ tabId, rows, loading, error }) {
-  if (loading) {
+  if (rows === undefined || loading) {
     return (
       <div className="card py-12 text-center text-white/40 text-sm">
         loading…
@@ -183,7 +219,7 @@ function SeverityPill({ severity }) {
   );
 }
 
-function CountBadge({ count, active, loading }) {
+function CountBadge({ count, active, loading, visited }) {
   if (loading) {
     return (
       <span className="inline-flex items-center justify-center min-w-[20px] px-1.5 py-0.5 rounded-full text-[9px] font-bold text-white/30 bg-white/5 border border-white/10">
@@ -191,6 +227,9 @@ function CountBadge({ count, active, loading }) {
       </span>
     );
   }
+  // Unvisited tabs render nothing in place of a count so the strip
+  // doesn't look like every tab reports zero findings at page load.
+  if (!visited) return null;
   const cls = active
     ? "text-primary-light bg-primary/15 border-primary/40"
     : count === 0

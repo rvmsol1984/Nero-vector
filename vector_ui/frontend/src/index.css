@@ -55,6 +55,19 @@ body {
   background: rgba(255, 255, 255, 0.03);
 }
 
+/* Horizontally-scrolling strip with the scrollbar visually hidden but
+   scroll still working (used by the Governance tab bar). */
+.scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* --------------------------------------------------------------------------
  * Scrollbars
  * ------------------------------------------------------------------------ */
