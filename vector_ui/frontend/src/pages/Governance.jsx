@@ -104,37 +104,54 @@ export default function Governance() {
         UAL-derived policy findings and identity hygiene signals.
       </p>
 
-      {/* ----- horizontal tab bar (hidden scrollbar, touch-scrollable) ----- */}
-      <div className="border-b border-white/5 overflow-x-auto scrollbar-hidden">
-        <div className="flex items-center gap-0 whitespace-nowrap min-w-max">
-          {TABS.map((t) => {
-            const rows = data[t.id];
-            const visited = rows !== undefined;
-            const isLoading = loadingTabs.has(t.id);
-            const count = visited ? rows.length : 0;
-            const active = activeTab === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setActiveTab(t.id)}
-                className={`px-4 py-2.5 text-[12px] font-medium border-b-2 -mb-px whitespace-nowrap flex items-center gap-2 transition-colors shrink-0 ${
-                  active
-                    ? "border-primary text-primary-light"
-                    : "border-transparent text-white/55 hover:text-white"
-                }`}
-              >
-                <span>{t.label}</span>
-                <CountBadge
-                  count={count}
-                  active={active}
-                  loading={isLoading}
-                  visited={visited}
-                />
-              </button>
-            );
-          })}
-        </div>
+      {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
+      <div
+        className="flex flex-wrap gap-1 border-b border-white/5 mb-4"
+      >
+        {TABS.map((t) => {
+          const rows = data[t.id];
+          const visited = rows !== undefined;
+          const isLoading = loadingTabs.has(t.id);
+          // For envelope responses (stale-accounts), count the inner rows.
+          const count = visited
+            ? Array.isArray(rows)
+              ? rows.length
+              : Array.isArray(rows.rows)
+                ? rows.rows.length
+                : 0
+            : 0;
+          const active = activeTab === t.id;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setActiveTab(t.id)}
+              className={`flex items-center gap-2 whitespace-nowrap cursor-pointer transition-colors -mb-px ${
+                active ? "text-primary-light" : "text-white/50 hover:bg-white/[0.05]"
+              }`}
+              style={{
+                padding: "6px 14px",
+                fontSize: "12px",
+                fontWeight: 500,
+                borderRadius: "6px 6px 0 0",
+                borderBottom: active
+                  ? "2px solid #2563EB"
+                  : "2px solid transparent",
+                backgroundColor: active
+                  ? "rgba(37,99,235,0.15)"
+                  : undefined,
+              }}
+            >
+              <span>{t.label}</span>
+              <CountBadge
+                count={count}
+                active={active}
+                loading={isLoading}
+                visited={visited}
+              />
+            </button>
+          );
+        })}
       </div>
 
       {/* ----- active tab panel ----- */}
@@ -243,7 +260,17 @@ function SeverityPill({ severity }) {
 function CountBadge({ count, active, loading, visited }) {
   if (loading) {
     return (
-      <span className="inline-flex items-center justify-center min-w-[20px] px-1.5 py-0.5 rounded-full text-[9px] font-bold text-white/30 bg-white/5 border border-white/10">
+      <span
+        className="inline-flex items-center justify-center tabular-nums"
+        style={{
+          background: "rgba(255,255,255,0.05)",
+          color: "rgba(255,255,255,0.3)",
+          fontSize: "10px",
+          padding: "1px 6px",
+          borderRadius: "10px",
+          minWidth: "18px",
+        }}
+      >
         …
       </span>
     );
@@ -251,14 +278,24 @@ function CountBadge({ count, active, loading, visited }) {
   // Unvisited tabs render nothing in place of a count so the strip
   // doesn't look like every tab reports zero findings at page load.
   if (!visited) return null;
-  const cls = active
-    ? "text-primary-light bg-primary/15 border-primary/40"
-    : count === 0
-    ? "text-white/40 bg-white/[0.03] border-white/10"
-    : "text-white/70 bg-white/10 border-white/15";
+  const activeStyle = {
+    background: "rgba(37,99,235,0.2)",
+    color: "#2563EB",
+  };
+  const inactiveStyle = {
+    background: "rgba(255,255,255,0.1)",
+    color: count === 0 ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.75)",
+  };
   return (
     <span
-      className={`inline-flex items-center justify-center min-w-[20px] px-1.5 py-0.5 rounded-full text-[9px] font-bold border tabular-nums ${cls}`}
+      className="inline-flex items-center justify-center tabular-nums font-bold"
+      style={{
+        fontSize: "10px",
+        padding: "1px 6px",
+        borderRadius: "10px",
+        minWidth: "18px",
+        ...(active ? activeStyle : inactiveStyle),
+      }}
     >
       {count}
     </span>

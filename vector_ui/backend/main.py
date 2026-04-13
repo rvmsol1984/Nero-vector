@@ -686,7 +686,12 @@ def governance_stale_accounts() -> dict:
 
 @app.get("/api/governance/mfa-changes")
 def governance_mfa_changes() -> list[dict]:
-    """StrongAuthentication / MFA config mutations."""
+    """StrongAuthentication / MFA config mutations.
+
+    Filters out ServicePrincipal_-prefixed user_id values so the view
+    only shows human identities (application sign-ins / service
+    principal auth lives elsewhere).
+    """
     return db.fetch_all(
         """
         SELECT
@@ -702,6 +707,7 @@ def governance_mfa_changes() -> list[dict]:
             ) AS operations
         FROM vector_events
         WHERE client_name = %s
+          AND user_id NOT LIKE 'ServicePrincipal_%%'
           AND (
               event_type               ILIKE '%%StrongAuthentication%%'
            OR event_type               ILIKE '%%MFA%%'
@@ -816,16 +822,34 @@ def _graph_get(path_with_query: str) -> dict:
 
 @app.get("/api/governance/guest-users")
 def governance_guest_users() -> list[dict]:
-    """List guest users in the GCS tenant via Microsoft Graph."""
-    query = urllib.parse.urlencode(
-        {
-            "$filter": "userType eq 'Guest'",
-            "$select": "id,displayName,mail,userPrincipalName,createdDateTime,signInActivity",
-        }
+    """List guest users in the GCS tenant via Microsoft Graph.
+
+    Hand-builds the query string with literal ``$`` so Graph parses
+    ``$filter`` / ``$select`` correctly (python's ``urlencode`` would
+    percent-encode the ``$``), and requests ``userType`` in the
+    projection so we can defensively re-check the server-side filter
+    client-side -- if Graph ever returns a Member we drop it here
+    instead of showing it as a guest.
+    """
+    filter_value = urllib.parse.quote("userType eq 'Guest'", safe="")
+    path = (
+        "/users"
+        f"?$filter={filter_value}"
+        "&$select=id,displayName,mail,userPrincipalName,"
+        "createdDateTime,signInActivity,userType,accountEnabled"
+        "&$top=500"
     )
-    data = _graph_get(f"/users?{query}")
+
+    data = _graph_get(path)
+    raw_values = data.get("value", []) or []
+
     out: list[dict] = []
-    for u in data.get("value", []) or []:
+    for u in raw_values:
+        # Defensive: the server-side filter is the source of truth,
+        # but we re-check here in case a future Graph beta quirk lets
+        # a Member slip through.
+        if u.get("userType") and u.get("userType") != "Guest":
+            continue
         sign_in = u.get("signInActivity") or {}
         out.append(
             {
