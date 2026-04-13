@@ -685,11 +685,135 @@ def _parse_device_properties(dp: Any) -> dict | None:
 def governance_unmanaged_devices_detail(user_id: str) -> list[dict]:
     """Per-device breakdown for a given user on the Unmanaged Devices tab.
 
-    Pulls every distinct DeviceProperties blob across that user's UAL
-    events in GCS, parses each one, drops anything that's both
-    compliant *and* managed, and returns a deduplicated list keyed by
-    device display name / id. Each row carries last_seen timestamp.
+    Preferred source: Microsoft Intune. We fetch the cached fleet list
+    from ``_fetch_intune_devices``, pick out the rows whose
+    ``userPrincipalName`` matches this user, and build merged records
+    with the real device name / OS / compliance state / encryption
+    status plus the UAL last-seen timestamp. Anything that's fully
+    compliant AND encrypted AND not stale is dropped -- this view is
+    the non-clean queue.
+
+    Fallback (no Intune data for this user): parse UAL DeviceProperties
+    the old way so a Graph outage doesn't blank the panel.
     """
+    upn_lower = str(user_id or "").strip().lower()
+
+    # ---- 1. Intune devices for this user (if Graph is reachable) ----
+    intune_user: list[dict] = []
+    try:
+        all_intune = _fetch_intune_devices()
+    except HTTPException as exc:
+        logger.warning(
+            "intune fetch failed for unmanaged-devices detail; "
+            "falling back to UAL-only parsing: %s",
+            exc.detail,
+        )
+        all_intune = []
+    except Exception:
+        logger.exception("intune fetch crashed for unmanaged-devices detail")
+        all_intune = []
+
+    for d in all_intune or []:
+        if (d.get("userPrincipalName") or "").strip().lower() == upn_lower:
+            intune_user.append(d)
+
+    # ---- 2. Shared UAL signals for this user (one query either way) ----
+    ual_row = db.fetch_one(
+        """
+        SELECT
+            MAX(timestamp)    AS last_seen,
+            COUNT(*)::bigint  AS event_count
+        FROM vector_events
+        WHERE client_name = %s
+          AND user_id     = %s
+        """,
+        (_GCS, user_id),
+    ) or {}
+    ual_last_seen = ual_row.get("last_seen")
+    ual_event_count = int(ual_row.get("event_count") or 0)
+
+    # ---- 3. Intune path: enrich UAL with Graph device metadata ----
+    if intune_user:
+        stale_threshold = (
+            datetime.now(tz=timezone.utc) - timedelta(days=_STALE_SYNC_DAYS)
+        )
+        merged: list[dict] = []
+        for d in intune_user:
+            state = (d.get("complianceState") or "").strip().lower()
+            # Only expose the boolean if Graph was definitive ("compliant"
+            # vs. everything else). "unknown" / empty leaves it None so
+            # the frontend renders an em-dash instead of a wrong red "no".
+            is_compliant_bool: bool | None
+            if state == "compliant":
+                is_compliant_bool = True
+            elif state and state != "unknown":
+                is_compliant_bool = False
+            else:
+                is_compliant_bool = None
+
+            is_encrypted = d.get("isEncrypted")
+            is_stale = _device_is_stale(d, stale_threshold)
+
+            # Non-clean filter: surface anything that's explicitly
+            # non-compliant, explicitly unencrypted, or hasn't synced in
+            # >30d. Anything passing all three tests is clean and drops
+            # out of this view.
+            if (
+                is_compliant_bool is not False
+                and is_encrypted is not False
+                and not is_stale
+            ):
+                continue
+
+            os_label = (d.get("operatingSystem") or "").strip()
+            if d.get("osVersion"):
+                os_label = f"{os_label} {d['osVersion']}".strip()
+
+            merged.append(
+                {
+                    # Keep the same field names the existing frontend
+                    # already renders (display_name, name, os,
+                    # is_compliant, is_managed, last_seen) so this
+                    # endpoint is a drop-in enrichment.
+                    "display_name":     d.get("deviceName"),
+                    "name":             d.get("deviceName"),
+                    "os":               os_label or None,
+                    "is_compliant":     is_compliant_bool,
+                    "is_managed":       True,  # Intune-enrolled ⇒ managed by definition
+                    "last_seen":        ual_last_seen,
+                    # Extended Intune fields used by the richer device panel:
+                    "compliance_state":    d.get("complianceState"),
+                    "is_encrypted":        is_encrypted,
+                    "last_sync_date_time": d.get("lastSyncDateTime"),
+                    "os_version":          d.get("osVersion"),
+                    "managed_owner_type":  d.get("managedDeviceOwnerType"),
+                    "ual_event_count":     ual_event_count,
+                    "source":              "intune",
+                }
+            )
+
+        if merged:
+            def _severity(dev: dict) -> int:
+                nc = dev.get("is_compliant") is False
+                ne = dev.get("is_encrypted") is False
+                if nc and ne:
+                    return 0
+                if nc or ne:
+                    return 1
+                return 2
+
+            merged.sort(
+                key=lambda dev: (
+                    _severity(dev),
+                    dev.get("last_sync_date_time") or "",
+                )
+            )
+            return merged
+        # Intune returned devices for this user but they're all clean --
+        # fall through to the UAL parse so we still surface whatever
+        # DeviceProperties hinted at in the audit events.
+
+    # ---- 4. Fallback: pure-UAL DeviceProperties parsing ----
     rows = db.fetch_all(
         """
         SELECT
@@ -706,7 +830,6 @@ def governance_unmanaged_devices_detail(user_id: str) -> list[dict]:
         (_GCS, user_id),
     )
 
-    # The GROUP BY returned JSONB::text -- re-parse each blob once.
     by_device: dict[str, dict] = {}
     for row in rows:
         raw = row.get("device_properties")
@@ -719,8 +842,6 @@ def governance_unmanaged_devices_detail(user_id: str) -> list[dict]:
         parsed = _parse_device_properties(parsed_list)
         if not parsed:
             continue
-        # Keep only devices that are non-compliant OR unmanaged --
-        # anything else doesn't belong in the Unmanaged Devices view.
         if parsed["is_compliant"] is not False and parsed["is_managed"] is not False:
             continue
         key = (
@@ -733,9 +854,9 @@ def governance_unmanaged_devices_detail(user_id: str) -> list[dict]:
         last_seen = row.get("last_seen")
         if existing is None or (last_seen and last_seen > existing.get("last_seen")):
             parsed["last_seen"] = last_seen
+            parsed["source"] = "ual"
             by_device[key] = parsed
 
-    # Sort most-recently-seen first.
     return sorted(
         by_device.values(),
         key=lambda d: d.get("last_seen") or "",

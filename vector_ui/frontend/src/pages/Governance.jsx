@@ -1297,94 +1297,158 @@ function DeviceDetailTable({ detail, loading }) {
     );
   }
 
+  // If any row came from Intune, surface a small corner tag so the
+  // operator knows the enrichment happened.
+  const hasIntuneRows = devices.some((d) => d.source === "intune");
+
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-[0.15em] text-white/40 mb-2">
-        Devices
+      <div className="flex items-center gap-2 mb-2">
+        <div className="text-[10px] uppercase tracking-[0.15em] text-white/40">
+          Devices
+        </div>
+        {hasIntuneRows && (
+          <span
+            className="inline-flex items-center px-1.5 py-[2px] text-[9px] font-bold uppercase tracking-wide rounded border"
+            style={{
+              color: "#3B82F6",
+              borderColor: "#3B82F655",
+              backgroundColor: "#3B82F614",
+            }}
+          >
+            enriched · Intune
+          </span>
+        )}
       </div>
-      <table className="min-w-full text-[11px]">
-        <thead>
-          <tr>
-            <th className="w-5"></th>
-            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
-              Device Name
-            </th>
-            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
-              OS
-            </th>
-            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
-              Compliant
-            </th>
-            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
-              Managed
-            </th>
-            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
-              Last Seen
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-white/5">
-          {devices.map((d, i) => {
-            const notCompliant = d.is_compliant === false;
-            const notManaged = d.is_managed === false;
-            // Red dot for non-compliant (with or without unmanaged);
-            // orange for unmanaged-only; green for clean.
-            let dotColor;
-            if (notCompliant) dotColor = "#EF4444";
-            else if (notManaged) dotColor = "#F97316";
-            else dotColor = "#10B981";
-            return (
-              <tr key={`${d.display_name || d.name || d.device_id || "dev"}-${i}`}>
-                <td className="px-1.5 py-2">
-                  <span
-                    className="inline-block h-2 w-2 rounded-full"
-                    style={{ background: dotColor }}
-                    title={
-                      notCompliant
-                        ? "Not compliant"
-                        : notManaged
-                        ? "Not managed"
-                        : "Clean"
-                    }
-                  />
-                </td>
-                <td
-                  className="px-2 py-2 font-mono truncate max-w-[260px]"
-                  title={d.display_name || d.name || d.device_id || ""}
-                >
-                  {d.display_name || d.name || d.device_id || (
-                    <span className="text-white/30">—</span>
-                  )}
-                </td>
-                <td className="px-2 py-2 text-white/60">
-                  {d.os || <span className="text-white/30">—</span>}
-                </td>
-                <td className="px-2 py-2">
-                  {d.is_compliant === true ? (
-                    <span className="text-status-resolved font-medium">yes</span>
-                  ) : d.is_compliant === false ? (
-                    <span className="text-critical font-medium">no</span>
-                  ) : (
-                    <span className="text-white/30">—</span>
-                  )}
-                </td>
-                <td className="px-2 py-2">
-                  {d.is_managed === true ? (
-                    <span className="text-status-resolved font-medium">yes</span>
-                  ) : d.is_managed === false ? (
-                    <span className="text-high font-medium">no</span>
-                  ) : (
-                    <span className="text-white/30">—</span>
-                  )}
-                </td>
-                <td className="px-2 py-2 text-white/50 whitespace-nowrap">
-                  {d.last_seen ? fmtTime(d.last_seen) : "—"}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead>
+            <tr>
+              <th className="w-5"></th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Device Name
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                OS
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Compliance
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Encrypted
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Managed
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Last Intune Sync
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Last UAL Event
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {devices.map((d, i) => {
+              const notCompliant = d.is_compliant === false;
+              const notManaged = d.is_managed === false;
+              const notEncrypted = d.is_encrypted === false;
+              // Red for non-compliant or unencrypted (hard failures);
+              // orange for unmanaged-only; green for clean.
+              let dotColor;
+              let dotTitle;
+              if (notCompliant) {
+                dotColor = "#EF4444";
+                dotTitle = "Non-compliant";
+              } else if (notEncrypted) {
+                dotColor = "#EF4444";
+                dotTitle = "Not encrypted";
+              } else if (notManaged) {
+                dotColor = "#F97316";
+                dotTitle = "Not managed";
+              } else {
+                dotColor = "#10B981";
+                dotTitle = "Clean";
+              }
+
+              // Prefer Intune complianceState over the UAL boolean so
+              // we render the real Graph string (e.g. "noncompliant",
+              // "inGracePeriod", "error") when available.
+              const complianceLabel = d.compliance_state
+                ? String(d.compliance_state)
+                : d.is_compliant === true
+                ? "compliant"
+                : d.is_compliant === false
+                ? "noncompliant"
+                : null;
+              const complianceColor =
+                complianceLabel === "compliant"
+                  ? "text-status-resolved"
+                  : complianceLabel && complianceLabel !== "unknown"
+                  ? "text-critical"
+                  : "text-white/30";
+
+              return (
+                <tr key={`${d.display_name || d.name || d.device_id || "dev"}-${i}`}>
+                  <td className="px-1.5 py-2">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ background: dotColor }}
+                      title={dotTitle}
+                    />
+                  </td>
+                  <td
+                    className="px-2 py-2 font-mono truncate max-w-[260px]"
+                    title={d.display_name || d.name || d.device_id || ""}
+                  >
+                    {d.display_name || d.name || d.device_id || (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-white/60 whitespace-nowrap">
+                    {d.os || <span className="text-white/30">—</span>}
+                  </td>
+                  <td className={`px-2 py-2 font-medium ${complianceColor}`}>
+                    {complianceLabel || <span className="text-white/30">—</span>}
+                  </td>
+                  <td className="px-2 py-2">
+                    {d.is_encrypted === true ? (
+                      <span className="text-status-resolved font-medium">yes</span>
+                    ) : d.is_encrypted === false ? (
+                      <span className="text-critical font-medium">no</span>
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2">
+                    {d.is_managed === true ? (
+                      <span className="text-status-resolved font-medium">yes</span>
+                    ) : d.is_managed === false ? (
+                      <span className="text-high font-medium">no</span>
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-white/50 whitespace-nowrap">
+                    {d.last_sync_date_time ? (
+                      fmtTime(d.last_sync_date_time)
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-white/50 whitespace-nowrap">
+                    {d.last_seen ? (
+                      fmtTime(d.last_seen)
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
