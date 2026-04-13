@@ -900,7 +900,49 @@ function GuestUsersTable({ rows }) {
   );
 }
 
+function Chevron({ open }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="text-white/40 transition-transform duration-200"
+      style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)" }}
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
 function UnmanagedDevicesTable({ rows }) {
+  const [expanded, setExpanded] = useState(null);
+  // Per-user cache so re-opening doesn't refetch.
+  const [detailCache, setDetailCache] = useState({});
+  const [loadingUser, setLoadingUser] = useState(null);
+
+  async function toggle(userId) {
+    if (expanded === userId) {
+      setExpanded(null);
+      return;
+    }
+    setExpanded(userId);
+    if (detailCache[userId] !== undefined) return;
+    setLoadingUser(userId);
+    try {
+      const result = await api.govUnmanagedDevicesDetail(userId);
+      setDetailCache((prev) => ({ ...prev, [userId]: result || [] }));
+    } catch (e) {
+      setDetailCache((prev) => ({ ...prev, [userId]: { error: e.message } }));
+    } finally {
+      setLoadingUser((prev) => (prev === userId ? null : prev));
+    }
+  }
+
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -911,31 +953,175 @@ function UnmanagedDevicesTable({ rows }) {
             <Th>Last Seen</Th>
             <Th>Devices</Th>
             <Th>Status</Th>
+            <Th>&nbsp;</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => (
-            <tr key={row.entity_key} className="hover:bg-white/[0.03]">
-              <td className="px-4 py-2.5">
-                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-              </td>
-              <td className="px-4 py-2.5 text-right tabular-nums">
-                {fmtNumber(row.event_count)}
-              </td>
-              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                {fmtRelative(row.last_seen)}
-              </td>
-              <td className="px-4 py-2.5 text-white/60">
-                <DeviceList devices={row.devices} />
-              </td>
-              <td className="px-4 py-2.5">
-                <SeverityPill severity="review" />
-              </td>
-            </tr>
-          ))}
+          {rows.map((row) => {
+            const isOpen = expanded === row.user_id;
+            const isLoading = loadingUser === row.user_id;
+            const detail = detailCache[row.user_id];
+            return (
+              <Fragment key={row.entity_key}>
+                <tr
+                  onClick={() => toggle(row.user_id)}
+                  className={`cursor-pointer ${
+                    isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"
+                  }`}
+                >
+                  <td className="px-4 py-2.5">
+                    <UserCell
+                      entityKey={row.entity_key}
+                      userId={row.user_id}
+                      clientName={row.client_name}
+                    />
+                  </td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">
+                    {fmtNumber(row.event_count)}
+                  </td>
+                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                    {fmtRelative(row.last_seen)}
+                  </td>
+                  <td className="px-4 py-2.5 text-white/60">
+                    <DeviceList devices={row.devices} />
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <SeverityPill severity="review" />
+                  </td>
+                  <td className="px-4 py-2.5 w-8 text-right">
+                    <Chevron open={isOpen} />
+                  </td>
+                </tr>
+                {isOpen && (
+                  <tr className="bg-black/30">
+                    <td
+                      colSpan={6}
+                      className="px-4 py-3 border-t border-white/5 animate-slide-up"
+                    >
+                      <DeviceDetailTable detail={detail} loading={isLoading} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </TableCard>
+  );
+}
+
+function DeviceDetailTable({ detail, loading }) {
+  if (loading) {
+    return (
+      <div className="text-white/40 text-xs py-2">loading device details…</div>
+    );
+  }
+  if (detail && detail.error) {
+    return (
+      <div className="text-critical text-xs py-2">
+        load error: {detail.error}
+      </div>
+    );
+  }
+  const devices = Array.isArray(detail) ? detail : [];
+  if (devices.length === 0) {
+    return (
+      <div className="text-white/40 text-xs py-2">
+        No device details available
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.15em] text-white/40 mb-2">
+        Devices
+      </div>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <th className="w-5"></th>
+            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+              Device Name
+            </th>
+            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+              OS
+            </th>
+            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+              Compliant
+            </th>
+            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+              Managed
+            </th>
+            <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+              Last Seen
+            </th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {devices.map((d, i) => {
+            const notCompliant = d.is_compliant === false;
+            const notManaged = d.is_managed === false;
+            // Red dot for non-compliant (with or without unmanaged);
+            // orange for unmanaged-only; green for clean.
+            let dotColor;
+            if (notCompliant) dotColor = "#EF4444";
+            else if (notManaged) dotColor = "#F97316";
+            else dotColor = "#10B981";
+            return (
+              <tr key={`${d.display_name || d.name || d.device_id || "dev"}-${i}`}>
+                <td className="px-1.5 py-2">
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ background: dotColor }}
+                    title={
+                      notCompliant
+                        ? "Not compliant"
+                        : notManaged
+                        ? "Not managed"
+                        : "Clean"
+                    }
+                  />
+                </td>
+                <td
+                  className="px-2 py-2 font-mono truncate max-w-[260px]"
+                  title={d.display_name || d.name || d.device_id || ""}
+                >
+                  {d.display_name || d.name || d.device_id || (
+                    <span className="text-white/30">—</span>
+                  )}
+                </td>
+                <td className="px-2 py-2 text-white/60">
+                  {d.os || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-2 py-2">
+                  {d.is_compliant === true ? (
+                    <span className="text-status-resolved font-medium">yes</span>
+                  ) : d.is_compliant === false ? (
+                    <span className="text-critical font-medium">no</span>
+                  ) : (
+                    <span className="text-white/30">—</span>
+                  )}
+                </td>
+                <td className="px-2 py-2">
+                  {d.is_managed === true ? (
+                    <span className="text-status-resolved font-medium">yes</span>
+                  ) : d.is_managed === false ? (
+                    <span className="text-high font-medium">no</span>
+                  ) : (
+                    <span className="text-white/30">—</span>
+                  )}
+                </td>
+                <td className="px-2 py-2 text-white/50 whitespace-nowrap">
+                  {d.last_seen ? fmtTime(d.last_seen) : "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

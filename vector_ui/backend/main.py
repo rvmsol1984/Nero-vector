@@ -629,6 +629,119 @@ def governance_unmanaged_devices() -> list[dict]:
     )
 
 
+def _parse_device_properties(dp: Any) -> dict | None:
+    """Flatten a UAL DeviceProperties array-of-{Name,Value} into a dict.
+
+    Returns None if ``dp`` isn't a list (or nothing usable came out of it).
+    Values are left as-is except booleans, which are normalised to real
+    Python bools so the frontend doesn't have to stringcase them.
+    """
+    if not isinstance(dp, list):
+        return None
+    out: dict = {
+        "display_name":  None,
+        "name":          None,
+        "os":            None,
+        "is_compliant":  None,
+        "is_managed":    None,
+        "browser":       None,
+        "device_id":     None,
+    }
+    for prop in dp:
+        if not isinstance(prop, dict):
+            continue
+        key = prop.get("Name")
+        val = prop.get("Value")
+        if key == "DisplayName":
+            out["display_name"] = val
+        elif key == "Name":
+            out["name"] = val
+        elif key == "OS":
+            out["os"] = val
+        elif key == "IsCompliant":
+            out["is_compliant"] = str(val).strip().lower() == "true"
+        elif key == "IsCompliantAndManaged":
+            # Some UAL payloads use this combined flag. If it's False, the
+            # device is either non-compliant or unmanaged; leave the two
+            # individual flags at their current value if we haven't seen
+            # them explicitly.
+            if out["is_compliant"] is None and out["is_managed"] is None:
+                both = str(val).strip().lower() == "true"
+                out["is_compliant"] = both
+                out["is_managed"] = both
+        elif key == "IsManaged":
+            out["is_managed"] = str(val).strip().lower() == "true"
+        elif key == "BrowserType":
+            out["browser"] = val
+        elif key == "DeviceId":
+            out["device_id"] = val
+    if not any(out.values()):
+        return None
+    return out
+
+
+@app.get("/api/governance/unmanaged-devices/{user_id}/devices")
+def governance_unmanaged_devices_detail(user_id: str) -> list[dict]:
+    """Per-device breakdown for a given user on the Unmanaged Devices tab.
+
+    Pulls every distinct DeviceProperties blob across that user's UAL
+    events in GCS, parses each one, drops anything that's both
+    compliant *and* managed, and returns a deduplicated list keyed by
+    device display name / id. Each row carries last_seen timestamp.
+    """
+    rows = db.fetch_all(
+        """
+        SELECT
+            raw_json->'DeviceProperties'::text AS device_properties,
+            MAX(timestamp)                     AS last_seen
+        FROM vector_events
+        WHERE client_name = %s
+          AND user_id     = %s
+          AND raw_json ? 'DeviceProperties'
+        GROUP BY raw_json->'DeviceProperties'::text
+        ORDER BY last_seen DESC
+        LIMIT 200
+        """,
+        (_GCS, user_id),
+    )
+
+    # The GROUP BY returned JSONB::text -- re-parse each blob once.
+    by_device: dict[str, dict] = {}
+    for row in rows:
+        raw = row.get("device_properties")
+        if not raw:
+            continue
+        try:
+            parsed_list = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            continue
+        parsed = _parse_device_properties(parsed_list)
+        if not parsed:
+            continue
+        # Keep only devices that are non-compliant OR unmanaged --
+        # anything else doesn't belong in the Unmanaged Devices view.
+        if parsed["is_compliant"] is not False and parsed["is_managed"] is not False:
+            continue
+        key = (
+            parsed.get("display_name")
+            or parsed.get("name")
+            or parsed.get("device_id")
+            or "unknown"
+        )
+        existing = by_device.get(key)
+        last_seen = row.get("last_seen")
+        if existing is None or (last_seen and last_seen > existing.get("last_seen")):
+            parsed["last_seen"] = last_seen
+            by_device[key] = parsed
+
+    # Sort most-recently-seen first.
+    return sorted(
+        by_device.values(),
+        key=lambda d: d.get("last_seen") or "",
+        reverse=True,
+    )
+
+
 @app.get("/api/governance/broken-inheritance")
 def governance_broken_inheritance() -> list[dict]:
     """SharingInheritanceBroken events rolled up by user."""

@@ -70,6 +70,9 @@ export const api = {
   // ----- extended GCS governance (tenant hard-coded server-side) --------
   govExternalForwarding: () => get("/api/governance/external-forwarding"),
   govUnmanagedDevices:   () => get("/api/governance/unmanaged-devices"),
+  govUnmanagedDevicesDetail:
+    (userId) =>
+      get(`/api/governance/unmanaged-devices/${encodeURIComponent(userId)}/devices`),
   govBrokenInheritance:  () => get("/api/governance/broken-inheritance"),
   govOauthApps:          () => get("/api/governance/oauth-apps"),
   govPasswordSpray:      () => get("/api/governance/password-spray"),
