@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -498,10 +499,61 @@ def governance_broken_inheritance() -> list[dict]:
     )
 
 
+# NERO Vector's own app registration — excluded from OAuth Apps findings
+# because it's expected to collect consent (it's literally this process).
+_NERO_VECTOR_APP_ID = "d6cf81b1-3067-46b2-96ef-8c1e946c55de"
+
+_GUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+# Cache of resolved app_id -> displayName. Negative lookups are stored as
+# "" so we don't hammer Graph on every page load for missing apps.
+_SP_NAME_CACHE: dict[str, str] = {}
+
+
+def _resolve_app_display_name(app_id: str | None) -> str | None:
+    """Look up a servicePrincipal displayName by appId via Microsoft Graph.
+
+    Returns None for non-GUID input or when Graph returns nothing. Uses
+    the same VECTOR_CLIENT_ID/SECRET client credentials as the guest
+    users endpoint, with responses cached for the lifetime of the
+    process.
+    """
+    if not app_id or not _GUID_RE.match(app_id):
+        return None
+    if app_id in _SP_NAME_CACHE:
+        cached = _SP_NAME_CACHE[app_id]
+        return cached or None
+    try:
+        query = urllib.parse.urlencode(
+            {
+                "$filter": f"appId eq '{app_id}'",
+                "$select": "displayName,appId",
+            }
+        )
+        data = _graph_get(f"/servicePrincipals?{query}")
+    except HTTPException:
+        # _graph_get already logged; remember the failure so we don't retry
+        # every single page load.
+        _SP_NAME_CACHE[app_id] = ""
+        return None
+
+    values = data.get("value") or []
+    if not values:
+        _SP_NAME_CACHE[app_id] = ""
+        return None
+    name = str(values[0].get("displayName") or "").strip()
+    _SP_NAME_CACHE[app_id] = name
+    return name or None
+
+
 @app.get("/api/governance/oauth-apps")
 def governance_oauth_apps() -> list[dict]:
-    """Consent to application. events grouped by app."""
-    return db.fetch_all(
+    """Consent to application. events grouped by app, with the NERO
+    Vector app itself filtered out and every remaining GUID resolved
+    to its servicePrincipal displayName (cached)."""
+    rows = db.fetch_all(
         """
         SELECT
             raw_json->>'ObjectId'              AS app_name,
@@ -515,12 +567,19 @@ def governance_oauth_apps() -> list[dict]:
         FROM vector_events
         WHERE event_type = 'Consent to application.'
           AND client_name = %s
+          AND COALESCE(raw_json->>'ObjectId', '') <> %s
         GROUP BY raw_json->>'ObjectId'
         ORDER BY user_count DESC
         LIMIT 100
         """,
-        (_GCS,),
+        (_GCS, _NERO_VECTOR_APP_ID),
     )
+    for row in rows:
+        app_id = row.get("app_name")
+        row["app_id"] = app_id
+        resolved = _resolve_app_display_name(app_id) if app_id else None
+        row["display_name"] = resolved or app_id
+    return rows
 
 
 @app.get("/api/governance/password-spray")
@@ -553,10 +612,41 @@ def governance_password_spray() -> list[dict]:
     )
 
 
+_STALE_REQUIRED_DAYS = 14
+
+
 @app.get("/api/governance/stale-accounts")
-def governance_stale_accounts() -> list[dict]:
-    """Users with activity in the last 30d but no UserLoggedIn in the last 30d."""
-    return db.fetch_all(
+def governance_stale_accounts() -> dict:
+    """Users with activity in the last 30d but no UserLoggedIn in the last
+    30d. Guarded by a baseline check: if we have less than
+    ``_STALE_REQUIRED_DAYS`` of data for GCS, return an
+    ``insufficient_data`` envelope so the UI can render a
+    "check back later" state instead of listing every active user as
+    "stale" during the initial monitoring window.
+    """
+    baseline = db.fetch_one(
+        """
+        SELECT
+            COALESCE(
+                EXTRACT(EPOCH FROM (now() - MIN(timestamp))) / 86400.0,
+                0
+            )::float AS days_of_data
+        FROM vector_events
+        WHERE client_name = %s
+        """,
+        (_GCS,),
+    ) or {}
+    days_of_data = float(baseline.get("days_of_data") or 0)
+
+    if days_of_data < _STALE_REQUIRED_DAYS:
+        return {
+            "sufficient_data": False,
+            "days_available": round(days_of_data, 1),
+            "required_days": _STALE_REQUIRED_DAYS,
+            "rows": [],
+        }
+
+    rows = db.fetch_all(
         """
         SELECT
             entity_key,
@@ -586,6 +676,12 @@ def governance_stale_accounts() -> list[dict]:
         """,
         (_GCS, _GCS),
     )
+    return {
+        "sufficient_data": True,
+        "days_available": round(days_of_data, 1),
+        "required_days": _STALE_REQUIRED_DAYS,
+        "rows": rows,
+    }
 
 
 @app.get("/api/governance/mfa-changes")

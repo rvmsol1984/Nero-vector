@@ -152,8 +152,8 @@ export default function Governance() {
 // tab dispatch
 // ---------------------------------------------------------------------------
 
-function TabPanel({ tabId, rows, loading, error }) {
-  if (rows === undefined || loading) {
+function TabPanel({ tabId, rows: raw, loading, error }) {
+  if (raw === undefined || loading) {
     return (
       <div className="card py-12 text-center text-white/40 text-sm">
         loading…
@@ -167,6 +167,27 @@ function TabPanel({ tabId, rows, loading, error }) {
       </div>
     );
   }
+
+  // Endpoints may return an array OR an envelope ({rows, ...meta}).
+  // Today only /api/governance/stale-accounts uses the envelope to
+  // signal "not enough monitoring history yet".
+  let rows = raw;
+  let meta = null;
+  if (!Array.isArray(raw) && raw && typeof raw === "object") {
+    rows = Array.isArray(raw.rows) ? raw.rows : [];
+    meta = raw;
+  }
+
+  // Special case: stale accounts with insufficient data -> informational
+  // state instead of the generic green-check empty state.
+  if (
+    tabId === "staleAccounts" &&
+    meta &&
+    meta.sufficient_data === false
+  ) {
+    return <InsufficientDataCard meta={meta} />;
+  }
+
   if (!rows.length) {
     return (
       <div className="card">
@@ -260,6 +281,33 @@ function EmptyState() {
       </svg>
       <div>No findings detected</div>
       <SeverityPill severity="clean" />
+    </div>
+  );
+}
+
+function InsufficientDataCard({ meta }) {
+  const days = meta?.days_available ?? 0;
+  const required = meta?.required_days ?? 14;
+  return (
+    <div className="card py-14 px-6 flex flex-col items-center text-center gap-3">
+      <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+        <circle cx="24" cy="24" r="22" stroke="#EAB308" strokeWidth="1.5" />
+        <path
+          d="M24 14 v12"
+          stroke="#EAB308"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+        />
+        <circle cx="24" cy="32" r="1.75" fill="#EAB308" />
+      </svg>
+      <div className="text-white/70 text-sm font-medium">
+        Insufficient data — check back after {required} days of monitoring
+      </div>
+      <div className="text-white/40 text-[11px]">
+        {days.toLocaleString(undefined, { maximumFractionDigits: 1 })} /{" "}
+        {required} days of tenant history collected
+      </div>
+      <SeverityPill severity="monitor" />
     </div>
   );
 }
@@ -493,7 +541,10 @@ function OauthAppsTable({ rows }) {
         </thead>
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
-            const key = row.app_name || "(unknown)";
+            const appId = row.app_id || row.app_name || "";
+            const displayName = row.display_name || appId || "(unknown)";
+            const showGuid = !!appId && displayName !== appId;
+            const key = appId || displayName;
             const isOpen = open === key;
             return (
               <Fragment key={key}>
@@ -501,8 +552,16 @@ function OauthAppsTable({ rows }) {
                   onClick={() => setOpen(isOpen ? null : key)}
                   className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
                 >
-                  <td className="px-4 py-2.5 truncate max-w-[420px] font-medium" title={row.app_name}>
-                    {row.app_name || <span className="text-white/40">(unnamed)</span>}
+                  <td
+                    className="px-4 py-2.5 max-w-[420px]"
+                    title={appId || displayName}
+                  >
+                    <div className="font-medium truncate">{displayName}</div>
+                    {showGuid && (
+                      <div className="text-[10px] text-white/40 font-mono truncate">
+                        {appId}
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
                     {fmtNumber(row.user_count)}
