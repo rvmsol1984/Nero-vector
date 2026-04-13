@@ -32,6 +32,13 @@ const SOURCES = [
       "Endpoint behavioral telemetry and threat detections. REST API integration planned for Phase 2.",
   },
   {
+    name: "ThreatLocker",
+    status: "planned",
+    label: "PLANNED",
+    description:
+      "Application allowlisting and ringfencing telemetry. Blocked execution events and policy violations feed into Vector for endpoint correlation.",
+  },
+  {
     name: "FeedLattice / OpenCTI",
     status: "planned",
     label: "PLANNED",
