@@ -7,8 +7,13 @@ single port so the full UI fits behind a single Cloudflare Access app.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -396,6 +401,355 @@ def governance_downloads(
         """,
         (tenant, tenant, threshold),
     )
+
+
+# ---------------------------------------------------------------------------
+# Extended GCS governance signals.
+# ---------------------------------------------------------------------------
+#
+# Every query below is hard-scoped to GameChange Solar because the current
+# UI surface is the GCS-only board. Each endpoint returns per-finding rows
+# that the React client renders inside a collapsible section with a
+# severity pill (CRITICAL / REVIEW REQUIRED / MONITOR).
+
+_GCS = "GameChange Solar"
+
+
+@app.get("/api/governance/external-forwarding")
+def governance_external_forwarding() -> list[dict]:
+    """UpdateInboxRules events that mention a Forward/Redirect parameter."""
+    return db.fetch_all(
+        """
+        SELECT
+            entity_key,
+            user_id,
+            client_name,
+            COUNT(*)::bigint AS rule_count,
+            MAX(timestamp)   AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT raw_json->>'Parameters')
+                    FILTER (WHERE raw_json->>'Parameters' IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS rule_details
+        FROM vector_events
+        WHERE event_type = 'UpdateInboxRules'
+          AND client_name = %s
+          AND (
+              raw_json::text ILIKE '%%ForwardTo%%'
+           OR raw_json::text ILIKE '%%RedirectTo%%'
+           OR raw_json::text ILIKE '%%ForwardAsAttachmentTo%%'
+          )
+        GROUP BY entity_key, user_id, client_name
+        ORDER BY rule_count DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+@app.get("/api/governance/unmanaged-devices")
+def governance_unmanaged_devices() -> list[dict]:
+    """Events from devices whose DeviceProperties report IsCompliant = False."""
+    return db.fetch_all(
+        """
+        SELECT
+            entity_key,
+            user_id,
+            client_name,
+            COUNT(*)::bigint AS event_count,
+            MAX(timestamp)   AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT raw_json->'DeviceProperties')
+                    FILTER (WHERE raw_json->'DeviceProperties' IS NOT NULL),
+                ARRAY[]::jsonb[]
+            ) AS devices
+        FROM vector_events
+        WHERE client_name = %s
+          AND raw_json::text ILIKE '%%"IsCompliant"%%'
+          AND (
+              raw_json::text ILIKE '%%"IsCompliant", "Value": "False"%%'
+           OR raw_json::text ILIKE '%%IsCompliant":"False"%%'
+           OR raw_json::text ILIKE '%%IsCompliant": "False"%%'
+          )
+        GROUP BY entity_key, user_id, client_name
+        ORDER BY event_count DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+@app.get("/api/governance/broken-inheritance")
+def governance_broken_inheritance() -> list[dict]:
+    """SharingInheritanceBroken events rolled up by user."""
+    return db.fetch_all(
+        """
+        SELECT
+            entity_key,
+            user_id,
+            client_name,
+            COUNT(*)::bigint AS event_count,
+            MAX(timestamp)   AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT raw_json->>'ObjectId')
+                    FILTER (WHERE raw_json->>'ObjectId' IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS files
+        FROM vector_events
+        WHERE event_type = 'SharingInheritanceBroken'
+          AND client_name = %s
+        GROUP BY entity_key, user_id, client_name
+        ORDER BY event_count DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+@app.get("/api/governance/oauth-apps")
+def governance_oauth_apps() -> list[dict]:
+    """Consent to application. events grouped by app."""
+    return db.fetch_all(
+        """
+        SELECT
+            raw_json->>'ObjectId'              AS app_name,
+            COUNT(DISTINCT user_id)::bigint    AS user_count,
+            COALESCE(
+                array_agg(DISTINCT user_id)
+                    FILTER (WHERE user_id IS NOT NULL),
+                ARRAY[]::text[]
+            )                                  AS users,
+            MAX(timestamp)                     AS last_consent
+        FROM vector_events
+        WHERE event_type = 'Consent to application.'
+          AND client_name = %s
+        GROUP BY raw_json->>'ObjectId'
+        ORDER BY user_count DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+@app.get("/api/governance/password-spray")
+def governance_password_spray() -> list[dict]:
+    """Source IPs hitting 3+ distinct users with login failures in 24h."""
+    return db.fetch_all(
+        """
+        SELECT
+            client_ip,
+            COUNT(DISTINCT user_id)::bigint AS targeted_users,
+            COUNT(*)::bigint                AS total_attempts,
+            MIN(timestamp)                  AS first_seen,
+            MAX(timestamp)                  AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT user_id)
+                    FILTER (WHERE user_id IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS targets
+        FROM vector_events
+        WHERE event_type = 'UserLoginFailed'
+          AND client_name = %s
+          AND client_ip IS NOT NULL
+          AND timestamp > now() - INTERVAL '24 hours'
+        GROUP BY client_ip
+        HAVING COUNT(DISTINCT user_id) >= 3
+        ORDER BY targeted_users DESC, total_attempts DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+@app.get("/api/governance/stale-accounts")
+def governance_stale_accounts() -> list[dict]:
+    """Users with activity in the last 30d but no UserLoggedIn in the last 30d."""
+    return db.fetch_all(
+        """
+        SELECT
+            entity_key,
+            user_id,
+            client_name,
+            MAX(timestamp)::timestamptz AS last_activity,
+            COUNT(*)::bigint            AS total_events,
+            COALESCE(
+                array_agg(DISTINCT event_type)
+                    FILTER (WHERE event_type IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS event_types
+        FROM vector_events
+        WHERE client_name = %s
+          AND user_id NOT IN (
+              SELECT DISTINCT user_id
+              FROM vector_events
+              WHERE event_type = 'UserLoggedIn'
+                AND client_name = %s
+                AND timestamp > now() - INTERVAL '30 days'
+                AND user_id IS NOT NULL
+          )
+        GROUP BY entity_key, user_id, client_name
+        HAVING MAX(timestamp) > now() - INTERVAL '30 days'
+        ORDER BY last_activity DESC
+        LIMIT 100
+        """,
+        (_GCS, _GCS),
+    )
+
+
+@app.get("/api/governance/mfa-changes")
+def governance_mfa_changes() -> list[dict]:
+    """StrongAuthentication / MFA config mutations."""
+    return db.fetch_all(
+        """
+        SELECT
+            entity_key,
+            user_id,
+            client_name,
+            COUNT(*)::bigint AS change_count,
+            MAX(timestamp)   AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT raw_json->>'Operation')
+                    FILTER (WHERE raw_json->>'Operation' IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS operations
+        FROM vector_events
+        WHERE client_name = %s
+          AND (
+              event_type               ILIKE '%%StrongAuthentication%%'
+           OR event_type               ILIKE '%%MFA%%'
+           OR raw_json->>'Operation'   ILIKE '%%StrongAuthentication%%'
+           OR (event_type = 'Update user.' AND raw_json::text ILIKE '%%StrongAuth%%')
+          )
+        GROUP BY entity_key, user_id, client_name
+        ORDER BY last_seen DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+@app.get("/api/governance/privileged-roles")
+def governance_privileged_roles() -> list[dict]:
+    """Raw role add/remove events (no roll-up; operators want the audit trail)."""
+    return db.fetch_all(
+        """
+        SELECT
+            entity_key,
+            user_id,
+            client_name,
+            event_type,
+            raw_json->>'Operation' AS operation,
+            raw_json->>'ObjectId'  AS role,
+            raw_json->>'Actor'     AS actor,
+            timestamp
+        FROM vector_events
+        WHERE client_name = %s
+          AND event_type IN (
+              'Add member to role.',
+              'Remove member from role.',
+              'Add eligible member to role.',
+              'Remove eligible member from role.'
+          )
+        ORDER BY timestamp DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+# ---- guest users (Graph API) -----------------------------------------------
+
+_GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6"
+_GRAPH_TOKEN_CACHE: dict = {"token": None, "expires_at": 0.0}
+
+
+def _get_graph_token() -> str:
+    """Client credentials token for the GCS tenant, cached until ~1m before expiry."""
+    now = time.monotonic()
+    cached_token = _GRAPH_TOKEN_CACHE.get("token")
+    if cached_token and _GRAPH_TOKEN_CACHE.get("expires_at", 0.0) > now + 60:
+        return cached_token
+
+    client_id = os.environ.get("VECTOR_CLIENT_ID")
+    client_secret = os.environ.get("VECTOR_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="VECTOR_CLIENT_ID / VECTOR_CLIENT_SECRET not configured",
+        )
+
+    url = f"https://login.microsoftonline.com/{_GCS_TENANT_ID}/oauth2/v2.0/token"
+    body = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials",
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        logger.exception("graph token request failed")
+        raise HTTPException(status_code=502, detail=f"graph token failed: {exc}")
+
+    token = data.get("access_token")
+    if not token:
+        raise HTTPException(status_code=502, detail="graph token response missing access_token")
+
+    _GRAPH_TOKEN_CACHE["token"] = token
+    _GRAPH_TOKEN_CACHE["expires_at"] = now + int(data.get("expires_in", 3600))
+    return token
+
+
+def _graph_get(path_with_query: str) -> dict:
+    token = _get_graph_token()
+    url = f"https://graph.microsoft.com/v1.0{path_with_query}"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            body = ""
+        logger.error("graph %s -> %s %s", path_with_query, exc.code, body)
+        raise HTTPException(status_code=502, detail=f"graph {exc.code}: {body}")
+    except Exception as exc:
+        logger.exception("graph request failed")
+        raise HTTPException(status_code=502, detail=f"graph failed: {exc}")
+
+
+@app.get("/api/governance/guest-users")
+def governance_guest_users() -> list[dict]:
+    """List guest users in the GCS tenant via Microsoft Graph."""
+    query = urllib.parse.urlencode(
+        {
+            "$filter": "userType eq 'Guest'",
+            "$select": "id,displayName,mail,userPrincipalName,createdDateTime,signInActivity",
+        }
+    )
+    data = _graph_get(f"/users?{query}")
+    out: list[dict] = []
+    for u in data.get("value", []) or []:
+        sign_in = u.get("signInActivity") or {}
+        out.append(
+            {
+                "id": u.get("id"),
+                "displayName": u.get("displayName"),
+                "mail": u.get("mail") or u.get("userPrincipalName"),
+                "userPrincipalName": u.get("userPrincipalName"),
+                "createdDateTime": u.get("createdDateTime"),
+                "lastSignIn": sign_in.get("lastSignInDateTime"),
+            }
+        )
+    return out
 
 
 # ============================================================================

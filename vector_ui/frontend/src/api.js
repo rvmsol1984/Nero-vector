@@ -60,4 +60,15 @@ export const api = {
   govDlp:       (tenant) => get(`/api/governance/dlp${qs({ tenant })}`),
   govSharing:   (tenant) => get(`/api/governance/sharing${qs({ tenant })}`),
   govDownloads: (tenant) => get(`/api/governance/downloads${qs({ tenant })}`),
+
+  // ----- extended GCS governance (tenant hard-coded server-side) --------
+  govExternalForwarding: () => get("/api/governance/external-forwarding"),
+  govUnmanagedDevices:   () => get("/api/governance/unmanaged-devices"),
+  govBrokenInheritance:  () => get("/api/governance/broken-inheritance"),
+  govOauthApps:          () => get("/api/governance/oauth-apps"),
+  govPasswordSpray:      () => get("/api/governance/password-spray"),
+  govStaleAccounts:      () => get("/api/governance/stale-accounts"),
+  govMfaChanges:         () => get("/api/governance/mfa-changes"),
+  govPrivilegedRoles:    () => get("/api/governance/privileged-roles"),
+  govGuestUsers:         () => get("/api/governance/guest-users"),
 };
