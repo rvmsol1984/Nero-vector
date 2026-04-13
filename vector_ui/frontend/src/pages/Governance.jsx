@@ -23,7 +23,12 @@ const TABS = [
   { id: "privilegedRoles",   label: "Privileged Roles",  endpoint: "govPrivilegedRoles",   severity: "critical", withTenant: false },
   { id: "guestUsers",        label: "Guest Users",       endpoint: "govGuestUsers",        severity: "monitor",  withTenant: false },
   { id: "unmanagedDevices",  label: "Unmanaged Devices", endpoint: "govUnmanagedDevices",  severity: "review",   withTenant: false },
+  { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
 ];
+
+// GCS tenant -- hardcoded here because the Governance board is GCS-only and
+// we need to synthesize entity_key for the Intune user detail link.
+const GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6";
 
 // ---------------------------------------------------------------------------
 
@@ -206,6 +211,15 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
   }
 
   if (!rows.length) {
+    // Intune Devices tab gets a tab-specific empty message so the
+    // operator knows the Graph call succeeded and the fleet is clean.
+    if (tabId === "intuneDevices") {
+      return (
+        <div className="card">
+          <EmptyState message="All managed devices are compliant" />
+        </div>
+      );
+    }
     return (
       <div className="card">
         <EmptyState />
@@ -225,6 +239,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     case "privilegedRoles":   return <PrivilegedRolesTable rows={rows} />;
     case "guestUsers":        return <GuestUsersTable rows={rows} />;
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
+    case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
     default: return null;
   }
 }
@@ -302,7 +317,7 @@ function CountBadge({ count, active, loading, visited }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({ message = "No findings detected" }) {
   return (
     <div className="py-16 flex flex-col items-center text-white/50 text-sm gap-3">
       <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
@@ -316,7 +331,7 @@ function EmptyState() {
           fill="none"
         />
       </svg>
-      <div>No findings detected</div>
+      <div>{message}</div>
       <SeverityPill severity="clean" />
     </div>
   );
@@ -1008,6 +1023,255 @@ function UnmanagedDevicesTable({ rows }) {
         </tbody>
       </table>
     </TableCard>
+  );
+}
+
+// ---- Intune Devices tab ----------------------------------------------------
+
+function IssuePill({ tone, children }) {
+  const palette = {
+    red:    "#EF4444",
+    orange: "#F97316",
+    yellow: "#EAB308",
+    green:  "#10B981",
+  };
+  const color = palette[tone] || "#8b949e";
+  return (
+    <span
+      className="inline-flex items-center px-1.5 py-[2px] text-[9px] font-bold uppercase tracking-wide rounded border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: `${color}55`,
+        backgroundColor: `${color}14`,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function intuneOldestSync(devices) {
+  const times = (devices || [])
+    .map((d) => d.lastSyncDateTime)
+    .filter(Boolean);
+  if (times.length === 0) return null;
+  return times.reduce((a, b) => (a < b ? a : b));
+}
+
+function intuneDeviceStatus(device) {
+  const state = String(device.complianceState || "").toLowerCase();
+  const noncompliant = state && state !== "compliant" && state !== "unknown";
+  const unencrypted = device.isEncrypted === false;
+  const last = device.lastSyncDateTime ? new Date(device.lastSyncDateTime) : null;
+  const stale =
+    last && !Number.isNaN(last.getTime())
+      ? Date.now() - last.getTime() > 30 * 24 * 60 * 60 * 1000
+      : false;
+  // Red takes precedence over orange, orange over yellow, else green.
+  let dot = "#10B981";
+  if (noncompliant || unencrypted) dot = "#EF4444";
+  else if (stale) dot = "#EAB308";
+  return { noncompliant, unencrypted, stale, dot };
+}
+
+function IntuneDevicesTable({ rows }) {
+  const [expanded, setExpanded] = useState(null);
+
+  function toggle(user) {
+    setExpanded(expanded === user ? null : user);
+  }
+
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>User</Th>
+            <Th align="right">Devices</Th>
+            <Th>Issues</Th>
+            <Th>Oldest Sync</Th>
+            <Th>&nbsp;</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row) => {
+            const isOpen = expanded === row.user;
+            const entityKey = `${GCS_TENANT_ID}::${row.user}`;
+            return (
+              <Fragment key={row.user}>
+                <tr
+                  onClick={() => toggle(row.user)}
+                  className={`cursor-pointer ${
+                    isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"
+                  }`}
+                >
+                  <td
+                    className="px-4 py-2.5"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <UserCell
+                      entityKey={entityKey}
+                      userId={row.user}
+                      clientName="GameChange Solar"
+                    />
+                  </td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">
+                    {fmtNumber(row.device_count)}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {row.unencrypted_count > 0 && (
+                        <IssuePill tone="red">
+                          NOT ENCRYPTED · {row.unencrypted_count}
+                        </IssuePill>
+                      )}
+                      {row.noncompliant_count > 0 && (
+                        <IssuePill tone="orange">
+                          NON-COMPLIANT · {row.noncompliant_count}
+                        </IssuePill>
+                      )}
+                      {row.stale_count > 0 && (
+                        <IssuePill tone="yellow">
+                          STALE · {row.stale_count}
+                        </IssuePill>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                    {fmtRelative(intuneOldestSync(row.devices))}
+                  </td>
+                  <td className="px-4 py-2.5 w-8 text-right">
+                    <Chevron open={isOpen} />
+                  </td>
+                </tr>
+                {isOpen && (
+                  <tr className="bg-black/30">
+                    <td
+                      colSpan={5}
+                      className="px-4 py-3 border-t border-white/5 animate-slide-up"
+                    >
+                      <IntuneDeviceDetailTable devices={row.devices} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+function IntuneDeviceDetailTable({ devices }) {
+  if (!devices || devices.length === 0) {
+    return (
+      <div className="text-white/40 text-xs py-2">
+        No devices for this user
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.15em] text-white/40 mb-2">
+        Intune Devices
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead>
+            <tr>
+              <th className="w-5"></th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Device Name
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                OS
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Compliance
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Encrypted
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Owner
+              </th>
+              <th className="text-left px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">
+                Last Sync
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {devices.map((d, i) => {
+              const st = intuneDeviceStatus(d);
+              const compLabel =
+                String(d.complianceState || "unknown").toLowerCase();
+              const compColor =
+                compLabel === "compliant"
+                  ? "text-status-resolved"
+                  : compLabel === "unknown"
+                  ? "text-white/40"
+                  : "text-critical";
+              return (
+                <tr key={`${d.deviceName || "dev"}-${i}`}>
+                  <td className="px-1.5 py-2">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ background: st.dot }}
+                      title={
+                        st.noncompliant
+                          ? "Non-compliant"
+                          : st.unencrypted
+                          ? "Not encrypted"
+                          : st.stale
+                          ? `Stale — last sync > 30d`
+                          : "Clean"
+                      }
+                    />
+                  </td>
+                  <td
+                    className="px-2 py-2 font-mono truncate max-w-[240px]"
+                    title={d.deviceName || ""}
+                  >
+                    {d.deviceName || (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-white/60 whitespace-nowrap">
+                    {d.operatingSystem || "—"}
+                    {d.osVersion && (
+                      <span className="text-white/30"> {d.osVersion}</span>
+                    )}
+                  </td>
+                  <td className={`px-2 py-2 font-medium ${compColor}`}>
+                    {d.complianceState || "unknown"}
+                  </td>
+                  <td className="px-2 py-2">
+                    {d.isEncrypted === true ? (
+                      <span className="text-status-resolved font-medium">
+                        yes
+                      </span>
+                    ) : d.isEncrypted === false ? (
+                      <span className="text-critical font-medium">no</span>
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-white/60">
+                    {d.managedDeviceOwnerType || (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-white/50 whitespace-nowrap">
+                    {d.lastSyncDateTime ? fmtTime(d.lastSyncDateTime) : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

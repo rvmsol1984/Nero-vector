@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -1132,6 +1133,177 @@ def governance_guest_users() -> list[dict]:
             }
         )
     return out
+
+
+# ---- Intune managed devices (Graph: /deviceManagement/managedDevices) -------
+#
+# Fetches the full managedDevices collection for the GCS tenant, groups by
+# userPrincipalName, and flags users with at least one non-compliant,
+# unencrypted, or stale (>30d since last sync) device. The raw response is
+# cached in-process for 5 minutes so the two endpoints below can share it
+# without hammering Graph on every tab click.
+
+_INTUNE_CACHE: dict = {"data": None, "fetched_at": 0.0}
+_INTUNE_CACHE_TTL = 300  # seconds
+_STALE_SYNC_DAYS = 30
+
+
+def _parse_graph_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value)
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _fetch_intune_devices(force: bool = False) -> list[dict]:
+    """Return the cached /deviceManagement/managedDevices payload."""
+    now_mono = time.monotonic()
+    cached = _INTUNE_CACHE.get("data")
+    if (
+        not force
+        and cached is not None
+        and now_mono - _INTUNE_CACHE.get("fetched_at", 0.0) < _INTUNE_CACHE_TTL
+    ):
+        return cached
+
+    select_fields = ",".join(
+        [
+            "id",
+            "deviceName",
+            "complianceState",
+            "userPrincipalName",
+            "lastSyncDateTime",
+            "operatingSystem",
+            "osVersion",
+            "isEncrypted",
+            "managedDeviceOwnerType",
+        ]
+    )
+    path = f"/deviceManagement/managedDevices?$select={select_fields}&$top=999"
+    data = _graph_get(path)
+    values = data.get("value") or []
+    _INTUNE_CACHE["data"] = values
+    _INTUNE_CACHE["fetched_at"] = now_mono
+    return values
+
+
+def _device_is_noncompliant(device: dict) -> bool:
+    state = (device.get("complianceState") or "").strip().lower()
+    # "compliant" and "unknown"/"" are treated as OK; everything else
+    # (noncompliant, conflict, error, inGracePeriod, configManager) is a
+    # finding the operator should triage.
+    return state not in ("", "compliant", "unknown")
+
+
+def _device_is_stale(
+    device: dict, threshold: datetime
+) -> bool:
+    last_sync = _parse_graph_iso(device.get("lastSyncDateTime"))
+    if last_sync is None:
+        return False
+    return last_sync < threshold
+
+
+def _project_device(d: dict) -> dict:
+    return {
+        "deviceName":             d.get("deviceName"),
+        "complianceState":        d.get("complianceState"),
+        "lastSyncDateTime":       d.get("lastSyncDateTime"),
+        "operatingSystem":        d.get("operatingSystem"),
+        "osVersion":              d.get("osVersion"),
+        "isEncrypted":            d.get("isEncrypted"),
+        "managedDeviceOwnerType": d.get("managedDeviceOwnerType"),
+    }
+
+
+def _group_intune_by_user(
+    devices: list[dict], only_with_issues: bool = True
+) -> list[dict]:
+    stale_threshold = datetime.now(tz=timezone.utc) - timedelta(days=_STALE_SYNC_DAYS)
+
+    by_user: dict[str, list[dict]] = {}
+    for d in devices:
+        upn = (d.get("userPrincipalName") or "").strip().lower()
+        if not upn:
+            continue
+        by_user.setdefault(upn, []).append(d)
+
+    out: list[dict] = []
+    for upn, user_devices in by_user.items():
+        noncompliant = sum(1 for d in user_devices if _device_is_noncompliant(d))
+        unencrypted = sum(1 for d in user_devices if d.get("isEncrypted") is False)
+        stale = sum(
+            1 for d in user_devices if _device_is_stale(d, stale_threshold)
+        )
+        total_issues = noncompliant + unencrypted + stale
+        if only_with_issues and total_issues == 0:
+            continue
+
+        out.append(
+            {
+                "user":                upn,
+                "devices":             [_project_device(d) for d in user_devices],
+                "device_count":        len(user_devices),
+                "noncompliant_count":  noncompliant,
+                "unencrypted_count":   unencrypted,
+                "stale_count":         stale,
+                "total_issues":        total_issues,
+            }
+        )
+
+    # Sort: most issues first, then oldest last sync across this user's
+    # devices, so the operator's eye lands on the worst offenders.
+    def _oldest_sync(entry: dict) -> str:
+        candidates = [
+            d.get("lastSyncDateTime")
+            for d in entry.get("devices", [])
+            if d.get("lastSyncDateTime")
+        ]
+        return min(candidates) if candidates else "9999-12-31T00:00:00Z"
+
+    out.sort(key=lambda e: (-e["total_issues"], _oldest_sync(e)))
+    return out
+
+
+@app.get("/api/governance/intune-devices")
+def governance_intune_devices() -> list[dict]:
+    """Users in the GCS tenant with at least one non-compliant,
+    unencrypted, or stale Intune-managed device."""
+    devices = _fetch_intune_devices()
+    return _group_intune_by_user(devices, only_with_issues=True)
+
+
+@app.get("/api/governance/intune-devices/{upn}")
+def governance_intune_devices_user(upn: str) -> dict:
+    """All Intune-managed devices for a single user (used by the
+    Intune Devices expandable row)."""
+    devices = _fetch_intune_devices()
+    upn_lower = upn.strip().lower()
+    user_devices = [
+        d
+        for d in devices
+        if (d.get("userPrincipalName") or "").strip().lower() == upn_lower
+    ]
+    grouped = _group_intune_by_user(user_devices, only_with_issues=False)
+    if grouped:
+        return grouped[0]
+    return {
+        "user":               upn_lower,
+        "devices":            [],
+        "device_count":       0,
+        "noncompliant_count": 0,
+        "unencrypted_count":  0,
+        "stale_count":        0,
+        "total_issues":       0,
+    }
 
 
 # ============================================================================

@@ -11,6 +11,13 @@ const SOURCES = [
       "Office 365 Unified Audit Log across Azure AD, Exchange, SharePoint and OneDrive for every managed tenant.",
   },
   {
+    name: "Microsoft Intune",
+    status: "live",
+    label: "LIVE",
+    description:
+      "Device compliance posture and encryption status across all Intune-managed endpoints.",
+  },
+  {
     name: "SaaS Alerts",
     status: "planned",
     label: "PLANNED",

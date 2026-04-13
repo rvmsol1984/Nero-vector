@@ -73,6 +73,9 @@ export const api = {
   govUnmanagedDevicesDetail:
     (userId) =>
       get(`/api/governance/unmanaged-devices/${encodeURIComponent(userId)}/devices`),
+  govIntuneDevices:      () => get("/api/governance/intune-devices"),
+  govIntuneDevicesUser:  (upn) =>
+    get(`/api/governance/intune-devices/${encodeURIComponent(upn)}`),
   govBrokenInheritance:  () => get("/api/governance/broken-inheritance"),
   govOauthApps:          () => get("/api/governance/oauth-apps"),
   govPasswordSpray:      () => get("/api/governance/password-spray"),
