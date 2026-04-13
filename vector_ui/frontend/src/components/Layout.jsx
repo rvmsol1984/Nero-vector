@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { signOut, useAuth } from "../auth.jsx";
+import Logo from "./Logo.jsx";
 import { initialsFrom } from "../utils/format.js";
 
 // Responsive layout:
@@ -154,15 +155,7 @@ function SidebarBody({ onNavigate, showCloseButton, onClose }) {
     <>
       <div className="flex items-center justify-between px-5 py-5 border-b border-white/5">
         <div className="flex items-center gap-3 min-w-0">
-          <img
-            src="/logo.png"
-            alt="NERO"
-            style={{
-              height: "32px",
-              width: "auto",
-              filter: "brightness(0) invert(1)",
-            }}
-          />
+          <Logo size={32} />
           <div className="text-[10px] tracking-[0.35em] text-white/40 font-semibold">
             VECTOR
           </div>

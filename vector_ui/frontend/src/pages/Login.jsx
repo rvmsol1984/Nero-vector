@@ -2,6 +2,8 @@
 // loads without a valid JWT. Clicking "Sign in with Microsoft" starts
 // the PKCE flow at /auth/login, which nginx proxies to the auth sidecar.
 
+import Logo from "../components/Logo.jsx";
+
 export default function Login() {
   function handleSignIn() {
     window.location.href = "/auth/login";
@@ -15,15 +17,7 @@ export default function Login() {
       >
         {/* ---- NERO logo ---- */}
         <div className="flex items-center justify-center mb-10">
-          <img
-            src="/logo.png"
-            alt="NERO"
-            style={{
-              height: "64px",
-              width: "auto",
-              filter: "brightness(0) invert(1)",
-            }}
-          />
+          <Logo size={64} />
         </div>
 
         {/* ---- product title ---- */}
