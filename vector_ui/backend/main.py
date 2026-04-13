@@ -312,6 +312,158 @@ def user_stats(entity_key: str) -> dict:
     return {"by_event_type": by_event_type, "by_workload": by_workload}
 
 
+@app.get("/api/users/{entity_key}/emails")
+def user_emails(
+    entity_key: str,
+    direction: str | None = Query(None),
+    search: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> list[dict]:
+    """Email envelope metadata from vector_message_trace for this user.
+
+    entity_key is the standard tenant_id::user_id composite; we pull the
+    email out of the right-hand side and match it against both
+    sender_address and recipient_address.
+    """
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            message_id,
+            sender_address,
+            recipient_address,
+            subject,
+            received,
+            status,
+            size_bytes,
+            direction
+        FROM vector_message_trace
+        WHERE (sender_address = %s OR recipient_address = %s)
+          AND (%s::text IS NULL OR direction = %s)
+          AND (%s::text IS NULL OR subject ILIKE '%%' || %s || '%%')
+        ORDER BY received DESC
+        LIMIT %s OFFSET %s
+        """,
+        (
+            user_email, user_email,
+            direction, direction,
+            search, search,
+            limit, offset,
+        ),
+    )
+
+
+# ============================================================================
+# unified feed (UAL + INKY together, sorted by timestamp)
+# ============================================================================
+
+@app.get("/api/feed/recent")
+def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
+    """Combined recent-activity feed. UAL and INKY rows are unioned into
+    a single list so the Dashboard feed can render both in one stream.
+    Each row carries a ``kind`` of "ual" or "inky" which the frontend
+    uses to pick the right card treatment."""
+    ual_rows = db.fetch_all(
+        """
+        SELECT
+            id::text,
+            'ual'::text      AS kind,
+            timestamp,
+            client_name,
+            tenant_id,
+            user_id,
+            entity_key,
+            event_type,
+            workload,
+            result_status,
+            client_ip,
+            NULL::text       AS subject,
+            NULL::text       AS sender,
+            NULL::text       AS verdict,
+            NULL::boolean    AS aitm_detected
+        FROM vector_events
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    inky_rows = db.fetch_all(
+        """
+        SELECT
+            id::text,
+            'inky'::text     AS kind,
+            timestamp,
+            client_name,
+            tenant_id,
+            recipient        AS user_id,
+            CASE
+                WHEN tenant_id IS NOT NULL AND recipient IS NOT NULL
+                THEN tenant_id || '::' || recipient
+                ELSE NULL
+            END              AS entity_key,
+            event_type,
+            'INKY'::text     AS workload,
+            verdict          AS result_status,
+            NULL::text       AS client_ip,
+            subject,
+            sender,
+            verdict,
+            aitm_detected
+        FROM vector_inky_events
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    combined = (ual_rows or []) + (inky_rows or [])
+    combined.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
+    return combined[:limit]
+
+
+# ============================================================================
+# watchlist (active INKY correlation pins)
+# ============================================================================
+
+@app.get("/api/watchlist")
+def watchlist() -> list[dict]:
+    """Active vector_watchlist pins with the latest INKY event (if any)
+    joined in for display. The Phase-2 correlation engine reads the same
+    table to escalate on anomalous auth."""
+    return db.fetch_all(
+        """
+        SELECT
+            w.id::text,
+            w.tenant_id,
+            w.client_name,
+            w.user_email,
+            w.trigger_type,
+            w.trigger_details,
+            w.created_at,
+            w.expires_at,
+            w.status,
+            w.incident_id::text,
+            (SELECT i.sender  FROM vector_inky_events i
+              WHERE i.recipient = w.user_email
+                AND i.ingested_at > now() - INTERVAL '24 hours'
+              ORDER BY i.timestamp DESC LIMIT 1) AS latest_sender,
+            (SELECT i.subject FROM vector_inky_events i
+              WHERE i.recipient = w.user_email
+                AND i.ingested_at > now() - INTERVAL '24 hours'
+              ORDER BY i.timestamp DESC LIMIT 1) AS latest_subject,
+            (SELECT i.verdict FROM vector_inky_events i
+              WHERE i.recipient = w.user_email
+                AND i.ingested_at > now() - INTERVAL '24 hours'
+              ORDER BY i.timestamp DESC LIMIT 1) AS latest_verdict
+        FROM vector_watchlist w
+        WHERE w.status = 'active'
+        ORDER BY w.created_at DESC
+        LIMIT 200
+        """
+    )
+
+
 # ============================================================================
 # governance (all findings are UAL-derived, tenant scoping handled by caller)
 # ============================================================================

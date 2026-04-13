@@ -9,6 +9,7 @@ import Users from "./pages/Users.jsx";
 import UserDetail from "./pages/UserDetail.jsx";
 import Governance from "./pages/Governance.jsx";
 import Sources from "./pages/Sources.jsx";
+import Watchlist from "./pages/Watchlist.jsx";
 
 export default function App() {
   return (
@@ -21,10 +22,7 @@ export default function App() {
             path="/incidents"
             element={<Placeholder message="Incident correlation engine — Phase 2" />}
           />
-          <Route
-            path="/watchlist"
-            element={<Placeholder message="INKY fast path integration — Phase 2" />}
-          />
+          <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/events"           element={<Events />} />
           <Route path="/users"            element={<Users />} />
           <Route path="/users/:entityKey" element={<UserDetail />} />

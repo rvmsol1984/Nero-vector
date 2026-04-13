@@ -19,10 +19,10 @@ const SOURCES = [
   },
   {
     name: "INKY MailShield",
-    status: "pending",
-    label: "PENDING",
+    status: "live",
+    label: "LIVE",
     description:
-      "Inbound email threat verdicts and AiTM phishing detection. Webhook integration pending — contact Dave Baggett.",
+      "Inbound email threat verdicts and AiTM phishing detection. SIEM webhook active — Danger verdicts trigger watchlist correlation windows.",
   },
   {
     name: "Datto EDR",

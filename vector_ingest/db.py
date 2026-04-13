@@ -79,6 +79,19 @@ ON CONFLICT (tenant_id, query_name, device_id, timestamp) DO NOTHING
 """
 
 
+INSERT_MESSAGE_TRACE_SQL = """
+INSERT INTO vector_message_trace (
+    tenant_id, client_name, message_id, sender_address, recipient_address,
+    subject, received, status, size_bytes, direction, original_client_ip
+) VALUES (
+    %(tenant_id)s, %(client_name)s, %(message_id)s, %(sender_address)s,
+    %(recipient_address)s, %(subject)s, %(received)s, %(status)s,
+    %(size_bytes)s, %(direction)s, %(original_client_ip)s
+)
+ON CONFLICT (message_id) DO NOTHING
+"""
+
+
 class Database:
     def __init__(self) -> None:
         self._conn: psycopg2.extensions.connection | None = None
@@ -246,6 +259,15 @@ class Database:
         payload["raw_json"] = json.dumps(payload["raw_json"])
         with self.conn.cursor() as cur:
             cur.execute(INSERT_DEFENDER_HUNTING_SQL, payload)
+            written = cur.rowcount
+        self.conn.commit()
+        return written > 0
+
+    # ------------------------------------------------------------------ message trace
+    def insert_message_trace(self, row: dict) -> bool:
+        """Insert a single MessageTrace row, de-dup on message_id."""
+        with self.conn.cursor() as cur:
+            cur.execute(INSERT_MESSAGE_TRACE_SQL, row)
             written = cur.rowcount
         self.conn.commit()
         return written > 0

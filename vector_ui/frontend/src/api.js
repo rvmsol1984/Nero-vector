@@ -55,6 +55,12 @@ export const api = {
   userEvents:  (entityKey, { workloads, event_types, workload, event_type, limit = 100, offset = 0 } = {}) =>
                  get(`/api/users/${path(entityKey)}/events${qs({ workloads, event_types, workload, event_type, limit, offset })}`),
   userStats:   (entityKey) => get(`/api/users/${path(entityKey)}/stats`),
+  userEmails:  (entityKey, { direction, search, limit = 50, offset = 0 } = {}) =>
+                 get(`/api/users/${path(entityKey)}/emails${qs({ direction, search, limit, offset })}`),
+
+  // ----- unified feed + watchlist ---------------------------------------
+  feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
+  watchlist:   () => get("/api/watchlist"),
 
   // ----- governance -----------------------------------------------------
   govDlp:       (tenant) => get(`/api/governance/dlp${qs({ tenant })}`),

@@ -20,6 +20,7 @@ from pythonjsonlogger import jsonlogger
 from vector_ingest.db import Database
 from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
+from vector_ingest.message_trace import MessageTraceIngestor
 
 
 def configure_logging() -> None:
@@ -88,9 +89,18 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                 db=db,
             )
         )
+        ingestors.append(
+            MessageTraceIngestor(
+                tenant_id=t["tenant_id"],
+                client_name=t["name"],
+                client_id=client_id,
+                client_secret=client_secret,
+                db=db,
+            )
+        )
         if str(t.get("license_tier", "")).upper() == "E5":
             logger.info(
-                "building Defender ingestor for E5 tenant",
+                "[defender] building ingestor for E5 tenant",
                 extra={"tenant_id": t["tenant_id"], "client_name": t["name"]},
             )
             ingestors.append(

@@ -140,6 +140,7 @@ class DefenderIngestor:
 
     # ------------------------------------------------------------------ alerts
     def _poll_alerts(self) -> None:
+        logger.info("[defender] starting alert poll for %s", self.client_name)
         checkpoint = self.db.get_checkpoint(self.tenant_id, "defender_alerts")
         if checkpoint is None:
             checkpoint = datetime.utcnow().replace(microsecond=0) - timedelta(hours=1)
@@ -251,6 +252,7 @@ class DefenderIngestor:
 
     # ------------------------------------------------------------------ hunting
     def _poll_hunting(self) -> None:
+        logger.info("[defender] starting hunting poll for %s", self.client_name)
         for query_name, query in HUNTING_QUERIES.items():
             try:
                 resp = self._session.post(
