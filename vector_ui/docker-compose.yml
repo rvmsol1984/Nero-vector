@@ -1,11 +1,12 @@
 version: "3.8"
 
-# NERO Vector - operator-facing web UI
+# NERO Vector - operator-facing web UI + PKCE auth sidecar
 #
-# Deploy alongside the existing vector-ingest container. Shares the
-# nero-vector_default compose network so it can reach the PostgreSQL
-# instance used by vector-ingest. Runs on port 3005; intended to sit
-# behind Cloudflare Access for authentication.
+# vector-ui serves the FastAPI /api + /health endpoints and the built
+# React SPA. auth-server is a separate Node/Express process that owns
+# /auth/* (Microsoft PKCE flow, SQLite session store). An upstream
+# nginx (see nginx/vector.rvmsol.com.conf) fronts both services and
+# Cloudflare terminates TLS.
 #
 # Usage:
 #   cd vector_ui && docker compose up -d --build
@@ -34,6 +35,37 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  auth-server:
+    build:
+      context: ../auth_server
+      dockerfile: Dockerfile
+    image: nero-vector/auth-server:latest
+    container_name: vector-auth-server
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      PORT: "3006"
+      AZURE_CLIENT_ID: 4a38585b-ee28-4290-9dc0-fe70cc457fbb
+      AZURE_TENANT_ID: 12077321-d5c3-4d90-ad87-d19b58b2f847
+      AUTH_REDIRECT_URI: https://vector.rvmsol.com/auth/callback
+      PUBLIC_BASE_URL:   https://vector.rvmsol.com
+      SESSION_DB_DIR:    /data
+    volumes:
+      - vector-auth-sessions:/data
+    ports:
+      - "3006:3006"
+    networks:
+      - nero-vector_default
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  vector-auth-sessions:
 
 networks:
   nero-vector_default:

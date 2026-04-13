@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import { signOut, useAuth } from "../auth.jsx";
+import { initialsFrom } from "../utils/format.js";
+
 // Responsive layout:
 //   desktop (>= 768px): fixed 220px sidebar on the left, 8 nav items
 //   mobile  (<  768px): hamburger -> slide-out drawer mirrors the sidebar
@@ -210,11 +213,14 @@ function SidebarBody({ onNavigate, showCloseButton, onClose }) {
 
 export default function Layout() {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const location = useLocation();
+  const user = useAuth();
 
-  // Auto-close the mobile drawer whenever the user navigates.
+  // Auto-close the mobile drawer + user menu whenever the user navigates.
   useEffect(() => {
     setDrawerOpen(false);
+    setUserMenuOpen(false);
   }, [location.pathname]);
 
   // Prevent page scroll while the drawer is open on mobile.
@@ -255,14 +261,87 @@ export default function Layout() {
               // incident correlation
             </div>
           </div>
-          <div className="flex items-center gap-2 text-[11px]">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-resolved opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-status-resolved" />
-            </span>
-            <span className="text-status-resolved font-semibold tracking-[0.18em]">
-              LIVE
-            </span>
+          <div className="flex items-center gap-4 text-[11px]">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-resolved opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-status-resolved" />
+              </span>
+              <span className="text-status-resolved font-semibold tracking-[0.18em]">
+                LIVE
+              </span>
+            </div>
+
+            {user && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setUserMenuOpen((v) => !v)}
+                  className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 active:scale-95 transition-all"
+                  aria-label={`signed in as ${user.email}`}
+                >
+                  <span
+                    className="h-6 w-6 rounded-full flex items-center justify-center text-[9px] font-bold border"
+                    style={{
+                      color: "#3B82F6",
+                      background: "rgba(37,99,235,0.15)",
+                      borderColor: "rgba(37,99,235,0.45)",
+                    }}
+                  >
+                    {initialsFrom(user.email)}
+                  </span>
+                  <span className="hidden sm:block text-white/80 max-w-[180px] truncate">
+                    {user.email}
+                  </span>
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-white/50"
+                  >
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {userMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setUserMenuOpen(false)}
+                    />
+                    <div
+                      className="absolute right-0 top-full mt-2 z-50 min-w-[220px] card p-2 animate-fade-in"
+                    >
+                      <div className="px-3 py-2">
+                        <div className="text-[11px] font-semibold truncate">
+                          {user.name || user.email}
+                        </div>
+                        <div className="text-[10px] text-white/50 truncate">
+                          {user.email}
+                        </div>
+                        {user.role && (
+                          <div className="text-[10px] uppercase tracking-wider text-primary-light mt-1">
+                            {user.role}
+                          </div>
+                        )}
+                      </div>
+                      <div className="border-t border-white/5 my-1" />
+                      <button
+                        type="button"
+                        onClick={signOut}
+                        className="w-full text-left px-3 py-2 text-[11px] font-medium rounded-lg hover:bg-white/5 text-white/80 hover:text-white transition-colors active:scale-[0.98]"
+                      >
+                        Sign out
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </header>

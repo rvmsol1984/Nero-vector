@@ -12,6 +12,7 @@ export default defineConfig({
     proxy: {
       "/api":    "http://localhost:3005",
       "/health": "http://localhost:3005",
+      "/auth":   "http://localhost:3006",
     },
   },
   build: {
