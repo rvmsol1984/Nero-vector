@@ -33,10 +33,10 @@ const SOURCES = [
   },
   {
     name: "Datto EDR",
-    status: "planned",
-    label: "PLANNED",
+    status: "pending",
+    label: "PENDING",
     description:
-      "Endpoint behavioral telemetry and threat detections. REST API integration planned for Phase 2.",
+      "Endpoint behavioral telemetry. Webhook receiver active — awaiting first event from Infocyte.",
   },
   {
     name: "ThreatLocker",

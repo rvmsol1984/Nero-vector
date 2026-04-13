@@ -46,3 +46,29 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+  edr-receiver:
+    image: nero-vector/vector-ingest:latest
+    container_name: vector-edr-receiver
+    restart: unless-stopped
+    depends_on:
+      - vector-ingest
+    env_file:
+      - .env
+    environment:
+      EDR_LOG_LEVEL: INFO
+    command:
+      - uvicorn
+      - vector_ingest.edr_receiver:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "3008"
+    ports:
+      - "3008:3008"
+    extra_hosts:
+      - "host.docker.internal:172.24.0.1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
