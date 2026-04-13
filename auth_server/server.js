@@ -47,12 +47,23 @@ if (!SESSION_SECRET) {
   process.exit(1);
 }
 
-// Flat allowlist. Anyone not in the map is denied with 403, even if the
-// Microsoft sign-in itself succeeds.
-const USER_MAP = {
-  "roman@nero-consulting.com":   { role: "admin" },
-  "anthony@nero-consulting.com": { role: "admin" },
-};
+// Domain allowlist. Any signed-in user whose email ends with
+// @nero-consulting.com gets through with role=operator. A small hardcoded
+// set of addresses is bumped to role=admin, which the UI/API will later
+// use to gate containment actions. Anyone outside the domain hits 403.
+const ALLOWED_DOMAIN = "nero-consulting.com";
+const ADMIN_EMAILS = new Set([
+  "roman@nero-consulting.com",
+  "anthony@nero-consulting.com",
+]);
+
+function resolveRole(email) {
+  if (!email) return null;
+  const lower = email.toLowerCase();
+  if (!lower.endsWith("@" + ALLOWED_DOMAIN)) return null;
+  if (ADMIN_EMAILS.has(lower)) return "admin";
+  return "operator";
+}
 
 const SCOPE = "openid email profile";
 
@@ -206,8 +217,8 @@ app.get("/auth/callback", async (req, res) => {
     return res.status(400).send("id_token missing email / upn claim");
   }
 
-  const mapping = USER_MAP[email];
-  if (!mapping) {
+  const role = resolveRole(email);
+  if (!role) {
     console.warn("[auth] denied email", email);
     req.session.deniedEmail = email;
     return req.session.save(() => res.redirect("/auth/denied"));
@@ -215,7 +226,7 @@ app.get("/auth/callback", async (req, res) => {
 
   req.session.user = {
     email,
-    role: mapping.role,
+    role,
     name: (claims && claims.name) || email,
     loginAt: new Date().toISOString(),
   };
@@ -225,7 +236,7 @@ app.get("/auth/callback", async (req, res) => {
       console.error("[auth] failed to save session after login", err);
       return res.status(500).send("session error");
     }
-    console.log("[auth] login", email);
+    console.log("[auth] login", email, "role=" + role);
     res.redirect("/");
   });
 });
@@ -296,7 +307,7 @@ app.get("/auth/denied", (req, res) => {
   <body>
     <div class="box">
       <h1>ACCESS RESTRICTED</h1>
-      <p>Access to NERO Vector is restricted to NERO team members.</p>
+      <p>Access restricted to NERO Consulting team.</p>
       ${email ? `<p>Signed in as <span class="email">${email}</span></p>` : ""}
       <p><a href="/auth/logout">Sign out and try a different account</a></p>
     </div>
