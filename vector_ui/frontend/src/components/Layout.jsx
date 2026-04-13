@@ -152,12 +152,18 @@ function P2Badge() {
 function SidebarBody({ onNavigate, showCloseButton, onClose }) {
   return (
     <>
-      <div className="flex items-start justify-between px-5 py-5 border-b border-white/5">
-        <div>
-          <div className="text-2xl font-bold tracking-wider text-primary-light leading-none">
-            NERO
-          </div>
-          <div className="text-[10px] tracking-[0.35em] text-white/40 mt-1 font-semibold">
+      <div className="flex items-center justify-between px-5 py-5 border-b border-white/5">
+        <div className="flex items-center gap-3 min-w-0">
+          <img
+            src="/logo.png"
+            alt="NERO"
+            style={{
+              height: "32px",
+              width: "auto",
+              filter: "brightness(0) invert(1)",
+            }}
+          />
+          <div className="text-[10px] tracking-[0.35em] text-white/40 font-semibold">
             VECTOR
           </div>
         </div>

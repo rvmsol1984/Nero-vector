@@ -13,22 +13,21 @@ export default function Login() {
         className="w-full max-w-[400px] bg-card border border-white/5 rounded-2xl shadow-xl p-10 animate-fade-in"
         style={{ backgroundColor: "#1a2235" }}
       >
-        {/* ---- NERO logo row ---- */}
-        <div className="flex items-center gap-3 mb-10">
-          <div className="text-3xl font-bold tracking-wider text-white leading-none">
-            NERO
-          </div>
-          <div className="border-l border-white/15 pl-3 text-[9px] uppercase tracking-[0.18em] text-white/55 leading-[1.4]">
-            Technology
-            <br />
-            Consulting
-            <br />
-            Services
-          </div>
+        {/* ---- NERO logo ---- */}
+        <div className="flex items-center justify-center mb-10">
+          <img
+            src="/logo.png"
+            alt="NERO"
+            style={{
+              height: "64px",
+              width: "auto",
+              filter: "brightness(0) invert(1)",
+            }}
+          />
         </div>
 
         {/* ---- product title ---- */}
-        <div className="mb-8">
+        <div className="mb-8 text-center">
           <div className="text-2xl font-bold text-white leading-tight">
             NERO Vector
           </div>

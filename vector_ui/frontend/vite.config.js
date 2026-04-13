@@ -6,6 +6,9 @@ import react from "@vitejs/plugin-react";
 // process serves the built bundle from /app/frontend_dist directly.
 export default defineConfig({
   plugins: [react()],
+  // Anything in frontend/public/ is copied verbatim into the build
+  // output root, so /logo.png resolves to public/logo.png at runtime.
+  publicDir: "public",
   server: {
     host: "0.0.0.0",
     port: 5173,
