@@ -1,12 +1,13 @@
 import { NavLink, Outlet } from "react-router-dom";
 
-// Bottom-nav FieldDesk layout. Sticky top bar up top, scrolling content
-// in the middle, fixed bottom tab bar anchored to the safe-area inset.
+// Top bar with the NERO VECTOR brand + LIVE indicator, followed by a
+// horizontal tab strip directly underneath. The strip replaces the
+// previous fixed bottom nav entirely.
 
 function Icon({ name }) {
   const p = {
-    width: 20,
-    height: 20,
+    width: 18,
+    height: 18,
     viewBox: "0 0 24 24",
     fill: "none",
     stroke: "currentColor",
@@ -75,76 +76,70 @@ const TABS = [
 export default function Layout() {
   return (
     <div className="flex flex-col h-screen bg-bg text-white">
-      {/* -------- top bar -------- */}
+      {/* -------- top bar + tab strip -------- */}
       <header
-        className="sticky top-0 z-20 border-b border-white/5 backdrop-blur"
+        className="sticky top-0 z-20 backdrop-blur border-b border-white/5"
         style={{
           background: "rgba(10,15,30,0.9)",
           paddingTop: "env(safe-area-inset-top)",
         }}
       >
-        <div className="px-5 py-3 flex items-center justify-between">
+        {/* brand row */}
+        <div className="px-5 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <div className="font-semibold tracking-[0.18em] text-sm">
               NERO VECTOR
             </div>
-            <div className="text-white/40 text-[11px] truncate">
+            <div className="text-white/40 text-[11px] truncate hidden sm:block">
               // incident correlation
             </div>
           </div>
-          <div className="flex items-center gap-2 text-[11px]">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-resolved opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-status-resolved" />
+          <div className="flex items-center gap-4 text-[11px]">
+            <span className="text-white/30 hidden md:inline">
+              v0.1.0 / MSP operator console
             </span>
-            <span className="text-status-resolved font-semibold tracking-[0.18em]">
-              LIVE
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-resolved opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-status-resolved" />
+              </span>
+              <span className="text-status-resolved font-semibold tracking-[0.18em]">
+                LIVE
+              </span>
+            </div>
           </div>
         </div>
-      </header>
 
-      {/* -------- main -------- */}
-      <main
-        className="flex-1 overflow-auto"
-        style={{ paddingBottom: "calc(88px + env(safe-area-inset-bottom))" }}
-      >
-        <div className="max-w-6xl mx-auto px-5 py-5">
-          <Outlet />
-        </div>
-      </main>
-
-      {/* -------- bottom tab bar -------- */}
-      <nav
-        className="fixed bottom-0 left-0 right-0 z-20 border-t border-white/5 backdrop-blur"
-        style={{
-          background: "rgba(10,15,30,0.9)",
-          paddingBottom: "env(safe-area-inset-bottom)",
-        }}
-      >
-        <div className="max-w-2xl mx-auto flex items-center justify-around py-2 px-2">
+        {/* horizontal tab strip */}
+        <nav className="px-3 flex items-center gap-1 overflow-x-auto">
           {TABS.map((t) => (
             <NavLink
               key={t.to}
               to={t.to}
               className={({ isActive }) =>
-                `bottom-nav-item ${isActive ? "active" : ""}`
+                `flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium border-b-2 -mb-px whitespace-nowrap transition-colors active:scale-95 ${
+                  isActive
+                    ? "border-primary text-primary-light"
+                    : "border-transparent text-white/55 hover:text-white"
+                }`
               }
             >
               <Icon name={t.icon} />
               <span>{t.label}</span>
             </NavLink>
           ))}
-        </div>
-      </nav>
+        </nav>
+      </header>
 
-      {/* v-stamp */}
-      <div
-        className="fixed left-3 z-30 text-[10px] text-white/30 pointer-events-none"
-        style={{ bottom: "calc(82px + env(safe-area-inset-bottom))" }}
+      {/* -------- main -------- */}
+      <main
+        className="flex-1 overflow-auto"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
-        v0.1.0 / MSP operator console
-      </div>
+        <div className="max-w-6xl mx-auto px-5 py-5">
+          <Outlet />
+        </div>
+      </main>
     </div>
   );
 }

@@ -34,6 +34,7 @@ const EVENT_LABELS = {
   "FileSyncUploadedFull":               "File Synced (Upload)",
   "FileSyncDownloadedFull":             "File Synced (Download)",
   "FileCreatedOnRemovableMedia":        "File Copied to USB Drive",
+  "Update":                             "Item Updated",
   "AnonymousLinkUsed":                  "Anonymous Link Used",
   "SharingLinkUsed":                    "Sharing Link Used",
   "SharingSet":                         "File Shared",
