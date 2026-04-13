@@ -44,6 +44,41 @@ ON CONFLICT (dedup_fingerprint) DO NOTHING
 """
 
 
+INSERT_DEFENDER_ALERT_SQL = """
+INSERT INTO vector_defender_alerts (
+    id, tenant_id, client_name, incident_id, severity, status, category,
+    threat_family, title, machine_id, computer_name, threat_name,
+    logged_on_users, alert_creation_time, first_event_time, last_event_time,
+    detection_source, investigation_state, mitre_techniques, raw_json
+) VALUES (
+    %(id)s, %(tenant_id)s, %(client_name)s, %(incident_id)s, %(severity)s,
+    %(status)s, %(category)s, %(threat_family)s, %(title)s, %(machine_id)s,
+    %(computer_name)s, %(threat_name)s, %(logged_on_users)s,
+    %(alert_creation_time)s, %(first_event_time)s, %(last_event_time)s,
+    %(detection_source)s, %(investigation_state)s, %(mitre_techniques)s,
+    %(raw_json)s
+)
+ON CONFLICT (id) DO UPDATE SET
+    status              = EXCLUDED.status,
+    investigation_state = EXCLUDED.investigation_state,
+    last_event_time     = EXCLUDED.last_event_time,
+    raw_json            = EXCLUDED.raw_json
+"""
+
+
+INSERT_DEFENDER_HUNTING_SQL = """
+INSERT INTO vector_defender_hunting (
+    tenant_id, client_name, query_name, device_id, device_name,
+    account_upn, action_type, timestamp, raw_json
+) VALUES (
+    %(tenant_id)s, %(client_name)s, %(query_name)s, %(device_id)s,
+    %(device_name)s, %(account_upn)s, %(action_type)s, %(timestamp)s,
+    %(raw_json)s
+)
+ON CONFLICT (tenant_id, query_name, device_id, timestamp) DO NOTHING
+"""
+
+
 class Database:
     def __init__(self) -> None:
         self._conn: psycopg2.extensions.connection | None = None
@@ -191,3 +226,26 @@ class Database:
             written = cur.rowcount
         self.conn.commit()
         return max(written, 0)
+
+    # ------------------------------------------------------------------ defender
+    def insert_defender_alert(self, row: dict) -> bool:
+        """Upsert a single Defender alert. Returns True on any write."""
+        payload = dict(row)
+        payload["logged_on_users"] = json.dumps(payload.get("logged_on_users") or [])
+        payload["mitre_techniques"] = json.dumps(payload.get("mitre_techniques") or [])
+        payload["raw_json"] = json.dumps(payload["raw_json"])
+        with self.conn.cursor() as cur:
+            cur.execute(INSERT_DEFENDER_ALERT_SQL, payload)
+            written = cur.rowcount
+        self.conn.commit()
+        return written > 0
+
+    def insert_defender_hunting(self, row: dict) -> bool:
+        """Insert a single Advanced Hunting result. De-dup via the table UNIQUE."""
+        payload = dict(row)
+        payload["raw_json"] = json.dumps(payload["raw_json"])
+        with self.conn.cursor() as cur:
+            cur.execute(INSERT_DEFENDER_HUNTING_SQL, payload)
+            written = cur.rowcount
+        self.conn.commit()
+        return written > 0

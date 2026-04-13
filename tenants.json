@@ -1,4 +1,12 @@
 [
-  {"name": "NERO", "tenant_id": "12077321-d5c3-4d90-ad87-d19b58b2f847"},
-  {"name": "GameChange Solar", "tenant_id": "07b4c47a-e461-493e-91c4-90df73e2ebc6"}
+  {
+    "name": "NERO",
+    "tenant_id": "12077321-d5c3-4d90-ad87-d19b58b2f847",
+    "license_tier": "BizPremium"
+  },
+  {
+    "name": "GameChange Solar",
+    "tenant_id": "07b4c47a-e461-493e-91c4-90df73e2ebc6",
+    "license_tier": "E5"
+  }
 ]
