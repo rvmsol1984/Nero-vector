@@ -333,7 +333,12 @@ export default function Layout() {
                       <div className="border-t border-white/5 my-1" />
                       <button
                         type="button"
-                        onClick={signOut}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setUserMenuOpen(false);
+                          signOut();
+                        }}
                         className="w-full text-left px-3 py-2 text-[11px] font-medium rounded-lg hover:bg-white/5 text-white/80 hover:text-white transition-colors active:scale-[0.98]"
                       >
                         Sign out

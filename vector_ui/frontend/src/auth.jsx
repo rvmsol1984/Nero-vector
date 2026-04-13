@@ -60,19 +60,38 @@ export function redirectToLogin() {
   window.location.href = `${AUTH_BASE}/auth/login`;
 }
 
-export async function signOut() {
+// Hard sign out:
+//   1. POST /auth/logout on the auth sidecar (fire-and-forget with
+//      keepalive: true so the browser still delivers it after we've
+//      navigated away — we don't care about the response)
+//   2. clear localStorage["vector_token"]
+//   3. window.location.href = "/auth/login" (hard navigation so React
+//      state is wiped and the PKCE flow starts fresh)
+export function signOut() {
   const token = getToken();
   try {
-    await fetch(`${AUTH_BASE}/auth/logout`, {
+    fetch(`${AUTH_BASE}/auth/logout`, {
       method: "POST",
       credentials: "include",
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      keepalive: true,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    }).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("[auth] /auth/logout POST failed, continuing", err);
     });
-  } catch {
-    /* best effort — we're going to wipe local state either way */
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[auth] /auth/logout threw synchronously, continuing", err);
   }
-  clearToken();
-  window.location.href = `${AUTH_BASE}/auth/login`;
+  try {
+    localStorage.removeItem("vector_token");
+  } catch {
+    /* storage unavailable */
+  }
+  window.location.href = "/auth/login";
 }
 
 export function AuthProvider({ children }) {
