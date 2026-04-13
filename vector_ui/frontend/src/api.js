@@ -1,12 +1,24 @@
-// Tiny fetch wrapper used by every page. Same-origin (FastAPI serves the
-// SPA bundle too) so no cross-origin concerns - Cloudflare Access gates
-// the whole app upstream.
+// Tiny fetch wrapper used by every page. Every /api/* call carries an
+// `Authorization: Bearer <jwt>` header pulled out of localStorage via
+// getToken(). A 401 anywhere wipes the token and hard-redirects the
+// user back through the PKCE flow.
+
+import { clearToken, getToken, redirectToLogin } from "./auth.jsx";
 
 async function get(path) {
+  const token = getToken();
   const res = await fetch(path, {
     credentials: "same-origin",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
   });
+  if (res.status === 401) {
+    clearToken();
+    redirectToLogin();
+    throw new Error("unauthorized");
+  }
   if (!res.ok) {
     throw new Error(`${path} -> ${res.status} ${res.statusText}`);
   }

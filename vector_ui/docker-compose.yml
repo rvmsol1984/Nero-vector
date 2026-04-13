@@ -38,7 +38,7 @@ services:
 
   auth-server:
     build:
-      context: ../auth_server
+      context: ./auth-server
       dockerfile: Dockerfile
     image: nero-vector/auth-server:latest
     container_name: vector-auth-server
@@ -49,9 +49,9 @@ services:
       PORT: "3006"
       AZURE_CLIENT_ID: 4a38585b-ee28-4290-9dc0-fe70cc457fbb
       AZURE_TENANT_ID: 12077321-d5c3-4d90-ad87-d19b58b2f847
-      AUTH_REDIRECT_URI: https://vector.rvmsol.com/auth/callback
       PUBLIC_BASE_URL:   https://vector.rvmsol.com
       SESSION_DB_DIR:    /data
+      CORS_ORIGINS:      "http://78.46.92.112:3005,https://vector.rvmsol.com"
     volumes:
       - vector-auth-sessions:/data
     ports:

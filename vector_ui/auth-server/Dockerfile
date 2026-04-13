@@ -9,8 +9,10 @@ RUN apk add --no-cache tini \
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund --loglevel=error
 
-COPY server.js ./
-COPY users.json ./
+COPY index.js      ./
+COPY users.json    ./
+COPY routes        ./routes
+COPY services      ./services
 
 USER node
 
@@ -21,4 +23,4 @@ ENV NODE_ENV=production \
 EXPOSE 3006
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "server.js"]
+CMD ["node", "index.js"]

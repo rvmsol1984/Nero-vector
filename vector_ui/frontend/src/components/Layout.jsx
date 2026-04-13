@@ -279,6 +279,7 @@ export default function Layout() {
                   onClick={() => setUserMenuOpen((v) => !v)}
                   className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 active:scale-95 transition-all"
                   aria-label={`signed in as ${user.email}`}
+                  title={user.email}
                 >
                   <span
                     className="h-6 w-6 rounded-full flex items-center justify-center text-[9px] font-bold border"
@@ -288,10 +289,10 @@ export default function Layout() {
                       borderColor: "rgba(37,99,235,0.45)",
                     }}
                   >
-                    {initialsFrom(user.email)}
+                    {user.initials || initialsFrom(user.email)}
                   </span>
                   <span className="hidden sm:block text-white/80 max-w-[180px] truncate">
-                    {user.email}
+                    {user.name || user.email}
                   </span>
                   <svg
                     width="10"

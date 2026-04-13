@@ -13,10 +13,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-import httpx
+import jwt
 
 from backend import db
 
@@ -399,65 +399,51 @@ def governance_downloads(
 
 
 # ============================================================================
-# /auth/* reverse proxy -> auth-server:3006
+# JWT auth middleware
 # ============================================================================
 #
-# MUST be declared before the SPA catch-all below so FastAPI routes
-# /auth/login, /auth/callback, /auth/me, etc. here instead of handing them
-# back to the React shell. The auth sidecar listens on the internal
-# nero-vector_default network as "vector-auth-server".
+# /api/* is gated by a Bearer token issued by the vector-auth-server sidecar.
+# The payload looks like { email, role, name, initials, exp, iat }. The
+# decoded dict is stashed on request.state.user so individual endpoints can
+# gate on role without re-parsing the token.
+#
+# /api/ingest/* is exempt -- those endpoints (currently only the INKY
+# webhook) carry their own shared-secret header and are NOT called by the
+# browser, so they must not require a user JWT.
 
-_AUTH_UPSTREAM = os.environ.get(
-    "VECTOR_AUTH_UPSTREAM",
-    "http://vector-auth-server:3006",
-).rstrip("/")
+_JWT_SECRET = os.environ.get("JWT_SECRET")
+_JWT_ALGORITHM = "HS256"
 
-# Hop-by-hop headers that must NOT be copied from the upstream response
-# back to the caller -- httpx has already decoded the body so any encoding
-# / length / transfer header is a lie at this point.
-_HOP_BY_HOP = {
-    "content-encoding",
-    "content-length",
-    "transfer-encoding",
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "upgrade",
-}
-
-
-@app.api_route("/auth/{path:path}", methods=["GET", "POST"])
-async def proxy_auth(path: str, request: Request) -> Response:
-    url = f"{_AUTH_UPSTREAM}/auth/{path}"
-    # Strip Host so httpx sets it correctly for the upstream; keep the
-    # rest (Cookie, User-Agent, X-Forwarded-*, etc.) unchanged.
-    forward_headers = {
-        k: v for k, v in request.headers.items() if k.lower() != "host"
-    }
-
-    async with httpx.AsyncClient() as client:
-        upstream = await client.request(
-            method=request.method,
-            url=url,
-            headers=forward_headers,
-            content=await request.body(),
-            params=dict(request.query_params),
-            cookies=dict(request.cookies),
-            follow_redirects=False,
-            timeout=30.0,
-        )
-
-    response_headers = {
-        k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP
-    }
-    return Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
-        headers=response_headers,
+if not _JWT_SECRET:
+    logger.error(
+        "JWT_SECRET not set -- /api/* requests will be rejected with 500",
     )
+
+
+@app.middleware("http")
+async def jwt_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and not path.startswith("/api/ingest/"):
+        if not _JWT_SECRET:
+            return JSONResponse(
+                {"detail": "server misconfigured: JWT_SECRET unset"},
+                status_code=500,
+            )
+        header = request.headers.get("authorization", "")
+        if not header.lower().startswith("bearer "):
+            return JSONResponse(
+                {"detail": "unauthorized"},
+                status_code=401,
+            )
+        token = header[7:].strip()
+        try:
+            payload = jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        except jwt.ExpiredSignatureError:
+            return JSONResponse({"detail": "token expired"}, status_code=401)
+        except jwt.PyJWTError:
+            return JSONResponse({"detail": "invalid token"}, status_code=401)
+        request.state.user = payload
+    return await call_next(request)
 
 
 # ============================================================================
@@ -479,10 +465,11 @@ async def spa(full_path: str = "") -> FileResponse:
     """Catch-all that serves the React SPA shell.
 
     Any /api/* path that didn't match an explicit route above returns 404
-    here (so clients see a real API error, not the HTML shell). Any
-    /auth/* path is handled by the reverse-proxy route above. Everything
-    else either serves a matching file from the built Vite bundle or
-    returns index.html so React Router can take over client-side routing.
+    here (so clients see a real API error, not the HTML shell). /auth/* is
+    NOT served by FastAPI at all -- the React frontend calls the auth
+    sidecar directly. Everything else either serves a matching file from
+    the built Vite bundle or returns index.html so React Router can take
+    over client-side routing.
     """
     if full_path.startswith("api/") or full_path == "api":
         raise HTTPException(status_code=404)

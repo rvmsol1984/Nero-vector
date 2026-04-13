@@ -1,33 +1,120 @@
 import { createContext, useContext, useEffect, useState } from "react";
 
-// Session-cookie auth. On mount we hit the auth sidecar's /auth/me and
-// either render the app (when a valid NERO session is found) or do a
-// hard navigation to /auth/login. The whole SPA sits inside the gate
-// so no page ever renders without a valid session.
+// JWT-based auth — mirrors NERO FieldDesk.
+//
+// Flow:
+//   1. Browser loads the SPA. We look for ?token=... in the URL (set by
+//      the auth-server /auth/callback redirect) and stash it in
+//      localStorage under "vector_token", then strip it from the URL.
+//   2. If we have a token we call /auth/me with Authorization: Bearer …
+//      to confirm it's still valid and fetch the user blob.
+//   3. If /auth/me is 401/403 or the token is missing, we hard-redirect
+//      to /auth/login to start the PKCE bounce.
+//
+// The API layer in api.js reads the token via getToken() and sends it
+// on every /api/* request. A 401 anywhere clears the token and kicks
+// the user back to /auth/login.
 
 const AuthContext = createContext(null);
+
+const TOKEN_KEY = "vector_token";
+
+// Compute the URL base for /auth/* calls. When the SPA is served
+// through the nginx edge at vector.rvmsol.com (same origin as the
+// auth-server), use a relative path. When developers hit the vector-ui
+// container directly on port 3005, the auth-server is on :3006 of the
+// same host, so we flip the port. Overridable via VITE_AUTH_BASE at
+// build time if neither default fits.
+export const AUTH_BASE = (() => {
+  const envBase = import.meta.env.VITE_AUTH_BASE;
+  if (envBase) return String(envBase).replace(/\/+$/, "");
+  if (typeof window === "undefined") return "";
+  const { protocol, hostname, port } = window.location;
+  if (port === "3005") return `${protocol}//${hostname}:3006`;
+  return "";
+})();
+
+export function getToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export function clearToken() {
+  setToken(null);
+}
+
+export function redirectToLogin() {
+  clearToken();
+  window.location.href = `${AUTH_BASE}/auth/login`;
+}
+
+export async function signOut() {
+  const token = getToken();
+  try {
+    await fetch(`${AUTH_BASE}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+  } catch {
+    /* best effort — we're going to wipe local state either way */
+  }
+  clearToken();
+  window.location.href = `${AUTH_BASE}/auth/login`;
+}
 
 export function AuthProvider({ children }) {
   const [state, setState] = useState({ status: "loading", user: null });
 
   useEffect(() => {
+    // ---- 1. capture ?token=… from the callback redirect -------------
+    try {
+      const url = new URL(window.location.href);
+      const tokenParam = url.searchParams.get("token");
+      if (tokenParam) {
+        setToken(tokenParam);
+        url.searchParams.delete("token");
+        window.history.replaceState(
+          {},
+          "",
+          url.pathname + (url.search || "") + url.hash,
+        );
+      }
+    } catch {
+      /* non-browser runtime */
+    }
+
+    const token = getToken();
+    if (!token) {
+      redirectToLogin();
+      return;
+    }
+
+    // ---- 2. verify with /auth/me -----------------------------------
     let cancelled = false;
-    fetch("/auth/me", { credentials: "same-origin" })
+    fetch(`${AUTH_BASE}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
       .then(async (res) => {
         if (cancelled) return;
-        if (res.status === 401) {
-          // Session missing -> bounce to the PKCE flow.
-          window.location.href = "/auth/login";
+        if (res.status === 401 || res.status === 403) {
+          clearToken();
+          redirectToLogin();
           return;
         }
-        if (res.status === 403) {
-          // Signed in but not in USER_MAP.
-          window.location.href = "/auth/denied";
-          return;
-        }
-        if (!res.ok) {
-          throw new Error(`auth/me returned ${res.status}`);
-        }
+        if (!res.ok) throw new Error(`auth/me returned ${res.status}`);
         const data = await res.json();
         setState({ status: "ready", user: data.user });
       })
@@ -53,9 +140,13 @@ export function AuthProvider({ children }) {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-bg text-sm font-sans gap-3 px-6 text-center">
         <div className="text-critical">auth error: {state.error}</div>
-        <a href="/auth/login" className="text-primary-light underline">
+        <button
+          type="button"
+          onClick={redirectToLogin}
+          className="text-primary-light underline"
+        >
           try signing in again
-        </a>
+        </button>
       </div>
     );
   }
@@ -67,10 +158,4 @@ export function AuthProvider({ children }) {
 
 export function useAuth() {
   return useContext(AuthContext);
-}
-
-export function signOut() {
-  // Full nav so express-session can destroy the cookie and Cloudflare
-  // doesn't serve a stale SPA shell afterwards.
-  window.location.href = "/auth/logout";
 }
