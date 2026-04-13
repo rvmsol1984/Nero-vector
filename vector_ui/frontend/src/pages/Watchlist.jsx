@@ -114,16 +114,24 @@ function ShieldIcon() {
   );
 }
 
+const STATUS_FILTERS = [
+  { id: "all",       label: "All" },
+  { id: "active",    label: "Active" },
+  { id: "escalated", label: "Escalated" },
+  { id: "expired",   label: "Expired" },
+];
+
 export default function Watchlist() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
+  const [statusFilter, setStatusFilter] = useState("all");
 
   useEffect(() => {
     let cancel = false;
     function load() {
       api
-        .watchlist()
+        .watchlist(statusFilter === "all" ? undefined : statusFilter)
         .then((r) => {
           if (cancel) return;
           setRows(r || []);
@@ -142,20 +150,51 @@ export default function Watchlist() {
       cancel = true;
       clearInterval(tick);
     };
-  }, []);
+  }, [statusFilter]);
+
+  // Count by status (for the header summary + filter pill counts).
+  const countByStatus = rows.reduce(
+    (acc, row) => {
+      const s = (row.status || "").toLowerCase();
+      acc[s] = (acc[s] || 0) + 1;
+      return acc;
+    },
+    {},
+  );
 
   return (
     <div className="space-y-4 animate-fade-in">
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="text-2xl font-bold">Watchlist</h1>
         <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border border-status-waiting/40 bg-status-waiting/10 text-status-waiting tabular-nums">
-          {rows.length} active
+          {rows.length} {statusFilter === "all" ? "total" : statusFilter}
         </span>
       </div>
       <p className="text-white/50 text-sm -mt-3">
         Users with open correlation windows. Anomalous auth within the
         window auto-escalates.
       </p>
+
+      {/* ----- filter pills ----- */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {STATUS_FILTERS.map((f) => {
+          const active = statusFilter === f.id;
+          return (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => setStatusFilter(f.id)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all active:scale-95 ${
+                active
+                  ? "bg-primary text-white"
+                  : "bg-white/10 text-white/70 hover:bg-white/15"
+              }`}
+            >
+              {f.label}
+            </button>
+          );
+        })}
+      </div>
 
       {err && (
         <div className="card border-critical/30 text-critical text-sm px-4 py-3">
@@ -166,7 +205,11 @@ export default function Watchlist() {
       {!loading && rows.length === 0 && !err ? (
         <div className="card py-14 flex flex-col items-center text-center gap-3">
           <ShieldIcon />
-          <div className="text-white/50 text-sm">No active correlation windows</div>
+          <div className="text-white/50 text-sm">
+            {statusFilter === "all"
+              ? "No watchlist entries"
+              : `No ${statusFilter} entries`}
+          </div>
         </div>
       ) : (
         <div className="card overflow-hidden">
@@ -184,6 +227,9 @@ export default function Watchlist() {
               </thead>
               <tbody className="divide-y divide-white/5">
                 {rows.map((row) => {
+                  const status = (row.status || "").toLowerCase();
+                  const isEscalated = status === "escalated";
+                  const isExpired = status === "expired";
                   const entityKey =
                     row.tenant_id && row.user_email
                       ? `${row.tenant_id}::${row.user_email}`
@@ -197,7 +243,17 @@ export default function Watchlist() {
                     (row.trigger_details && row.trigger_details.sender) ||
                     "";
                   return (
-                    <tr key={row.id} className="hover:bg-white/[0.03]">
+                    <tr
+                      key={row.id}
+                      className={`hover:bg-white/[0.03] transition-colors ${
+                        isExpired ? "opacity-50" : ""
+                      }`}
+                      style={
+                        isEscalated
+                          ? { boxShadow: "inset 3px 0 0 #EF4444" }
+                          : undefined
+                      }
+                    >
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-2">
                           <Avatar
@@ -250,8 +306,24 @@ export default function Watchlist() {
               </tbody>
             </table>
           </div>
-          <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40 flex items-center justify-between">
-            <span>Correlation windows are 48h · auto-refreshes every 30s</span>
+          <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40 flex items-center justify-between flex-wrap gap-2">
+            <span>
+              Correlation windows are 48h · auto-refreshes every 30s
+              {statusFilter === "all" && countByStatus && (
+                <>
+                  {" · "}
+                  <span className="text-status-waiting">
+                    {countByStatus.active || 0} active
+                  </span>
+                  {" · "}
+                  <span className="text-critical">
+                    {countByStatus.escalated || 0} escalated
+                  </span>
+                  {" · "}
+                  <span>{countByStatus.expired || 0} expired</span>
+                </>
+              )}
+            </span>
             <span className="tabular-nums">
               last updated {fmtTime(new Date().toISOString())}
             </span>

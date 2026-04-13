@@ -427,10 +427,14 @@ def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
 # ============================================================================
 
 @app.get("/api/watchlist")
-def watchlist() -> list[dict]:
-    """Active vector_watchlist pins with the latest INKY event (if any)
-    joined in for display. The Phase-2 correlation engine reads the same
-    table to escalate on anomalous auth."""
+def watchlist(status: str | None = Query(None)) -> list[dict]:
+    """Watchlist pins with the latest INKY event (if any) joined in for
+    display. Accepts an optional ``?status=`` filter
+    (``active``/``escalated``/``expired``); anything else (including
+    ``all`` or missing) returns every pin. The Phase-2 correlation
+    engine reads the same table to escalate on anomalous auth."""
+    normalized = (status or "").strip().lower()
+    status_filter = normalized if normalized in {"active", "escalated", "expired"} else None
     return db.fetch_all(
         """
         SELECT
@@ -457,10 +461,11 @@ def watchlist() -> list[dict]:
                 AND i.ingested_at > now() - INTERVAL '24 hours'
               ORDER BY i.timestamp DESC LIMIT 1) AS latest_verdict
         FROM vector_watchlist w
-        WHERE w.status = 'active'
+        WHERE (%s::text IS NULL OR w.status = %s)
         ORDER BY w.created_at DESC
         LIMIT 200
-        """
+        """,
+        (status_filter, status_filter),
     )
 
 

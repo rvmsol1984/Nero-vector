@@ -60,7 +60,7 @@ export const api = {
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
-  watchlist:   () => get("/api/watchlist"),
+  watchlist:   (status) => get(`/api/watchlist${qs({ status })}`),
 
   // ----- governance -----------------------------------------------------
   govDlp:       (tenant) => get(`/api/governance/dlp${qs({ tenant })}`),
