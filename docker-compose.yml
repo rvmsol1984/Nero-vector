@@ -1,11 +1,4 @@
 version: "3.8"
-
-# NERO Vector - UAL ingest service
-#
-# Assumes the existing Hetzner stack already provides a PostgreSQL
-# instance reachable on the 'nero' overlay network as host 'postgres'.
-# Override POSTGRES_HOST in .env if your Postgres service name differs.
-
 services:
   vector-ingest:
     build: .
@@ -20,17 +13,14 @@ services:
     volumes:
       - ./tenants.json:/app/tenants.json:ro
       - ./migrations:/app/migrations:ro
-    networks:
-      - nero
+    extra_hosts:
+      - "host.docker.internal:172.24.0.1"
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "5"
-
   inky-receiver:
-    # Same image as vector-ingest -- just runs the FastAPI app in
-    # vector_ingest.inky_receiver instead of the poll loop.
     image: nero-vector/vector-ingest:latest
     container_name: vector-inky-receiver
     restart: unless-stopped
@@ -49,14 +39,10 @@ services:
       - "3007"
     ports:
       - "3007:3007"
-    networks:
-      - nero
+    extra_hosts:
+      - "host.docker.internal:172.24.0.1"
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "5"
-
-networks:
-  nero:
-    external: true

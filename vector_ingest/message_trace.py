@@ -44,7 +44,7 @@ GRAPH_RESOURCE = "https://graph.microsoft.com"
 GRAPH_HUNTING_URL = f"{GRAPH_RESOURCE}/v1.0/security/runHuntingQuery"
 GRAPH_EMAIL_ACTIVITY_URL = (
     f"{GRAPH_RESOURCE}/v1.0/reports/getEmailActivityUserDetail(period='D7')"
-    "?$format=application/json"
+    
 )
 
 TOKEN_REFRESH_SKEW = timedelta(minutes=5)
@@ -370,16 +370,16 @@ class MessageTraceIngestor:
             )
             return 0
 
+        import csv, io
         try:
-            body = resp.json() or {}
-        except ValueError:
+            reader = csv.DictReader(io.StringIO(resp.text))
+            values = list(reader)
+        except Exception as exc:
             logger.error(
-                "[message_trace] activity-report non-json response",
-                extra={"tenant_id": self.tenant_id, "body_head": resp.text[:200]},
+                "[message_trace] activity-report csv parse failed",
+                extra={"tenant_id": self.tenant_id, "error": str(exc)},
             )
             return 0
-
-        values = body.get("value") or []
         written = 0
         for u in values:
             row = self._normalize_activity(u)
@@ -417,15 +417,15 @@ class MessageTraceIngestor:
     def _normalize_activity(self, u: dict) -> dict | None:
         if not isinstance(u, dict):
             return None
-        upn = u.get("userPrincipalName")
-        refresh = u.get("reportRefreshDate")
+        upn = u.get("User Principal Name") or u.get("userPrincipalName")
+        refresh = u.get("Report Refresh Date") or u.get("reportRefreshDate")
         if not upn or not refresh:
             return None
         received = _parse_iso(refresh) or datetime.utcnow().replace(microsecond=0)
 
-        send = _to_int(u.get("sendCount")) or 0
-        recv = _to_int(u.get("receiveCount")) or 0
-        read = _to_int(u.get("readCount")) or 0
+        send = _to_int(u.get("Send Count") or u.get("sendCount")) or 0
+        recv = _to_int(u.get("Receive Count") or u.get("receiveCount")) or 0
+        read = _to_int(u.get("Read Count") or u.get("readCount")) or 0
         subject = f"Activity D7: send={send} recv={recv} read={read}"
 
         # Synthetic idempotent id: one row per user per refresh date.
