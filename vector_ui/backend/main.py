@@ -11,10 +11,12 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+import httpx
 
 from backend import db
 
@@ -397,6 +399,68 @@ def governance_downloads(
 
 
 # ============================================================================
+# /auth/* reverse proxy -> auth-server:3006
+# ============================================================================
+#
+# MUST be declared before the SPA catch-all below so FastAPI routes
+# /auth/login, /auth/callback, /auth/me, etc. here instead of handing them
+# back to the React shell. The auth sidecar listens on the internal
+# nero-vector_default network as "vector-auth-server".
+
+_AUTH_UPSTREAM = os.environ.get(
+    "VECTOR_AUTH_UPSTREAM",
+    "http://vector-auth-server:3006",
+).rstrip("/")
+
+# Hop-by-hop headers that must NOT be copied from the upstream response
+# back to the caller -- httpx has already decoded the body so any encoding
+# / length / transfer header is a lie at this point.
+_HOP_BY_HOP = {
+    "content-encoding",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "upgrade",
+}
+
+
+@app.api_route("/auth/{path:path}", methods=["GET", "POST"])
+async def proxy_auth(path: str, request: Request) -> Response:
+    url = f"{_AUTH_UPSTREAM}/auth/{path}"
+    # Strip Host so httpx sets it correctly for the upstream; keep the
+    # rest (Cookie, User-Agent, X-Forwarded-*, etc.) unchanged.
+    forward_headers = {
+        k: v for k, v in request.headers.items() if k.lower() != "host"
+    }
+
+    async with httpx.AsyncClient() as client:
+        upstream = await client.request(
+            method=request.method,
+            url=url,
+            headers=forward_headers,
+            content=await request.body(),
+            params=dict(request.query_params),
+            cookies=dict(request.cookies),
+            follow_redirects=False,
+            timeout=30.0,
+        )
+
+    response_headers = {
+        k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP
+    }
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+    )
+
+
+# ============================================================================
 # static SPA
 # ============================================================================
 
@@ -415,11 +479,14 @@ async def spa(full_path: str = "") -> FileResponse:
     """Catch-all that serves the React SPA shell.
 
     Any /api/* path that didn't match an explicit route above returns 404
-    here (so clients see a real API error, not the HTML shell). Everything
+    here (so clients see a real API error, not the HTML shell). Any
+    /auth/* path is handled by the reverse-proxy route above. Everything
     else either serves a matching file from the built Vite bundle or
     returns index.html so React Router can take over client-side routing.
     """
     if full_path.startswith("api/") or full_path == "api":
+        raise HTTPException(status_code=404)
+    if full_path.startswith("auth/") or full_path == "auth":
         raise HTTPException(status_code=404)
     if not _static_path.is_dir():
         raise HTTPException(status_code=503, detail="frontend bundle not built")
