@@ -1,5 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 
+import Login from "./pages/Login.jsx";
+
 // JWT-based auth — mirrors NERO FieldDesk.
 //
 // Flow:
@@ -57,7 +59,10 @@ export function clearToken() {
 
 export function redirectToLogin() {
   clearToken();
-  window.location.href = `${AUTH_BASE}/auth/login`;
+  // Land on "/" so the AuthProvider re-mounts and renders the Login
+  // page. We never auto-bounce straight to /auth/login any more -- the
+  // user has to click the button on the Login page.
+  window.location.href = "/";
 }
 
 // Hard sign out:
@@ -65,8 +70,7 @@ export function redirectToLogin() {
 //      keepalive: true so the browser still delivers it after we've
 //      navigated away — we don't care about the response)
 //   2. clear localStorage["vector_token"]
-//   3. window.location.href = "/auth/login" (hard navigation so React
-//      state is wiped and the PKCE flow starts fresh)
+//   3. window.location.href = "/" (back to the Login page)
 export function signOut() {
   const token = getToken();
   try {
@@ -91,7 +95,7 @@ export function signOut() {
   } catch {
     /* storage unavailable */
   }
-  window.location.href = "/auth/login";
+  window.location.href = "/";
 }
 
 export function AuthProvider({ children }) {
@@ -117,7 +121,8 @@ export function AuthProvider({ children }) {
 
     const token = getToken();
     if (!token) {
-      redirectToLogin();
+      // No session -- show the Login page, do NOT auto-bounce to MS.
+      setState({ status: "unauthenticated", user: null });
       return;
     }
 
@@ -130,7 +135,7 @@ export function AuthProvider({ children }) {
         if (cancelled) return;
         if (res.status === 401 || res.status === 403) {
           clearToken();
-          redirectToLogin();
+          setState({ status: "unauthenticated", user: null });
           return;
         }
         if (!res.ok) throw new Error(`auth/me returned ${res.status}`);
@@ -155,16 +160,20 @@ export function AuthProvider({ children }) {
     );
   }
 
+  if (state.status === "unauthenticated") {
+    return <Login />;
+  }
+
   if (state.status === "error") {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-bg text-sm font-sans gap-3 px-6 text-center">
         <div className="text-critical">auth error: {state.error}</div>
         <button
           type="button"
-          onClick={redirectToLogin}
+          onClick={() => window.location.reload()}
           className="text-primary-light underline"
         >
-          try signing in again
+          reload
         </button>
       </div>
     );
