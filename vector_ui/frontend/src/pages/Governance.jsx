@@ -1017,10 +1017,52 @@ function aiToolDisplay(remoteUrl) {
 }
 
 function AiActivityTab({ copilot, external, externalError }) {
+  const [subTab, setSubTab] = useState("copilot");
+  const SUB_TABS = [
+    { id: "copilot",  label: "Microsoft Copilot", count: copilot.length },
+    { id: "external", label: "External AI Tools", count: external.length },
+  ];
   return (
-    <div className="space-y-5">
-      <AiCopilotSection rows={copilot} />
-      <AiExternalSection rows={external} error={externalError} />
+    <div className="space-y-4">
+      <div className="flex items-center gap-0 border-b border-white/5">
+        {SUB_TABS.map((t) => {
+          const active = subTab === t.id;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setSubTab(t.id)}
+              className={`-mb-px transition-colors whitespace-nowrap ${
+                active ? "text-primary-light" : "text-white/50 hover:text-white/80"
+              }`}
+              style={{
+                padding: "8px 16px",
+                fontSize: "12px",
+                fontWeight: 500,
+                borderBottom: active
+                  ? "2px solid #2563EB"
+                  : "2px solid transparent",
+              }}
+            >
+              {t.label}{" "}
+              <span
+                className="ml-1 tabular-nums"
+                style={{
+                  color: active ? "#2563EB" : "rgba(255,255,255,0.4)",
+                }}
+              >
+                ({t.count})
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {subTab === "copilot" ? (
+        <AiCopilotSection rows={copilot} />
+      ) : (
+        <AiExternalSection rows={external} error={externalError} />
+      )}
     </div>
   );
 }
