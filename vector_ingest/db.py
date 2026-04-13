@@ -136,6 +136,24 @@ class Database:
 
     # ------------------------------------------------------------------ migrations
     def run_migrations(self, migrations_dir: str | Path) -> None:
+        """Apply every *.sql file in ``migrations_dir`` exactly once.
+
+        Tracked via the ``_vector_migrations`` table:
+
+            CREATE TABLE _vector_migrations (
+                filename   VARCHAR(256) PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+
+        On first use of this runner against an existing database (one
+        that was previously bootstrapped by the old naive runner and
+        therefore has the real schema but no tracking row), every SQL
+        file currently on disk is inserted into ``_vector_migrations``
+        up-front and *not* re-executed. That keeps the fix idempotent
+        and safe to drop into an already-running install without
+        colliding with pre-existing tables. New SQL files added after
+        the fix will still be applied normally.
+        """
         migrations_path = Path(migrations_dir)
         if not migrations_path.is_dir():
             logger.warning(
@@ -145,12 +163,100 @@ class Database:
             return
 
         files = sorted(p for p in migrations_path.iterdir() if p.suffix == ".sql")
-        for sql_file in files:
-            logger.info("applying migration", extra={"file": sql_file.name})
-            sql = sql_file.read_text(encoding="utf-8")
+        if not files:
+            logger.info("no migration files to apply")
+            return
+
+        # 1) Was this runner already active on a previous boot?
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('_vector_migrations') IS NOT NULL")
+            tracking_existed = bool((cur.fetchone() or [False])[0])
+
+        # 2) Create the tracking table (idempotent).
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS _vector_migrations (
+                    filename   VARCHAR(256) PRIMARY KEY,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        self.conn.commit()
+
+        # 3) First-run seed: if the tracking table did NOT exist before
+        # this boot AND the DB already carries the v0.1 UAL schema
+        # (vector_events), assume every migration file on disk has
+        # already been applied and record them as such. Without this,
+        # the first boot after the tracking fix would try to re-run
+        # 001..005 on a populated database and blow up.
+        if not tracking_existed:
             with self.conn.cursor() as cur:
-                cur.execute(sql)
-            self.conn.commit()
+                cur.execute("SELECT to_regclass('vector_events') IS NOT NULL")
+                db_already_seeded = bool((cur.fetchone() or [False])[0])
+            if db_already_seeded:
+                logger.info(
+                    "tracking table freshly created on an existing db -- "
+                    "marking current migration files as already applied",
+                    extra={"count": len(files)},
+                )
+                with self.conn.cursor() as cur:
+                    for sql_file in files:
+                        cur.execute(
+                            """
+                            INSERT INTO _vector_migrations (filename)
+                            VALUES (%s)
+                            ON CONFLICT (filename) DO NOTHING
+                            """,
+                            (sql_file.name,),
+                        )
+                self.conn.commit()
+
+        # 4) Load the set of already-applied migrations.
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT filename FROM _vector_migrations")
+            applied = {row[0] for row in cur.fetchall()}
+
+        # 5) Apply each file that isn't in the tracking set. The
+        # migration body and the INSERT into _vector_migrations run
+        # in the same transaction so a crash mid-file leaves no
+        # half-applied pin.
+        pending = 0
+        skipped = 0
+        for sql_file in files:
+            name = sql_file.name
+            if name in applied:
+                skipped += 1
+                logger.info(
+                    "migration already applied, skipping",
+                    extra={"file": name},
+                )
+                continue
+
+            logger.info("applying migration", extra={"file": name})
+            sql = sql_file.read_text(encoding="utf-8")
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(sql)
+                    cur.execute(
+                        "INSERT INTO _vector_migrations (filename) VALUES (%s)",
+                        (name,),
+                    )
+                self.conn.commit()
+                applied.add(name)
+                pending += 1
+            except Exception:
+                self.conn.rollback()
+                logger.exception(
+                    "migration failed, aborting run",
+                    extra={"file": name},
+                )
+                raise
+
+        logger.info(
+            "migrations complete",
+            extra={"applied": pending, "skipped": skipped, "total": len(files)},
+        )
 
     # ------------------------------------------------------------------ checkpoints
     @staticmethod
