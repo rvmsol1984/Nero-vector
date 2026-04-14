@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import Avatar from "../components/Avatar.jsx";
-import * as api from "../api.js";
+import { api } from "../api.js";
 
 function timeAgo(ts) {
   if (!ts) return "never";
