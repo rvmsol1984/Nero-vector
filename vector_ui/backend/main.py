@@ -964,6 +964,55 @@ def governance_threatlocker() -> list[dict]:
     )
 
 
+@app.get("/api/governance/threatlocker/events")
+def governance_threatlocker_events(
+    hostname: str | None = Query(None),
+    username: str | None = Query(None),
+    action: str | None = Query(None),
+    action_type: str | None = Query(None),
+    policy_name: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Raw ThreatLocker ActionLog rows filtered to one governance
+    aggregation cell. Used by the Governance ThreatLocker tab's
+    in-place row expand."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            event_time,
+            hostname,
+            username,
+            full_path,
+            process_path,
+            action_type,
+            action,
+            action_id,
+            policy_name,
+            hash,
+            raw_json
+        FROM vector_threatlocker_events
+        WHERE client_name = %s
+          AND (%s::text IS NULL OR hostname    = %s)
+          AND (%s::text IS NULL OR username    = %s)
+          AND (%s::text IS NULL OR action      = %s)
+          AND (%s::text IS NULL OR action_type = %s)
+          AND (%s::text IS NULL OR policy_name = %s)
+        ORDER BY event_time DESC
+        LIMIT %s
+        """,
+        (
+            _GCS,
+            hostname, hostname,
+            username, username,
+            action, action,
+            action_type, action_type,
+            policy_name, policy_name,
+            limit,
+        ),
+    )
+
+
 @app.get("/api/governance/edr-alerts")
 def governance_edr_alerts() -> list[dict]:
     """Datto EDR alerts aggregated by (host, user, threat, severity)."""
@@ -988,6 +1037,116 @@ def governance_edr_alerts() -> list[dict]:
         LIMIT 200
         """,
         (_GCS,),
+    )
+
+
+@app.get("/api/governance/edr-alerts/events")
+def governance_edr_alerts_events(
+    hostname: str | None = Query(None),
+    username: str | None = Query(None),
+    threat_name: str | None = Query(None),
+    severity: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Raw EDR events filtered to one governance aggregation cell.
+    Used by the Governance EDR Alerts tab's in-place row expand."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            timestamp,
+            event_type,
+            severity,
+            host_name,
+            host_ip,
+            user_account,
+            process_name,
+            process_path,
+            threat_name,
+            threat_score,
+            action_taken,
+            raw_json
+        FROM vector_edr_events
+        WHERE client_name = %s
+          AND (%s::text IS NULL OR host_name    = %s)
+          AND (%s::text IS NULL OR user_account = %s)
+          AND (%s::text IS NULL OR threat_name  = %s)
+          AND (%s::text IS NULL OR severity     = %s)
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (
+            _GCS,
+            hostname, hostname,
+            username, username,
+            threat_name, threat_name,
+            severity, severity,
+            limit,
+        ),
+    )
+
+
+@app.get("/api/governance/events/by-ip")
+def governance_events_by_ip(
+    ip: str = Query(..., description="client_ip to filter on"),
+    event_type: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Recent UAL rows by source IP. Backs the Password Spray row
+    expand so an operator can see which users the source IP actually
+    hit without leaving the governance tab."""
+    return db.fetch_all(
+        """
+        SELECT id::text,
+               timestamp,
+               client_name,
+               tenant_id,
+               user_id,
+               entity_key,
+               event_type,
+               workload,
+               result_status,
+               client_ip
+        FROM vector_events
+        WHERE client_ip = %s
+          AND (%s::text IS NULL OR event_type = %s)
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (ip, event_type, event_type, limit),
+    )
+
+
+@app.get("/api/governance/oauth-apps/{app_id}/events")
+def governance_oauth_apps_events(
+    app_id: str,
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Recent 'Consent to application.' rows for a single OAuth app.
+    Matches the `ObjectId` value used by the governance aggregate so
+    expanding a row on the OAuth Apps tab renders the actual consent
+    audit log for that specific application."""
+    return db.fetch_all(
+        """
+        SELECT id::text,
+               timestamp,
+               client_name,
+               tenant_id,
+               user_id,
+               entity_key,
+               event_type,
+               workload,
+               result_status,
+               client_ip,
+               raw_json
+        FROM vector_events
+        WHERE event_type = 'Consent to application.'
+          AND client_name = %s
+          AND COALESCE(raw_json->>'ObjectId', '') = %s
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (_GCS, app_id, limit),
     )
 
 
