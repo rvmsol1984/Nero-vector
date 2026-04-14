@@ -53,10 +53,10 @@ const SOURCES = [
   },
   {
     name: "FeedLattice / OpenCTI",
-    status: "planned",
-    label: "PLANNED",
+    status: "live",
+    label: "LIVE",
     description:
-      "IOC enrichment and threat intelligence correlation. Internal platform available — ingestion pipeline planned.",
+      "2.6M+ indicators across IPv4, domains, URLs, emails and file hashes. Real-time enrichment on all ingested events.",
   },
   {
     name: "Defender ATP",

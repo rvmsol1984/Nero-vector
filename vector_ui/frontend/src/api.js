@@ -66,6 +66,7 @@ export const api = {
   iocMatches:  ({ limit = 50, min_confidence } = {}) =>
                  get(`/api/ioc/matches${qs({ limit, min_confidence })}`),
   iocByValue:  (value) => get(`/api/ioc/matches/${encodeURIComponent(value)}`),
+  iocMatchesByValue: (value) => get(`/api/ioc/matches/${encodeURIComponent(value)}`),
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
@@ -99,4 +100,5 @@ export const api = {
   govPrivilegedRoles:    () => get("/api/governance/privileged-roles"),
   govGuestUsers:         () => get("/api/governance/guest-users"),
   govEdrAlerts:          () => get("/api/governance/edr-alerts"),
+  govIocMatches:         () => get("/api/ioc/matches?limit=200"),
 };

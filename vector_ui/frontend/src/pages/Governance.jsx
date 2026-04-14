@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import Avatar from "../components/Avatar.jsx";
+import JsonBlock from "../components/JsonBlock.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
@@ -26,6 +27,7 @@ const TABS = [
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
   { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
   { id: "edrAlerts",         label: "EDR Alerts",        endpoint: "govEdrAlerts",         severity: "critical", withTenant: false },
+  { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
 ];
 
 // GCS tenant -- hardcoded here because the Governance board is GCS-only and
@@ -251,6 +253,13 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
         </div>
       );
     }
+    if (tabId === "iocMatches") {
+      return (
+        <div className="card">
+          <EmptyState message="No IOC matches detected" />
+        </div>
+      );
+    }
     return (
       <div className="card">
         <EmptyState />
@@ -272,6 +281,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
+    case "iocMatches":        return <IocMatchesTable rows={rows} />;
     case "aiActivity":
       // Handled above -- this branch is unreachable because TabPanel
       // short-circuits on tabId === "aiActivity" before the switch.
@@ -1919,92 +1929,3 @@ function edrSeverityToPill(raw) {
   return "monitor";
 }
 
-function EdrAlertsTable({ rows }) {
-  return (
-    <TableCard>
-      <table className="min-w-full text-[11px]">
-        <thead>
-          <tr>
-            <Th>Host</Th>
-            <Th>User</Th>
-            <Th>Threat</Th>
-            <Th>Severity</Th>
-            <Th align="right">Count</Th>
-            <Th>Last Seen</Th>
-            <Th>Action</Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-white/5">
-          {rows.map((row, idx) => {
-            const key = `${row.host_name || ""}|${row.user_account || ""}|${row.threat_name || ""}|${row.severity || ""}|${idx}`;
-            const actions = (row.actions || []).filter(Boolean);
-            return (
-              <tr key={key} className="hover:bg-white/[0.03]">
-                <td
-                  className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
-                  title={row.host_name || ""}
-                >
-                  {row.host_name || <span className="text-white/30">—</span>}
-                </td>
-                <td
-                  className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
-                  title={row.user_account || ""}
-                >
-                  {row.user_account || <span className="text-white/30">—</span>}
-                </td>
-                <td
-                  className="px-4 py-2.5 text-white/80 truncate max-w-[240px]"
-                  title={row.threat_name || ""}
-                >
-                  {row.threat_name || <span className="text-white/30">—</span>}
-                </td>
-                <td className="px-4 py-2.5">
-                  <SeverityPill severity={edrSeverityToPill(row.severity)} />
-                </td>
-                <td className="px-4 py-2.5 text-right tabular-nums">
-                  {fmtNumber(row.alert_count)}
-                </td>
-                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                  {fmtRelative(row.last_seen)}
-                </td>
-                <td
-                  className="px-4 py-2.5 text-white/60 truncate max-w-[200px]"
-                  title={actions.join(", ")}
-                >
-                  {actions.length > 0 ? (
-                    actions.join(", ")
-                  ) : (
-                    <span className="text-white/30">—</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </TableCard>
-  );
-}
-
-// Pull the DisplayName out of DeviceProperties array-of-{Name,Value} blobs.
-function DeviceList({ devices }) {
-  if (!devices || devices.length === 0) return <span className="text-white/30">—</span>;
-  const names = devices
-    .map((dp) => {
-      if (!Array.isArray(dp)) return "";
-      const hit = dp.find((p) => p && p.Name === "DisplayName");
-      return hit ? hit.Value || "" : "";
-    })
-    .filter(Boolean);
-  if (names.length === 0) {
-    return <span className="text-white/40">{devices.length} device{devices.length > 1 ? "s" : ""}</span>;
-  }
-  const shown = names.slice(0, 2);
-  const extra = names.length - shown.length;
-  return (
-    <span title={names.join("\n")}>
-      {shown.join(", ")}
-      {extra > 0 && <span className="text-white/30"> · +{extra}</span>}
-    </span>
-  );
-}

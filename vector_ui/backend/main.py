@@ -356,6 +356,84 @@ def user_stats(entity_key: str) -> dict:
     return {"by_event_type": by_event_type, "by_workload": by_workload}
 
 
+@app.get("/api/users/{entity_key}/edr")
+def user_edr(entity_key: str) -> list[dict]:
+    """Datto EDR events for this user.
+
+    Matches either on user_account (case-insensitive) for alerts that
+    identify a signed-in user, or on host_name against any device the
+    user has been seen using in UAL (DeviceProperties -> DisplayName).
+    This covers the common EDR shape where the raw alert only carries a
+    hostname, not a logged-in user.
+    """
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            timestamp,
+            event_type,
+            severity,
+            host_name,
+            host_ip,
+            user_account,
+            process_name,
+            process_path,
+            command_line,
+            threat_name,
+            threat_score,
+            action_taken,
+            client_name,
+            tenant_id,
+            raw_json
+        FROM vector_edr_events
+        WHERE LOWER(user_account) = LOWER(%s)
+           OR LOWER(host_name) IN (
+               SELECT LOWER(raw_json->>'DeviceName')
+               FROM vector_events
+               WHERE user_id = %s
+                 AND raw_json->>'DeviceName' IS NOT NULL
+           )
+        ORDER BY timestamp DESC
+        LIMIT 100
+        """,
+        (user_email, user_email),
+    )
+
+
+@app.get("/api/users/{entity_key}/ioc")
+def user_ioc_matches(entity_key: str) -> list[dict]:
+    """OpenCTI IOC matches whose triggering event belongs to this user.
+
+    The join goes through vector_events on id = matched_event_id and
+    then filters on entity_key so a watchlist escalation on a UAL row
+    shows up under the right user even if the IOC value itself has
+    been seen on other tenants.
+    """
+    return db.fetch_all(
+        """
+        SELECT
+            m.id::text,
+            m.ioc_value,
+            m.ioc_type,
+            m.confidence,
+            m.indicator_name,
+            m.opencti_id,
+            m.client_name,
+            m.tenant_id,
+            m.matched_at,
+            m.matched_event_id::text,
+            m.raw_json
+        FROM vector_ioc_matches m
+        JOIN vector_events ve ON ve.id = m.matched_event_id
+        WHERE ve.entity_key = %s
+        ORDER BY m.matched_at DESC
+        LIMIT 100
+        """,
+        (entity_key,),
+    )
+
+
 @app.get("/api/users/{entity_key}/emails")
 def user_emails(
     entity_key: str,
@@ -751,6 +829,74 @@ def user_edr(entity_key: str, limit: int = Query(100, ge=1, le=500)) -> list[dic
         LIMIT %s
         """,
         (email, email, limit),
+    )
+
+
+# ============================================================================
+# IOC matches (produced by vector-ingest's IocEnricher worker)
+# ============================================================================
+
+@app.get("/api/ioc/matches")
+def ioc_matches(limit: int = Query(50, ge=1, le=500)) -> list[dict]:
+    """Recent OpenCTI-backed IOC matches across every tenant."""
+    return db.fetch_all(
+        """
+        SELECT
+            m.id::text,
+            m.ioc_value,
+            m.ioc_type,
+            m.confidence,
+            m.indicator_name,
+            m.opencti_id,
+            m.client_name,
+            m.tenant_id,
+            m.matched_at,
+            m.matched_event_id::text,
+            m.raw_json,
+            ve.user_id,
+            ve.entity_key,
+            ve.event_type,
+            ve.workload
+        FROM vector_ioc_matches m
+        LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
+        ORDER BY m.matched_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+
+
+@app.get("/api/ioc/matches/{ioc_value:path}")
+def ioc_matches_for_value(ioc_value: str) -> list[dict]:
+    """Every recorded match for a single IOC value. ``ioc_value`` is
+    taken as a path segment so we can pass URLs / sha256 / etc. verbatim
+    without worrying about reserved characters -- FastAPI's ``:path``
+    converter keeps slashes intact."""
+    return db.fetch_all(
+        """
+        SELECT
+            m.id::text,
+            m.ioc_value,
+            m.ioc_type,
+            m.confidence,
+            m.indicator_name,
+            m.opencti_id,
+            m.client_name,
+            m.tenant_id,
+            m.matched_at,
+            m.matched_event_id::text,
+            m.raw_json,
+            ve.user_id,
+            ve.entity_key,
+            ve.event_type,
+            ve.workload
+        FROM vector_ioc_matches m
+        LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
+        WHERE m.ioc_value = %s
+        ORDER BY m.matched_at DESC
+        LIMIT 200
+        """,
+        (ioc_value,),
     )
 
 

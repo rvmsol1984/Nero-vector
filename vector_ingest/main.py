@@ -115,11 +115,11 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                 )
             )
 
-    # One tenant-agnostic IOC enricher runs alongside the per-tenant
-    # pollers. It pulls candidates from the shared vector_events +
-    # vector_defender_hunting tables, so it doesn't need per-tenant
-    # scoping at this layer.
-    logger.info("[ioc] building OpenCTI enricher")
+    # Global workers -- not per-tenant but share the same poll cadence.
+    # IocEnricher runs once per cycle and walks every tenant's recent
+    # events looking for OpenCTI-backed indicator matches. It's last in
+    # the list so it runs after the other ingestors have committed any
+    # new rows this cycle.
     ingestors.append(IocEnricher(db=db))
     return ingestors
 

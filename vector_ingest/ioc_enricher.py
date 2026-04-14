@@ -1,39 +1,50 @@
-"""OpenCTI-backed IOC enricher.
+"""OpenCTI-backed IOC enrichment worker.
 
-Every 5 minutes this poller scans recent telemetry for unique
-observables worth looking up, asks OpenCTI whether it has any
-indicators matching them, and records hits >= confidence 50 in
-``vector_ioc_matches``. Hits >= confidence 75 additionally stage
-a ``trigger_type='ioc_match'`` row in ``vector_watchlist`` with
-``status='escalated'`` so the correlation engine picks them up
-immediately.
+Runs on the same 5-minute cadence as the rest of the vector-ingest
+pollers. Each cycle:
 
-Data sources (last 5 minutes only):
-    - ``vector_events.client_ip``                -> ipv4 / ipv6
-    - ``vector_events.raw_json->>'SenderFromAddress'`` -> email
-    - ``vector_defender_hunting.raw_json->>'SHA256'`` -> file hash
+  1. Pull the last ~5 minutes of IOCs out of Postgres:
+       - client_ip values from vector_events
+       - SenderFromAddress / RecipientEmailAddress /
+         ExtendedProperties URLs from vector_events.raw_json
+       - ObjectId values from vector_events.raw_json that look like
+         URLs
+       - sender_address values from vector_message_trace
+       - SHA256 hashes from vector_defender_hunting.raw_json
+       - SHA256 hashes from vector_edr_events.raw_json
 
-OpenCTI is reached over GraphQL at
-``OPENCTI_URL`` (defaults to ``http://127.0.0.1:8080/graphql``)
-with a bearer token from ``OPENCTI_TOKEN``. Auth failure or any
-non-2xx response degrades gracefully -- the enricher logs and
-skips that tick rather than crashing the poll loop.
+  2. For each unique IOC, query OpenCTI's stixCyberObservables
+     GraphQL endpoint for the value and inspect any linked
+     indicators.
 
-Rate-limiting: a fixed 100ms sleep between queries plus an
-in-process cache (24h TTL for hits, 1h for misses) so the
-same IOC is never queried twice in quick succession.
+  3. When OpenCTI returns a linked indicator with confidence >= 50
+     the row is inserted into vector_ioc_matches. When confidence
+     >= 75 a vector_watchlist row is also created with
+     trigger_type='ioc_match' / status='escalated' so the UI's
+     correlation pins pick it up immediately.
+
+Rate limits / caching:
+
+  * Queries are issued one at a time with a 100ms pause in between
+    so we don't hammer the OpenCTI API. IPv4 lookups are still
+    batched client-side into groups of 10 so we can log progress.
+  * Negative lookups (clean IOC, no linked indicators) are cached
+    in-memory for 1 hour.
+  * Positive lookups are cached in-memory for 24 hours.
+
+This module intentionally uses its own OpenCTI HTTP client rather
+than piggybacking on the existing TenantIngestor so it doesn't block
+UAL ingestion on a slow CTI backend.
 """
 
 from __future__ import annotations
 
-import ipaddress
-import json
 import logging
 import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
 import requests
 
@@ -42,59 +53,52 @@ from vector_ingest.db import Database
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_OPENCTI_URL = "http://127.0.0.1:8080/graphql"
-POLL_INTERVAL = timedelta(minutes=5)
-LOOKBACK_WINDOW = timedelta(minutes=5)
+# ---------------------------------------------------------------------------
+# tunables
+# ---------------------------------------------------------------------------
 
-QUERY_RATE_LIMIT_SEC = 0.1  # 100ms between OpenCTI queries
+# How far back to look for fresh IOCs each cycle. Slightly wider than
+# the 5-minute poll cadence so that any late-arriving rows from a
+# previous cycle are still picked up.
+LOOKBACK = timedelta(minutes=6)
 
-CACHE_TTL_HIT = timedelta(hours=24)
-CACHE_TTL_MISS = timedelta(hours=1)
+# Per-query pacing against OpenCTI (milliseconds between calls).
+QUERY_DELAY_MS = 100
 
-CONFIDENCE_STORE = 50       # >= 50 -> insert into vector_ioc_matches
-CONFIDENCE_ESCALATE = 75    # >= 75 -> also stage a watchlist pin
+# Group IPs into chunks of this size for progress logging. (OpenCTI
+# is queried one value at a time; this is purely a batch-reporting
+# granularity.)
+IP_BATCH_SIZE = 10
 
-# -- recognisers -------------------------------------------------------------
+# Cache TTLs.
+NEGATIVE_TTL = timedelta(hours=1)
+POSITIVE_TTL = timedelta(hours=24)
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+# Confidence thresholds.
+MIN_CONFIDENCE = 50
+ESCALATE_CONFIDENCE = 75
 
+# Watchlist correlation window for IOC-triggered pins (24 hours).
+WATCHLIST_WINDOW = timedelta(hours=24)
 
-def _looks_like_ipv4(value: str) -> bool:
-    try:
-        return isinstance(ipaddress.ip_address(value), ipaddress.IPv4Address)
-    except (ValueError, TypeError):
-        return False
-
-
-def _looks_like_ipv6(value: str) -> bool:
-    try:
-        return isinstance(ipaddress.ip_address(value), ipaddress.IPv6Address)
-    except (ValueError, TypeError):
-        return False
-
-
-def _looks_like_email(value: str) -> bool:
-    return bool(value) and bool(_EMAIL_RE.match(value))
+# GraphQL lookup timeout.
+GRAPHQL_TIMEOUT = 15
 
 
-def _looks_like_sha256(value: str) -> bool:
-    return bool(value) and bool(_SHA256_RE.match(value))
+# ---------------------------------------------------------------------------
+# OpenCTI GraphQL client
+# ---------------------------------------------------------------------------
 
-
-# -- GraphQL query templates -------------------------------------------------
-#
-# The confirmed-working query from the spec is for IPv4. We derive the
-# other variants from the same filter pattern, just targeting a
-# different entity type. OpenCTI is flexible about which filter key it
-# accepts ("value" works for observables across types).
-
-_GQL_QUERY_TMPL = """
-query {
+# The spec confirms that the stixCyberObservables query with a "value"
+# filter works for every observable type we care about. OpenCTI picks
+# the right observable class by filter value; we then union-select the
+# value field from each type so the response shape is uniform.
+_GRAPHQL_QUERY = """
+query VectorIocLookup($value: String!) {
   stixCyberObservables(
     filters: {
-      mode: and
-      filters: [{ key: "value", values: ["%s"] }]
+      mode: and,
+      filters: [{ key: "value", values: [$value] }],
       filterGroups: []
     }
   ) {
@@ -102,10 +106,12 @@ query {
       node {
         id
         entity_type
-        ... on IPv4Addr { value }
-        ... on IPv6Addr { value }
+        ... on IPv4Addr  { value }
+        ... on IPv6Addr  { value }
+        ... on DomainName { value }
+        ... on Url       { value }
         ... on EmailAddr { value }
-        ... on StixFile { hashes { algorithm hash } name }
+        ... on StixFile  { hashes { algorithm hash } }
         indicators {
           edges {
             node {
@@ -113,6 +119,7 @@ query {
               name
               confidence
               description
+              pattern
               valid_from
               valid_until
             }
@@ -122,439 +129,606 @@ query {
     }
   }
 }
-""".strip()
+"""
 
+
+class OpenCTIClient:
+    """Small GraphQL client for the OpenCTI API."""
+
+    def __init__(self, url: str, token: str, timeout: int = GRAPHQL_TIMEOUT) -> None:
+        self._url = url
+        self._token = token
+        self._timeout = timeout
+        self._session = requests.Session()
+        self._session.headers.update(
+            {
+                "Authorization": f"Bearer {token}",
+                "Content-Type":  "application/json",
+                "Accept":        "application/json",
+            }
+        )
+
+    def lookup(self, value: str) -> list[dict]:
+        """Return the list of edges[].node dicts for ``value``.
+
+        Raises on transport / HTTP errors; callers are expected to
+        swallow the exception and log it so one bad query never
+        blocks the rest of the enrichment cycle.
+        """
+        payload = {"query": _GRAPHQL_QUERY, "variables": {"value": value}}
+        resp = self._session.post(self._url, json=payload, timeout=self._timeout)
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("errors"):
+            logger.warning(
+                "[ioc] opencti returned errors value=%s errors=%s",
+                value,
+                body["errors"],
+            )
+            return []
+        edges = (
+            body.get("data", {})
+            .get("stixCyberObservables", {})
+            .get("edges", [])
+            or []
+        )
+        return [e.get("node") or {} for e in edges if isinstance(e, dict)]
+
+
+# ---------------------------------------------------------------------------
+# extraction helpers
+# ---------------------------------------------------------------------------
+
+_IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+_IPV6_RE = re.compile(r"^[0-9a-fA-F:]+$")
+_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+"
+    r"[a-zA-Z]{2,63}$"
+)
+
+
+def _classify_ip(raw: str) -> str | None:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if _IPV4_RE.match(raw):
+        parts = raw.split(".")
+        if all(0 <= int(p) <= 255 for p in parts):
+            return "ipv4"
+        return None
+    if ":" in raw and _IPV6_RE.match(raw):
+        return "ipv6"
+    return None
+
+
+def _classify_string(raw: str) -> tuple[str, str] | None:
+    """Return (ioc_type, normalized_value) for a raw string, or None
+    if the value doesn't look like a supported IOC shape."""
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    if _SHA256_RE.match(value):
+        return ("sha256", value.lower())
+    ip_type = _classify_ip(value)
+    if ip_type:
+        return (ip_type, value)
+    if _EMAIL_RE.match(value):
+        return ("email", value.lower())
+    if _URL_RE.match(value):
+        return ("url", value)
+    if _DOMAIN_RE.match(value) and "." in value:
+        return ("domain", value.lower())
+    return None
+
+
+def _iter_url_like_from_extended(raw_json: Any) -> Iterable[str]:
+    """Walk a UAL ExtendedProperties array (list of {Name, Value}) and
+    yield every Value that looks like a URL."""
+    if not isinstance(raw_json, dict):
+        return []
+    out: list[str] = []
+    props = raw_json.get("ExtendedProperties")
+    if isinstance(props, list):
+        for p in props:
+            if not isinstance(p, dict):
+                continue
+            val = p.get("Value")
+            if isinstance(val, str) and _URL_RE.match(val):
+                out.append(val)
+    obj_id = raw_json.get("ObjectId")
+    if isinstance(obj_id, str) and _URL_RE.match(obj_id):
+        out.append(obj_id)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# main worker
+# ---------------------------------------------------------------------------
 
 class IocEnricher:
-    """Poll OpenCTI every 5 minutes for the last 5 minutes of observables."""
+    """Runs one enrichment cycle per ``poll_once()`` call."""
 
-    def __init__(self, db: Database) -> None:
-        self.db = db
-        self._session = requests.Session()
-        self._last_poll: datetime = datetime.fromtimestamp(0, tz=timezone.utc)
+    # tenant_id / client_name are kept on the instance only so the
+    # main loop's structured log lines have fields to print -- this
+    # worker is global, not per-tenant.
+    tenant_id = "*"
+    client_name = "global"
 
-        # { ioc_value -> (result_dict | None, expires_at) }
-        # ``result_dict`` holds the best-matching indicator when found,
-        # or None for a negative cache entry.
-        self._cache: dict[str, tuple[dict | None, datetime]] = {}
+    def __init__(
+        self,
+        db: Database,
+        url: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        self._db = db
+        self._url = url or os.environ.get(
+            "OPENCTI_URL", "http://127.0.0.1:8080/graphql"
+        )
+        self._token = token or os.environ.get("OPENCTI_TOKEN", "")
+        self._client: OpenCTIClient | None = None
+        # Cache: ioc_value -> (expires_at, list_of_indicator_dicts).
+        # An empty list indicates a negative result.
+        self._cache: dict[str, tuple[datetime, list[dict]]] = {}
 
-        # Lazy-discovered watchlist schema (differs between migration
-        # 002 and 004). Set on first insert attempt.
-        self._watchlist_flavor: str | None = None
+    # ----- cache ---------------------------------------------------------
 
-    # ------------------------------------------------------------------ config
-    @property
-    def _url(self) -> str:
-        return os.environ.get("OPENCTI_URL", DEFAULT_OPENCTI_URL)
-
-    @property
-    def _token(self) -> str | None:
-        return os.environ.get("OPENCTI_TOKEN")
-
-    def _headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type":  "application/json",
-            "Accept":        "application/json",
-        }
-
-    # ------------------------------------------------------------------ cache
-    def _cache_get(self, value: str) -> dict | None | object:
-        """Return the cached result for ``value`` or the sentinel
-        ``_MISS`` if we've never looked it up (or the entry has
-        expired). A cached negative lookup returns ``None``."""
-        entry = self._cache.get(value)
-        if entry is None:
-            return _MISS
-        result, expires_at = entry
-        if datetime.now(timezone.utc) >= expires_at:
-            del self._cache[value]
-            return _MISS
+    def _cache_get(self, value: str) -> list[dict] | None:
+        hit = self._cache.get(value)
+        if not hit:
+            return None
+        expires_at, result = hit
+        if datetime.now(timezone.utc) > expires_at:
+            self._cache.pop(value, None)
+            return None
         return result
 
-    def _cache_put(self, value: str, result: dict | None) -> None:
-        ttl = CACHE_TTL_HIT if result else CACHE_TTL_MISS
-        self._cache[value] = (result, datetime.now(timezone.utc) + ttl)
+    def _cache_put(self, value: str, result: list[dict]) -> None:
+        ttl = POSITIVE_TTL if result else NEGATIVE_TTL
+        self._cache[value] = (datetime.now(timezone.utc) + ttl, result)
 
-    # ------------------------------------------------------------------ queries
-    def _query_opencti(self, value: str) -> dict | None:
-        """Run a single stixCyberObservables query. Returns a dict
-        describing the best matching indicator (highest confidence)
-        or None when the IOC is unknown / the query failed."""
-        if not self._token:
-            logger.error("OPENCTI_TOKEN not configured; skipping enrichment")
-            return None
-        try:
-            resp = self._session.post(
-                self._url,
-                headers=self._headers(),
-                json={"query": _GQL_QUERY_TMPL % value},
-                timeout=15,
+    # ----- extraction ----------------------------------------------------
+
+    def _recent_events(self) -> list[dict]:
+        """Load recent UAL events with their raw_json so we can pull
+        out client_ip plus whatever lives in ExtendedProperties /
+        ObjectId / SenderFromAddress / RecipientEmailAddress."""
+        cutoff = datetime.now(timezone.utc) - LOOKBACK
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tenant_id, client_name, client_ip, raw_json, user_id
+                FROM vector_events
+                WHERE timestamp >= %s
+                """,
+                (cutoff,),
             )
-        except requests.RequestException as exc:
-            logger.warning("[ioc] opencti request failed for %s: %s", value, exc)
-            return None
-
-        if resp.status_code >= 400:
-            logger.warning(
-                "[ioc] opencti http error value=%s status=%d body=%s",
-                value,
-                resp.status_code,
-                resp.text[:200],
-            )
-            return None
-
-        try:
-            body = resp.json()
-        except ValueError:
-            logger.warning(
-                "[ioc] opencti non-json response value=%s body=%s",
-                value,
-                resp.text[:200],
-            )
-            return None
-
-        if "errors" in body and body["errors"]:
-            logger.warning(
-                "[ioc] opencti graphql errors value=%s errors=%s",
-                value,
-                str(body["errors"])[:200],
-            )
-            # fall through: data may still be partially useful
-
-        data = (body.get("data") or {}).get("stixCyberObservables") or {}
-        edges = data.get("edges") or []
-        if not edges:
-            return None
-
-        # Pick the first matching observable that has an indicator with
-        # non-zero confidence. OpenCTI can return multiple observables
-        # with the same value across tenants; we score on the highest
-        # indicator confidence we can find.
-        best: dict | None = None
-        for edge in edges:
-            node = (edge or {}).get("node") or {}
-            observable_id = node.get("id")
-            entity_type = node.get("entity_type")
-            indicators = ((node.get("indicators") or {}).get("edges") or [])
-            for ind_edge in indicators:
-                ind = (ind_edge or {}).get("node") or {}
-                confidence = ind.get("confidence")
-                try:
-                    confidence_int = int(confidence) if confidence is not None else 0
-                except (TypeError, ValueError):
-                    confidence_int = 0
-                candidate = {
-                    "opencti_observable_id": observable_id,
-                    "entity_type": entity_type,
-                    "opencti_id": ind.get("id"),
-                    "indicator_name": ind.get("name"),
-                    "confidence": confidence_int,
-                    "description": ind.get("description"),
-                    "valid_from": ind.get("valid_from"),
-                    "valid_until": ind.get("valid_until"),
+            rows = cur.fetchall()
+        out: list[dict] = []
+        for row in rows:
+            rid, tenant_id, client_name, client_ip, raw_json, user_id = row
+            out.append(
+                {
+                    "id":         rid,
+                    "tenant_id":  tenant_id,
+                    "client_name": client_name,
+                    "client_ip":  client_ip,
+                    "raw_json":   raw_json,
+                    "user_id":    user_id,
                 }
-                if best is None or candidate["confidence"] > best["confidence"]:
-                    best = candidate
+            )
+        return out
+
+    def _recent_message_trace_senders(self) -> list[dict]:
+        cutoff = datetime.now(timezone.utc) - LOOKBACK
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT tenant_id, client_name, sender_address
+                FROM vector_message_trace
+                WHERE received >= %s
+                  AND sender_address IS NOT NULL
+                """,
+                (cutoff,),
+            )
+            return [
+                {
+                    "tenant_id":  r[0],
+                    "client_name": r[1],
+                    "value":      r[2],
+                }
+                for r in cur.fetchall()
+            ]
+
+    def _recent_defender_hunting_hashes(self) -> list[dict]:
+        cutoff = datetime.now(timezone.utc) - LOOKBACK
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT tenant_id, client_name, raw_json
+                FROM vector_defender_hunting
+                WHERE timestamp >= %s
+                """,
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+        out: list[dict] = []
+        for tenant_id, client_name, raw_json in rows:
+            if not isinstance(raw_json, dict):
+                continue
+            for key in ("SHA256", "Sha256", "sha256", "InitiatingProcessSHA256"):
+                val = raw_json.get(key)
+                if isinstance(val, str) and _SHA256_RE.match(val):
+                    out.append(
+                        {
+                            "tenant_id":  tenant_id,
+                            "client_name": client_name,
+                            "value":      val.lower(),
+                        }
+                    )
+        return out
+
+    def _recent_edr_hashes(self) -> list[dict]:
+        cutoff = datetime.now(timezone.utc) - LOOKBACK
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT tenant_id, client_name, raw_json
+                FROM vector_edr_events
+                WHERE timestamp >= %s
+                """,
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+        out: list[dict] = []
+        for tenant_id, client_name, raw_json in rows:
+            if not isinstance(raw_json, dict):
+                continue
+            # Recurse one level to find any sha256-looking string.
+            for val in _walk_strings(raw_json):
+                if _SHA256_RE.match(val):
+                    out.append(
+                        {
+                            "tenant_id":  tenant_id,
+                            "client_name": client_name,
+                            "value":      val.lower(),
+                        }
+                    )
+        return out
+
+    def _collect_iocs(self) -> dict[tuple[str, str], dict]:
+        """Return a {(ioc_type, ioc_value): context} map.
+
+        ``context`` carries the first tenant_id / client_name / event
+        id / user_id we saw the value on so the resulting
+        vector_ioc_matches row has something to point at. Events
+        without a matching database row still produce a match with a
+        NULL matched_event_id.
+        """
+        iocs: dict[tuple[str, str], dict] = {}
+
+        def add(key: tuple[str, str], ctx: dict) -> None:
+            iocs.setdefault(key, ctx)
+
+        for ev in self._recent_events():
+            tenant_id = ev.get("tenant_id")
+            client_name = ev.get("client_name")
+            event_id = ev.get("id")
+            user_id = ev.get("user_id")
+            ctx = {
+                "tenant_id":  tenant_id,
+                "client_name": client_name,
+                "event_id":   event_id,
+                "user_id":    user_id,
+            }
+
+            # client_ip
+            ip_type = _classify_ip(ev.get("client_ip") or "")
+            if ip_type:
+                add((ip_type, ev["client_ip"]), ctx)
+
+            raw = ev.get("raw_json")
+            if isinstance(raw, dict):
+                for key in ("SenderFromAddress", "RecipientEmailAddress"):
+                    val = raw.get(key)
+                    if isinstance(val, str):
+                        classified = _classify_string(val)
+                        if classified and classified[0] == "email":
+                            add(classified, ctx)
+                for url in _iter_url_like_from_extended(raw):
+                    classified = _classify_string(url)
+                    if classified:
+                        add(classified, ctx)
+
+        for row in self._recent_message_trace_senders():
+            classified = _classify_string(row["value"])
+            if classified and classified[0] == "email":
+                add(
+                    classified,
+                    {
+                        "tenant_id":  row["tenant_id"],
+                        "client_name": row["client_name"],
+                        "event_id":   None,
+                        "user_id":    None,
+                    },
+                )
+
+        for row in self._recent_defender_hunting_hashes():
+            add(
+                ("sha256", row["value"]),
+                {
+                    "tenant_id":  row["tenant_id"],
+                    "client_name": row["client_name"],
+                    "event_id":   None,
+                    "user_id":    None,
+                },
+            )
+
+        for row in self._recent_edr_hashes():
+            add(
+                ("sha256", row["value"]),
+                {
+                    "tenant_id":  row["tenant_id"],
+                    "client_name": row["client_name"],
+                    "event_id":   None,
+                    "user_id":    None,
+                },
+            )
+
+        return iocs
+
+    # ----- OpenCTI lookup ------------------------------------------------
+
+    def _ensure_client(self) -> OpenCTIClient | None:
+        if not self._token:
+            logger.warning(
+                "[ioc] OPENCTI_TOKEN not set -- IOC enrichment disabled"
+            )
+            return None
+        if self._client is None:
+            self._client = OpenCTIClient(self._url, self._token)
+        return self._client
+
+    def _best_indicator(self, nodes: list[dict]) -> dict | None:
+        """Pick the highest-confidence linked indicator from a list
+        of stixCyberObservables nodes. Returns a flat dict that the
+        caller inserts into vector_ioc_matches."""
+        best: dict | None = None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            observable_id = node.get("id")
+            indicators = (
+                (node.get("indicators") or {}).get("edges") or []
+            )
+            for edge in indicators:
+                inner = (edge or {}).get("node") or {}
+                try:
+                    confidence = int(inner.get("confidence") or 0)
+                except (TypeError, ValueError):
+                    confidence = 0
+                if confidence < MIN_CONFIDENCE:
+                    continue
+                if best and confidence <= (best.get("confidence") or 0):
+                    continue
+                best = {
+                    "opencti_id":     inner.get("id") or observable_id,
+                    "indicator_name": inner.get("name"),
+                    "confidence":     confidence,
+                    "raw":            {"observable": node, "indicator": inner},
+                }
         return best
 
     def _lookup(self, value: str) -> dict | None:
-        """Cache-backed wrapper around _query_opencti."""
         cached = self._cache_get(value)
-        if cached is not _MISS:
-            return cached  # type: ignore[return-value]
-        time.sleep(QUERY_RATE_LIMIT_SEC)
-        result = self._query_opencti(value)
-        self._cache_put(value, result)
-        return result
+        if cached is not None:
+            if not cached:
+                return None
+            # Cached positive hits are stored as the already-picked
+            # best indicator wrapped in a single-item list so a cache
+            # hit still returns the richest match we've seen.
+            return cached[0]
 
-    # ------------------------------------------------------------------ collection
-    def _collect_iocs(self) -> list[dict]:
-        """Pull distinct observable candidates from the last 5 minutes
-        of vector_events + vector_defender_hunting. Returns a list of
-        ``{type, value, event_id, tenant_id, client_name}`` rows --
-        one per distinct IOC, keeping the first event_id seen so the
-        match row can point back to it."""
-        now_window = datetime.now(timezone.utc) - LOOKBACK_WINDOW
-
-        # IPs + sender emails from vector_events.
-        with self.db.conn.cursor() as _cur:
-            _cur.execute(
-                """
-                SELECT id, tenant_id, client_name, client_ip,
-                       raw_json->>'SenderFromAddress' AS sender_email
-                FROM vector_events
-                WHERE timestamp >= %s
-                  AND (
-                    client_ip IS NOT NULL
-                    OR raw_json ? 'SenderFromAddress'
-                  )
-                """,
-                (now_window,),
-            )
-            ip_and_email_rows = _cur.fetchall()
-            ip_and_email_rows = [
-                {"id": r[0], "tenant_id": r[1], "client_name": r[2],
-                 "client_ip": r[3], "sender_email": r[4]}
-                for r in ip_and_email_rows
-            ]
-
-        # SHA256 hashes from defender hunting results.
-        with self.db.conn.cursor() as _cur2:
-            _cur2.execute(
-                """
-                SELECT id, tenant_id, client_name,
-                       raw_json->>'SHA256' AS sha256
-                FROM vector_defender_hunting
-                WHERE timestamp >= %s
-                  AND raw_json ? 'SHA256'
-                """,
-                (now_window,),
-            )
-            hash_rows = _cur2.fetchall()
-            hash_rows = [
-                {"id": r[0], "tenant_id": r[1], "client_name": r[2], "sha256": r[3]}
-                for r in hash_rows
-            ]
-
-        seen: set[tuple[str, str]] = set()
-        out: list[dict] = []
-
-        def _add(ioc_type: str, value: str, row: dict) -> None:
-            if not value:
-                return
-            value = value.strip()
-            if not value:
-                return
-            key = (ioc_type, value.lower())
-            if key in seen:
-                return
-            seen.add(key)
-            out.append(
-                {
-                    "type":        ioc_type,
-                    "value":       value,
-                    "event_id":    row.get("id"),
-                    "tenant_id":   row.get("tenant_id"),
-                    "client_name": row.get("client_name"),
-                }
-            )
-
-        for row in ip_and_email_rows or []:
-            ip = (row.get("client_ip") or "").strip()
-            if _looks_like_ipv4(ip):
-                _add("ipv4-addr", ip, row)
-            elif _looks_like_ipv6(ip):
-                _add("ipv6-addr", ip, row)
-            email = (row.get("sender_email") or "").strip()
-            if _looks_like_email(email):
-                _add("email-addr", email, row)
-
-        for row in hash_rows or []:
-            sha = (row.get("sha256") or "").strip()
-            if _looks_like_sha256(sha):
-                _add("file-sha256", sha, row)
-
-        return out
-
-    # ------------------------------------------------------------------ persistence
-    def _insert_match(self, ioc: dict, match: dict) -> bool:
-        payload = {
-            "tenant_id":        ioc.get("tenant_id"),
-            "client_name":      ioc.get("client_name"),
-            "ioc_type":         ioc.get("type"),
-            "ioc_value":        ioc.get("value"),
-            "opencti_id":       match.get("opencti_id"),
-            "indicator_name":   match.get("indicator_name"),
-            "confidence":       match.get("confidence"),
-            "matched_event_id": ioc.get("event_id"),
-            "raw_json":         json.dumps(match),
-        }
-        sql = """
-        INSERT INTO vector_ioc_matches (
-            tenant_id, client_name, ioc_type, ioc_value, opencti_id,
-            indicator_name, confidence, matched_event_id, raw_json
-        ) VALUES (
-            %(tenant_id)s, %(client_name)s, %(ioc_type)s, %(ioc_value)s,
-            %(opencti_id)s, %(indicator_name)s, %(confidence)s,
-            %(matched_event_id)s, %(raw_json)s
-        )
-        ON CONFLICT (ioc_value, matched_event_id) DO NOTHING
-        """
-        with self.db.conn.cursor() as cur:
-            cur.execute(sql, payload)
-            written = cur.rowcount
-        self.db.conn.commit()
-        return written > 0
-
-    def _detect_watchlist_flavor(self) -> str:
-        """Figure out whether vector_watchlist is the v0.2 schema
-        (trigger_type / trigger_details / status) or the v0.1 schema
-        (source / verdict / recipient / ...). Cached on the instance.
-        """
-        if self._watchlist_flavor is not None:
-            return self._watchlist_flavor
-        with self.db.conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = 'vector_watchlist'
-                """
-            )
-            cols = {row[0] for row in cur.fetchall()}
-        if "trigger_type" in cols and "trigger_details" in cols:
-            self._watchlist_flavor = "v2"
-        elif "verdict" in cols or "source" in cols:
-            self._watchlist_flavor = "v1"
-        else:
-            self._watchlist_flavor = "unknown"
-        return self._watchlist_flavor
-
-    def _stage_watchlist(self, ioc: dict, match: dict) -> None:
-        flavor = self._detect_watchlist_flavor()
-        if flavor == "unknown":
-            logger.warning(
-                "[ioc] vector_watchlist schema unrecognised; "
-                "skipping escalation for %s",
-                ioc.get("value"),
-            )
-            return
-
-        now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(hours=48)
-
-        details = {
-            "ioc_type":         ioc.get("type"),
-            "ioc_value":        ioc.get("value"),
-            "opencti_id":       match.get("opencti_id"),
-            "indicator_name":   match.get("indicator_name"),
-            "confidence":       match.get("confidence"),
-            "matched_event_id": str(ioc.get("event_id")) if ioc.get("event_id") else None,
-            "description":      match.get("description"),
-        }
+        client = self._ensure_client()
+        if client is None:
+            return None
 
         try:
-            if flavor == "v2":
-                sql = """
-                INSERT INTO vector_watchlist (
-                    tenant_id, client_name, user_email, trigger_type,
-                    trigger_details, expires_at, status
-                ) VALUES (
-                    %s, %s, %s, 'ioc_match', %s, %s, 'escalated'
-                )
-                """
-                user_email = (
-                    ioc["value"] if ioc["type"] == "email-addr" else None
-                )
-                with self.db.conn.cursor() as cur:
-                    cur.execute(
-                        sql,
-                        (
-                            ioc.get("tenant_id"),
-                            ioc.get("client_name"),
-                            user_email,
-                            json.dumps(details),
-                            expires_at.replace(tzinfo=None),
-                        ),
-                    )
-            else:  # v1 schema
-                sql = """
-                INSERT INTO vector_watchlist (
-                    tenant_id, source, verdict, recipient, sender, url,
-                    event_type, timestamp, correlation_window_expires_at,
-                    raw_json
-                ) VALUES (
-                    %s, 'OpenCTI', 'ioc_match', %s, NULL, NULL,
-                    %s, %s, %s, %s
-                )
-                """
-                recipient = ioc["value"] if ioc["type"] == "email-addr" else None
-                with self.db.conn.cursor() as cur:
-                    cur.execute(
-                        sql,
-                        (
-                            ioc.get("tenant_id"),
-                            recipient,
-                            f"ioc_match:{ioc.get('type')}",
-                            now.replace(tzinfo=None),
-                            expires_at.replace(tzinfo=None),
-                            json.dumps(details),
-                        ),
-                    )
-            self.db.conn.commit()
-            logger.info(
-                "[ioc] escalated ioc=%s confidence=%s indicator=%s",
-                ioc.get("value"),
-                match.get("confidence"),
-                match.get("indicator_name"),
-            )
+            nodes = client.lookup(value)
+        except requests.RequestException as exc:
+            logger.warning("[ioc] opencti request failed value=%s err=%s", value, exc)
+            # Don't cache transport errors -- retry next cycle.
+            return None
         except Exception:
+            logger.exception("[ioc] unexpected opencti lookup failure value=%s", value)
+            return None
+
+        best = self._best_indicator(nodes)
+        self._cache_put(value, [best] if best else [])
+        time.sleep(QUERY_DELAY_MS / 1000.0)
+        return best
+
+    # ----- writes --------------------------------------------------------
+
+    def _insert_match(
+        self,
+        ctx: dict,
+        ioc_type: str,
+        ioc_value: str,
+        match: dict,
+    ) -> bool:
+        import json as _json
+
+        payload = {
+            "tenant_id":        ctx.get("tenant_id"),
+            "client_name":      ctx.get("client_name"),
+            "ioc_type":         ioc_type,
+            "ioc_value":        ioc_value,
+            "opencti_id":       match.get("opencti_id"),
+            "indicator_name":   match.get("indicator_name"),
+            "confidence":       match.get("confidence"),
+            "matched_event_id": ctx.get("event_id"),
+            "raw_json":         _json.dumps(match.get("raw") or {}),
+        }
+        try:
+            with self._db.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO vector_ioc_matches (
+                        tenant_id, client_name, ioc_type, ioc_value,
+                        opencti_id, indicator_name, confidence,
+                        matched_event_id, raw_json
+                    ) VALUES (
+                        %(tenant_id)s, %(client_name)s, %(ioc_type)s,
+                        %(ioc_value)s, %(opencti_id)s, %(indicator_name)s,
+                        %(confidence)s, %(matched_event_id)s, %(raw_json)s
+                    )
+                    ON CONFLICT (ioc_value, matched_event_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    payload,
+                )
+                row = cur.fetchone()
+            self._db.conn.commit()
+            return bool(row)
+        except Exception:
+            self._db.conn.rollback()
             logger.exception(
-                "[ioc] failed to stage watchlist pin for %s",
-                ioc.get("value"),
+                "[ioc] failed to insert ioc match value=%s event=%s",
+                ioc_value,
+                ctx.get("event_id"),
             )
-            self.db.conn.rollback()
+            return False
 
-    # ------------------------------------------------------------------ orchestration
-    @property
-    def tenant_id(self) -> str:
-        # Surface a pseudo tenant id for main.py's log lines.
-        return "(all tenants)"
+    def _escalate_watchlist(
+        self,
+        ctx: dict,
+        ioc_type: str,
+        ioc_value: str,
+        match: dict,
+    ) -> None:
+        import json as _json
 
-    @property
-    def client_name(self) -> str:
-        return "ioc-enricher"
+        trigger_details = {
+            "ioc_type":       ioc_type,
+            "ioc_value":      ioc_value,
+            "indicator":      match.get("indicator_name"),
+            "opencti_id":     match.get("opencti_id"),
+            "confidence":     match.get("confidence"),
+            "matched_event":  str(ctx.get("event_id")) if ctx.get("event_id") else None,
+        }
+        try:
+            with self._db.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO vector_watchlist (
+                        tenant_id, client_name, user_email,
+                        trigger_type, trigger_details,
+                        expires_at, status
+                    ) VALUES (
+                        %s, %s, %s, %s, %s::jsonb, now() + %s, %s
+                    )
+                    """,
+                    (
+                        ctx.get("tenant_id"),
+                        ctx.get("client_name"),
+                        ctx.get("user_id"),
+                        "ioc_match",
+                        _json.dumps(trigger_details),
+                        WATCHLIST_WINDOW,
+                        "escalated",
+                    ),
+                )
+            self._db.conn.commit()
+        except Exception:
+            self._db.conn.rollback()
+            logger.exception(
+                "[ioc] watchlist escalation failed value=%s",
+                ioc_value,
+            )
+
+    # ----- main entrypoint -----------------------------------------------
 
     def poll_once(self) -> None:
-        now = datetime.now(timezone.utc)
-        if now - self._last_poll < POLL_INTERVAL:
-            return
-        self._last_poll = now
-
         if not self._token:
-            logger.warning(
-                "[ioc] OPENCTI_TOKEN not set, skipping enrichment cycle"
-            )
+            logger.info("[ioc] OPENCTI_TOKEN unset, skipping cycle")
             return
 
         iocs = self._collect_iocs()
         if not iocs:
-            logger.info("[ioc] no fresh observables in the last 5 minutes")
+            logger.info("[ioc] no recent IOCs to enrich")
             return
 
-        seen_count = len(iocs)
-        matched_count = 0
-        stored_count = 0
-        escalated_count = 0
+        # Break out IPs for progress logging so the log line cadence
+        # matches the IP_BATCH_SIZE batching requirement in the spec.
+        ip_values = [v for (t, v) in iocs.keys() if t in ("ipv4", "ipv6")]
+        other_count = len(iocs) - len(ip_values)
+        logger.info(
+            "[ioc] enrichment cycle starting iocs=%d (ips=%d other=%d)",
+            len(iocs),
+            len(ip_values),
+            other_count,
+        )
 
-        for ioc in iocs:
-            match = self._lookup(ioc["value"])
+        total_checked = 0
+        total_matched = 0
+        total_escalated = 0
+        batch_index = 0
+
+        for (ioc_type, ioc_value), ctx in iocs.items():
+            total_checked += 1
+            if ioc_type in ("ipv4", "ipv6") and total_checked % IP_BATCH_SIZE == 0:
+                batch_index += 1
+                logger.info(
+                    "[ioc] IP batch %d checked=%d matched=%d",
+                    batch_index,
+                    total_checked,
+                    total_matched,
+                )
+
+            match = self._lookup(ioc_value)
             if not match:
                 continue
             confidence = int(match.get("confidence") or 0)
-            if confidence < CONFIDENCE_STORE:
+            if confidence < MIN_CONFIDENCE:
                 continue
-            matched_count += 1
-            try:
-                if self._insert_match(ioc, match):
-                    stored_count += 1
-            except Exception:
-                logger.exception("[ioc] insert_match failed for %s", ioc["value"])
-                continue
-            if confidence >= CONFIDENCE_ESCALATE:
-                self._stage_watchlist(ioc, match)
-                escalated_count += 1
+
+            inserted = self._insert_match(ctx, ioc_type, ioc_value, match)
+            if inserted:
+                total_matched += 1
+                logger.info(
+                    "[ioc] MATCH %s=%s confidence=%d indicator=%s",
+                    ioc_type,
+                    ioc_value,
+                    confidence,
+                    match.get("indicator_name"),
+                )
+            if confidence >= ESCALATE_CONFIDENCE:
+                self._escalate_watchlist(ctx, ioc_type, ioc_value, match)
+                total_escalated += 1
 
         logger.info(
-            "[ioc] cycle complete scanned=%d matched=%d stored=%d escalated=%d",
-            seen_count,
-            matched_count,
-            stored_count,
-            escalated_count,
+            "[ioc] cycle complete checked=%d matched=%d escalated=%d "
+            "cache_entries=%d",
+            total_checked,
+            total_matched,
+            total_escalated,
+            len(self._cache),
         )
 
 
-# Sentinel used by _cache_get to distinguish "not cached" from
-# "cached negative lookup".
-_MISS = object()
+def _walk_strings(obj: Any) -> Iterable[str]:
+    """Yield every string embedded anywhere in ``obj``. Used so we
+    can scrape SHA256 values out of opaque EDR raw_json blobs."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_strings(v)

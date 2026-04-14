@@ -4,9 +4,10 @@ import { Link } from "react-router-dom";
 import Avatar from "../components/Avatar.jsx";
 import EventCard from "../components/EventCard.jsx";
 import StatRing from "../components/StatRing.jsx";
+import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
-import { fmtNumber } from "../utils/format.js";
+import { fmtNumber, fmtRelative } from "../utils/format.js";
 import { tenantColor } from "../utils/tenantColor.js";
 
 const TABS = [
@@ -20,6 +21,7 @@ export default function Dashboard() {
   const [byTenant, setByTenant] = useState([]);
   const [byType, setByType] = useState([]);
   const [recent, setRecent] = useState([]);
+  const [iocMatches, setIocMatches] = useState([]);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("feed");
 
@@ -28,17 +30,19 @@ export default function Dashboard() {
 
     async function load() {
       try {
-        const [s, bt, by, r] = await Promise.all([
+        const [s, bt, by, r, ioc] = await Promise.all([
           api.stats(),
           api.byTenant(),
           api.byType(),
           api.dashboardFeed({ ual_limit: 50, inky_limit: 20 }),
+          api.iocMatches(10).catch(() => []),
         ]);
         if (cancelled) return;
         setStats(s);
         setByTenant(bt);
         setByType(by);
         setRecent(r);
+        setIocMatches(ioc || []);
         setErr(null);
       } catch (e) {
         if (!cancelled) setErr(e.message);
@@ -127,6 +131,9 @@ export default function Dashboard() {
           color="#F97316"
         />
       </div>
+
+      {/* ----- IOC matches alert strip (hidden when empty) ----- */}
+      <IocMatchesAlert matches={iocMatches} />
 
       {/* ----- feed / by type / by tenant switcher ----- */}
       <div className="card">
@@ -242,6 +249,135 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// IOC Matches alert strip
+// ---------------------------------------------------------------------------
+//
+// Hidden entirely when the IOC match list is empty so a clean enrichment
+// cycle doesn't eat vertical space on the dashboard. When matches exist we
+// render up to 5 red alert cards plus a "View all" link into the Governance
+// IOC Matches tab.
+
+const IOC_RED = "#EF4444";
+
+function confidenceTierStyles(confidence) {
+  const c = Number(confidence) || 0;
+  if (c >= 90) return { label: "CRITICAL", color: "#EF4444" };
+  if (c >= 75) return { label: "HIGH",     color: "#F97316" };
+  if (c >= 50) return { label: "MEDIUM",   color: "#EAB308" };
+  return { label: `${c}`, color: "rgba(255,255,255,0.5)" };
+}
+
+function ConfidencePill({ confidence }) {
+  const cfg = confidenceTierStyles(confidence);
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[2px] text-[10px] font-semibold uppercase tracking-wide rounded-full border whitespace-nowrap"
+      style={{
+        color: cfg.color,
+        borderColor: cfg.color + "55",
+        backgroundColor: cfg.color + "14",
+      }}
+      title={`confidence ${confidence ?? "?"}`}
+    >
+      {cfg.label} · {Number(confidence) || 0}
+    </span>
+  );
+}
+
+function SkullIcon({ size = 18 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={IOC_RED}
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 2a8 8 0 0 0-8 8v4a4 4 0 0 0 2 3.46V21a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-3.54A4 4 0 0 0 20 14v-4a8 8 0 0 0-8-8Z" />
+      <circle cx="9" cy="11" r="1.4" fill={IOC_RED} />
+      <circle cx="15" cy="11" r="1.4" fill={IOC_RED} />
+      <path d="M10 16h4" />
+    </svg>
+  );
+}
+
+function IocMatchesAlert({ matches }) {
+  if (!matches || matches.length === 0) return null;
+  const visible = matches.slice(0, 5);
+  return (
+    <div
+      className="card p-4 animate-fade-in"
+      style={{
+        borderLeft: `3px solid ${IOC_RED}`,
+        backgroundColor: "rgba(239,68,68,0.04)",
+      }}
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <SkullIcon size={20} />
+        <div className="font-semibold text-sm text-white">
+          IOC Matches
+          <span className="ml-2 text-[11px] font-normal text-white/50">
+            {matches.length} active
+          </span>
+        </div>
+        <Link
+          to="/governance"
+          className="ml-auto text-[11px] font-medium text-red-300 hover:text-red-200"
+        >
+          View all →
+        </Link>
+      </div>
+      <div className="space-y-2">
+        {visible.map((m) => (
+          <div
+            key={m.id}
+            className="flex items-center gap-3 px-3 py-2 rounded-xl border flex-wrap"
+            style={{
+              borderColor: "rgba(239,68,68,0.25)",
+              backgroundColor: "rgba(239,68,68,0.06)",
+            }}
+          >
+            <SkullIcon />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span
+                  className="font-mono text-[12px] text-white truncate max-w-[320px]"
+                  title={m.ioc_value}
+                >
+                  {m.ioc_value}
+                </span>
+                <span className="text-[10px] uppercase tracking-wider text-white/40">
+                  {m.ioc_type}
+                </span>
+                <ConfidencePill confidence={m.confidence} />
+              </div>
+              <div className="mt-0.5 flex items-center gap-2 text-[11px] text-white/60 min-w-0">
+                <span className="truncate" title={m.indicator_name || ""}>
+                  {m.indicator_name || <span className="text-white/30">(no indicator name)</span>}
+                </span>
+                {m.client_name && (
+                  <>
+                    <span className="opacity-60">·</span>
+                    <TenantBadge name={m.client_name} />
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="text-[11px] text-white/50 whitespace-nowrap tabular-nums">
+              {fmtRelative(m.matched_at)}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

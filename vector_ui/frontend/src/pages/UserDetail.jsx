@@ -51,13 +51,16 @@ export default function UserDetail() {
 
   const [profile, setProfile] = useState(null);
   const [profileErr, setProfileErr] = useState(null);
+  const [iocMatches, setIocMatches] = useState([]);
 
   const [tab, setTab] = useState("timeline");
 
   useEffect(() => {
     setProfile(null);
     setProfileErr(null);
+    setIocMatches([]);
     api.userProfile(entityKey).then(setProfile).catch((e) => setProfileErr(e.message));
+    api.userIoc(entityKey).then((r) => setIocMatches(r || [])).catch(() => setIocMatches([]));
   }, [entityKey]);
 
   const header = useMemo(() => {
@@ -110,6 +113,8 @@ export default function UserDetail() {
 
       {header}
 
+      <IocMatchBanner matches={iocMatches} />
+
       <div className="border-b border-white/5 flex items-center gap-1 flex-wrap overflow-x-auto">
         {TABS.map((t) => {
           const active = tab === t.id;
@@ -141,6 +146,57 @@ export default function UserDetail() {
 }
 
 // ---------------------------------------------------------------------------
+
+function IocMatchBanner({ matches }) {
+  if (!matches || matches.length === 0) return null;
+  const count = matches.length;
+  const maxConfidence = matches.reduce(
+    (acc, m) => Math.max(acc, Number(m.confidence) || 0),
+    0,
+  );
+  return (
+    <div
+      className="card p-4 animate-fade-in flex items-center gap-3 flex-wrap"
+      style={{
+        borderLeft: "3px solid #EF4444",
+        backgroundColor: "rgba(239,68,68,0.06)",
+      }}
+    >
+      <div
+        className="h-9 w-9 rounded-full flex items-center justify-center text-lg shrink-0"
+        style={{
+          background: "rgba(239,68,68,0.15)",
+          color: "#EF4444",
+        }}
+        aria-hidden="true"
+      >
+        ⚠
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-semibold text-white">
+          IOC match detected — this user's activity matches known threat
+          indicators
+        </div>
+        <div className="mt-0.5 text-[11px] text-white/60">
+          {count} match{count === 1 ? "" : "es"} · max confidence{" "}
+          <span className="font-semibold text-white">
+            {maxConfidence || "?"}
+          </span>
+        </div>
+      </div>
+      <span
+        className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wider rounded-full border whitespace-nowrap"
+        style={{
+          color: "#EF4444",
+          borderColor: "#EF444455",
+          backgroundColor: "#EF444414",
+        }}
+      >
+        IOC Match
+      </span>
+    </div>
+  );
+}
 
 function MiniStat({ label, value, color }) {
   return (
@@ -826,175 +882,3 @@ const EDR_SEVERITY_STYLE = {
   info:          { label: "Informational", color: "rgba(255,255,255,0.5)" },
 };
 
-function EdrSeverityPill({ severity }) {
-  const key = String(severity || "").trim().toLowerCase();
-  const cfg = EDR_SEVERITY_STYLE[key] || {
-    label: severity || "—",
-    color: "rgba(255,255,255,0.5)",
-  };
-  return (
-    <span
-      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-full border whitespace-nowrap"
-      style={{
-        color: cfg.color,
-        borderColor: cfg.color + "55",
-        backgroundColor: cfg.color + "14",
-      }}
-    >
-      {cfg.label}
-    </span>
-  );
-}
-
-function EventTypeBadgeEdr({ type }) {
-  const label = String(type || "alert").toUpperCase();
-  const color = "#F97316";
-  return (
-    <span
-      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
-      style={{
-        color,
-        borderColor: color + "55",
-        backgroundColor: color + "14",
-      }}
-    >
-      {label}
-    </span>
-  );
-}
-
-function EndpointTab({ entityKey }) {
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(null);
-
-  useEffect(() => {
-    let cancel = false;
-    setLoading(true);
-    setExpanded(null);
-    api
-      .userEdr(entityKey)
-      .then((r) => {
-        if (!cancel) setRows(r || []);
-      })
-      .catch(() => {
-        if (!cancel) setRows([]);
-      })
-      .finally(() => {
-        if (!cancel) setLoading(false);
-      });
-    return () => {
-      cancel = true;
-    };
-  }, [entityKey]);
-
-  return (
-    <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
-          <thead>
-            <tr>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Type</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Severity</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Host</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Threat</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Process</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Action</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-white/5">
-            {rows.map((r) => (
-              <Fragment key={r.id}>
-                <tr
-                  onClick={() =>
-                    setExpanded((prev) => (prev === r.id ? null : r.id))
-                  }
-                  className="hover:bg-white/[0.03] cursor-pointer"
-                  style={{
-                    borderLeft: "3px solid #F97316",
-                  }}
-                >
-                  <td className="px-3 py-2 text-white/50 whitespace-nowrap tabular-nums">
-                    {fmtTime(r.timestamp)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <EventTypeBadgeEdr type={r.event_type} />
-                  </td>
-                  <td className="px-3 py-2">
-                    <EdrSeverityPill severity={r.severity} />
-                  </td>
-                  <td
-                    className="px-3 py-2 text-white/80 truncate max-w-[200px]"
-                    title={r.host_name || ""}
-                  >
-                    {r.host_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-white/80 truncate max-w-[220px]"
-                    title={r.threat_name || ""}
-                  >
-                    {r.threat_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-white/70 truncate max-w-[200px]"
-                    title={r.process_name || ""}
-                  >
-                    {r.process_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-3 py-2 text-white/70 whitespace-nowrap">
-                    {r.action_taken || <span className="text-white/30">—</span>}
-                  </td>
-                </tr>
-                {expanded === r.id && (
-                  <tr className="bg-white/[0.02]">
-                    <td colSpan={7} className="px-3 py-3">
-                      <JsonBlock data={r.raw_json} />
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-            {!loading && rows.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-3 py-10 text-center text-white/40">
-                  no endpoint alerts
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40">
-        Datto EDR alerts matched by user account or device name.
-      </div>
-    </div>
-  );
-}
-
-function Pager({ offset, pageSize, loading, hasNext, setOffset }) {
-  if (offset === 0 && !hasNext) return null;
-  return (
-    <div className="flex items-center justify-center gap-3 pt-2">
-      <button
-        type="button"
-        disabled={offset === 0 || loading}
-        onClick={() => setOffset(Math.max(0, offset - pageSize))}
-        className="px-4 py-2 text-xs font-medium rounded-xl bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 disabled:opacity-30 active:scale-95 transition-all"
-      >
-        prev
-      </button>
-      <span className="text-xs text-white/50 tabular-nums">
-        offset {offset.toLocaleString("en-US")}
-      </span>
-      <button
-        type="button"
-        disabled={!hasNext || loading}
-        onClick={() => setOffset(offset + pageSize)}
-        className="px-4 py-2 text-xs font-medium rounded-xl bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 disabled:opacity-30 active:scale-95 transition-all"
-      >
-        next
-      </button>
-    </div>
-  );
-}
