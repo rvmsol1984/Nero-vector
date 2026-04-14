@@ -27,7 +27,7 @@ services:
     environment:
       VECTOR_UI_LOG_LEVEL: INFO
     ports:
-      - "3005:3005"
+      - "127.0.0.1:3005:3005"
     networks:
       - nero-vector_default
     logging:
@@ -55,7 +55,7 @@ services:
     volumes:
       - vector-auth-sessions:/data
     ports:
-      - "3006:3006"
+      - "127.0.0.1:3006:3006"
     networks:
       - nero-vector_default
     logging:

@@ -27,6 +27,7 @@ const TABS = [
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
   { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
   { id: "edrAlerts",         label: "EDR Alerts",        endpoint: "govEdrAlerts",         severity: "critical", withTenant: false },
+  { id: "threatLocker",      label: "ThreatLocker",      endpoint: "govThreatLocker",      severity: "critical", withTenant: false },
   { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
 ];
 
@@ -260,6 +261,13 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
         </div>
       );
     }
+    if (tabId === "threatLocker") {
+      return (
+        <div className="card">
+          <EmptyState message="No blocked events detected" />
+        </div>
+      );
+    }
     return (
       <div className="card">
         <EmptyState />
@@ -281,12 +289,12 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
+    case "threatLocker":      return <ThreatLockerTable rows={rows} />;
     case "iocMatches":        return <IocMatchesTable rows={rows} />;
     case "aiActivity":
       // Handled above -- this branch is unreachable because TabPanel
       // short-circuits on tabId === "aiActivity" before the switch.
       return null;
-    case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
     default: return null;
   }
 }
@@ -979,127 +987,6 @@ function Chevron({ open }) {
     >
       <polyline points="6 9 12 15 18 9" />
     </svg>
-  );
-}
-
-// ---- EDR Alerts tab --------------------------------------------------------
-
-const EDR_PILL_COLORS = {
-  critical:      "#EF4444",
-  high:          "#EF4444",
-  medium:        "#F97316",
-  low:           "#EAB308",
-  informational: "rgba(255,255,255,0.5)",
-  info:          "rgba(255,255,255,0.5)",
-};
-
-function EdrSeverityPill({ severity }) {
-  if (!severity) return <span className="text-white/30">—</span>;
-  const key = String(severity).trim().toLowerCase();
-  const color = EDR_PILL_COLORS[key] || "rgba(255,255,255,0.5)";
-  return (
-    <span
-      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
-      style={{
-        color,
-        borderColor: color + "55",
-        backgroundColor: color + "14",
-      }}
-    >
-      {severity}
-    </span>
-  );
-}
-
-function edrRollupSeverity(row) {
-  const s = String(row.severity || "").trim().toLowerCase();
-  if (s === "high" || s === "critical") return "critical";
-  if (s === "medium") return "review";
-  return "monitor";
-}
-
-function EdrAlertsTable({ rows }) {
-  return (
-    <TableCard>
-      <table className="min-w-full text-[11px]">
-        <thead>
-          <tr>
-            <Th>Host</Th>
-            <Th>User</Th>
-            <Th>Threat</Th>
-            <Th>Severity</Th>
-            <Th align="right">Alerts</Th>
-            <Th>Last Seen</Th>
-            <Th>Actions</Th>
-            <Th>Status</Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-white/5">
-          {rows.map((row, i) => {
-            const entityKey =
-              row.user_account
-                ? `${GCS_TENANT_ID}::${row.user_account}`
-                : null;
-            const rollup = edrRollupSeverity(row);
-            return (
-              <tr
-                key={`${row.host_name}-${row.user_account}-${row.threat_name}-${row.severity}-${i}`}
-                className="hover:bg-white/[0.03]"
-              >
-                <td
-                  className="px-4 py-2.5 font-mono truncate max-w-[220px]"
-                  title={row.host_name || ""}
-                >
-                  {row.host_name || <span className="text-white/30">—</span>}
-                </td>
-                <td className="px-4 py-2.5">
-                  {entityKey ? (
-                    <UserCell
-                      entityKey={entityKey}
-                      userId={row.user_account}
-                      clientName="GameChange Solar"
-                    />
-                  ) : (
-                    <span className="text-white/40 truncate">
-                      {row.user_account || "—"}
-                    </span>
-                  )}
-                </td>
-                <td
-                  className="px-4 py-2.5 text-white/80 truncate max-w-[280px]"
-                  title={row.threat_name || ""}
-                >
-                  {row.threat_name || <span className="text-white/30">—</span>}
-                </td>
-                <td className="px-4 py-2.5">
-                  <EdrSeverityPill severity={row.severity} />
-                </td>
-                <td className="px-4 py-2.5 text-right tabular-nums">
-                  {fmtNumber(row.alert_count)}
-                </td>
-                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                  {fmtRelative(row.last_seen)}
-                </td>
-                <td
-                  className="px-4 py-2.5 text-white/60 truncate max-w-[220px]"
-                  title={(row.actions || []).join(", ")}
-                >
-                  {(row.actions || []).slice(0, 2).join(", ") || (
-                    <span className="text-white/30">—</span>
-                  )}
-                  {(row.actions || []).length > 2 && (
-                    <span className="text-white/30"> · +{row.actions.length - 2}</span>
-                  )}
-                </td>
-                <td className="px-4 py-2.5">
-                  <SeverityPill severity={rollup} />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </TableCard>
   );
 }
 
@@ -1929,3 +1816,349 @@ function edrSeverityToPill(raw) {
   return "monitor";
 }
 
+function EdrAlertsTable({ rows }) {
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>Host</Th>
+            <Th>User</Th>
+            <Th>Threat</Th>
+            <Th>Severity</Th>
+            <Th align="right">Count</Th>
+            <Th>Last Seen</Th>
+            <Th>Action</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row, idx) => {
+            const key = `${row.host_name || ""}|${row.user_account || ""}|${row.threat_name || ""}|${row.severity || ""}|${idx}`;
+            const actions = (row.actions || []).filter(Boolean);
+            return (
+              <tr key={key} className="hover:bg-white/[0.03]">
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
+                  title={row.host_name || ""}
+                >
+                  {row.host_name || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
+                  title={row.user_account || ""}
+                >
+                  {row.user_account || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[240px]"
+                  title={row.threat_name || ""}
+                >
+                  {row.threat_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5">
+                  <SeverityPill severity={edrSeverityToPill(row.severity)} />
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  {fmtNumber(row.alert_count)}
+                </td>
+                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                  {fmtRelative(row.last_seen)}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/60 truncate max-w-[200px]"
+                  title={actions.join(", ")}
+                >
+                  {actions.length > 0 ? (
+                    actions.join(", ")
+                  ) : (
+                    <span className="text-white/30">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ThreatLocker ActionLog
+// ---------------------------------------------------------------------------
+
+// Map ThreatLocker action strings onto our severity pills. Deny is the
+// hard block (CRITICAL red), Ringfenced is a policy-scoped block
+// (REVIEW orange), elevations and anything else fall through to
+// MONITOR so they still render without shouting.
+function threatLockerActionPill(row) {
+  const explicit = String(row?.action || "").trim().toLowerCase();
+  const actionType = String(row?.action_type || "").trim().toLowerCase();
+  const id = Number(row?.action_id) || 0;
+  if (explicit === "deny" || actionType === "deny" || id === 2) return "critical";
+  if (
+    explicit === "ringfenced" ||
+    actionType === "ringfenced" ||
+    id === 3
+  ) return "review";
+  return "monitor";
+}
+
+function ThreatLockerActionBadge({ row }) {
+  const tier = threatLockerActionPill(row);
+  const label =
+    tier === "critical"
+      ? "DENY"
+      : tier === "review"
+      ? "RINGFENCED"
+      : (row?.action || row?.action_type || "—").toString().toUpperCase();
+  const color =
+    tier === "critical"
+      ? "#EF4444"
+      : tier === "review"
+      ? "#F97316"
+      : "rgba(255,255,255,0.5)";
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function ThreatLockerTable({ rows }) {
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>Host</Th>
+            <Th>User</Th>
+            <Th>Action</Th>
+            <Th>Action Type</Th>
+            <Th>Policy</Th>
+            <Th align="right">Count</Th>
+            <Th>Last Seen</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row, idx) => {
+            const key = `${row.hostname || ""}|${row.username || ""}|${row.action || ""}|${row.action_type || ""}|${row.policy_name || ""}|${idx}`;
+            return (
+              <tr key={key} className="hover:bg-white/[0.03]">
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
+                  title={row.hostname || ""}
+                >
+                  {row.hostname || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
+                  title={row.username || ""}
+                >
+                  {row.username || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5 space-x-2">
+                  <ThreatLockerActionBadge row={row} />
+                  <SeverityPill severity={threatLockerActionPill(row)} />
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[180px]"
+                  title={row.action_type || ""}
+                >
+                  {row.action_type || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/60 truncate max-w-[220px]"
+                  title={row.policy_name || ""}
+                >
+                  {row.policy_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  {fmtNumber(row.event_count)}
+                </td>
+                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                  {fmtRelative(row.last_seen)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// IOC Matches (OpenCTI enrichment)
+// ---------------------------------------------------------------------------
+
+// Map raw OpenCTI confidence (0-100) onto our governance severity pills.
+// >= 90 -> CRITICAL red, 75-89 -> review (orange), 50-74 -> monitor (yellow).
+function iocConfidencePill(confidence) {
+  const c = Number(confidence) || 0;
+  if (c >= 90) return "critical";
+  if (c >= 75) return "review";
+  return "monitor";
+}
+
+function IocTypeBadge({ type }) {
+  const key = String(type || "").toLowerCase();
+  const color = {
+    ipv4:   "#3B82F6",
+    ipv6:   "#3B82F6",
+    domain: "#8B5CF6",
+    url:    "#A855F7",
+    email:  "#F97316",
+    sha256: "#10B981",
+  }[key] || "rgba(255,255,255,0.4)";
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[2px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {key || "—"}
+    </span>
+  );
+}
+
+function IocMatchesTable({ rows }) {
+  const [open, setOpen] = useState(null);
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>IOC Value</Th>
+            <Th>Type</Th>
+            <Th>Confidence</Th>
+            <Th>Indicator</Th>
+            <Th>Client</Th>
+            <Th>User</Th>
+            <Th>Matched</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row) => {
+            const isOpen = open === row.id;
+            return (
+              <Fragment key={row.id}>
+                <tr
+                  onClick={() => setOpen(isOpen ? null : row.id)}
+                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
+                >
+                  <td
+                    className="px-4 py-2.5 font-mono text-[11px] text-white truncate max-w-[260px]"
+                    title={row.ioc_value}
+                  >
+                    {row.ioc_value}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <IocTypeBadge type={row.ioc_type} />
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <SeverityPill severity={iocConfidencePill(row.confidence)} />
+                    <span className="ml-2 text-[10px] text-white/50 tabular-nums">
+                      {Number(row.confidence) || 0}
+                    </span>
+                  </td>
+                  <td
+                    className="px-4 py-2.5 text-white/80 truncate max-w-[260px]"
+                    title={row.indicator_name || ""}
+                  >
+                    {row.indicator_name || <span className="text-white/30">—</span>}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {row.client_name ? (
+                      <TenantBadge name={row.client_name} />
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {row.entity_key ? (
+                      <Link
+                        to={`/users/${encodeURIComponent(row.entity_key)}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-primary-light hover:underline truncate max-w-[220px] inline-block align-middle"
+                        title={row.user_id || row.entity_key}
+                      >
+                        {row.user_id || row.entity_key}
+                      </Link>
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                    {fmtRelative(row.matched_at)}
+                  </td>
+                </tr>
+                {isOpen && (
+                  <tr className="bg-black/30">
+                    <td colSpan={7} className="px-4 py-3 border-t border-white/5">
+                      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
+                        OpenCTI indicator details
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] mb-3">
+                        <div>
+                          <div className="text-white/40 uppercase tracking-wider text-[9px]">
+                            OpenCTI id
+                          </div>
+                          <div className="font-mono text-white/80 break-all">
+                            {row.opencti_id || "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-white/40 uppercase tracking-wider text-[9px]">
+                            Matched at
+                          </div>
+                          <div className="text-white/80">
+                            {fmtTime(row.matched_at)}
+                          </div>
+                        </div>
+                      </div>
+                      <JsonBlock data={row.raw_json} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+// Pull the DisplayName out of DeviceProperties array-of-{Name,Value} blobs.
+function DeviceList({ devices }) {
+  if (!devices || devices.length === 0) return <span className="text-white/30">—</span>;
+  const names = devices
+    .map((dp) => {
+      if (!Array.isArray(dp)) return "";
+      const hit = dp.find((p) => p && p.Name === "DisplayName");
+      return hit ? hit.Value || "" : "";
+    })
+    .filter(Boolean);
+  if (names.length === 0) {
+    return <span className="text-white/40">{devices.length} device{devices.length > 1 ? "s" : ""}</span>;
+  }
+  const shown = names.slice(0, 2);
+  const extra = names.length - shown.length;
+  return (
+    <span title={names.join("\n")}>
+      {shown.join(", ")}
+      {extra > 0 && <span className="text-white/30"> · +{extra}</span>}
+    </span>
+  );
+}

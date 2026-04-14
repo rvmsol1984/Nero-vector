@@ -401,6 +401,52 @@ def user_edr(entity_key: str) -> list[dict]:
     )
 
 
+@app.get("/api/users/{entity_key}/threatlocker")
+def user_threatlocker(entity_key: str) -> list[dict]:
+    """ThreatLocker ActionLog events for this user.
+
+    Matching strategy mirrors the EDR tab: fall back from an exact
+    username match (case-insensitive) to a local-part substring
+    match on ``username``, and union with any row whose ``hostname``
+    matches a DeviceName seen for this user in UAL. This covers the
+    common case where ThreatLocker records the Windows login name
+    (not the UPN) while UAL carries the UPN plus a device list.
+    """
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    local_part = user_email.split("@", 1)[0] if "@" in user_email else user_email
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            event_time,
+            hostname,
+            username,
+            full_path,
+            process_path,
+            action_type,
+            action,
+            action_id,
+            policy_name,
+            hash,
+            client_name,
+            tenant_id,
+            raw_json
+        FROM vector_threatlocker_events
+        WHERE LOWER(username) = LOWER(%s)
+           OR LOWER(username) LIKE '%%' || LOWER(%s) || '%%'
+           OR LOWER(hostname) IN (
+               SELECT LOWER(raw_json->>'DeviceName')
+               FROM vector_events
+               WHERE user_id = %s
+                 AND raw_json->>'DeviceName' IS NOT NULL
+           )
+        ORDER BY event_time DESC
+        LIMIT 100
+        """,
+        (user_email, local_part, user_email),
+    )
+
+
 @app.get("/api/users/{entity_key}/ioc")
 def user_ioc_matches(entity_key: str) -> list[dict]:
     """OpenCTI IOC matches whose triggering event belongs to this user.
@@ -550,15 +596,12 @@ def _fetch_inky_feed_rows(limit: int) -> list[dict]:
 
 
 def _fetch_edr_feed_rows(limit: int) -> list[dict]:
-    """EDR alert rows projected into the shared feed shape.
-
-    ``user_id`` is set to ``user_account`` when available and the
-    entity key is synthesised as ``tenant_id::user_account`` so the
-    dashboard can still deep-link to user detail. ``workload`` is
-    hard-coded ``"EDR"``, ``result_status`` carries ``action_taken``
-    for the status pill, and the host / threat fields ride through
-    as extras the frontend uses to render the orange alert card.
-    """
+    """EDR rows projected into the shared feed shape. ``user_id`` is
+    set to the host/user most strongly tied to the alert (user_account
+    when known, otherwise host_name) so the dashboard card has something
+    meaningful to print. ``entity_key`` is synthesized when we have both
+    a tenant and a user_account so the card still deep-links to the
+    existing user detail page."""
     return db.fetch_all(
         """
         SELECT
@@ -568,7 +611,7 @@ def _fetch_edr_feed_rows(limit: int) -> list[dict]:
             timestamp,
             client_name,
             tenant_id,
-            user_account     AS user_id,
+            COALESCE(user_account, host_name) AS user_id,
             CASE
                 WHEN tenant_id IS NOT NULL AND user_account IS NOT NULL
                 THEN tenant_id || '::' || user_account
@@ -576,7 +619,7 @@ def _fetch_edr_feed_rows(limit: int) -> list[dict]:
             END              AS entity_key,
             event_type,
             'EDR'::text      AS workload,
-            action_taken     AS result_status,
+            severity         AS result_status,
             host_ip          AS client_ip,
             NULL::text       AS subject,
             NULL::text       AS sender,
@@ -608,7 +651,7 @@ def _merge_feed(
 @app.get("/api/feed/recent")
 def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
     """Original combined feed used by the v0.1 dashboard -- balanced
-    split between UAL, INKY, and EDR rows."""
+    split between UAL, INKY and EDR rows."""
     combined = _merge_feed(
         _fetch_ual_feed_rows(limit),
         _fetch_inky_feed_rows(min(limit, 20)),
@@ -623,10 +666,10 @@ def dashboard_feed(
     inky_limit: int = Query(20, ge=0, le=200),
     edr_limit: int = Query(20, ge=0, le=200),
 ) -> list[dict]:
-    """Dashboard feed -- pulls the last 50 UAL events plus the last 20
-    INKY events plus the last 20 EDR alerts and returns them merged
-    and timestamp-sorted. Each row carries a ``source`` field
-    ("ual" | "inky" | "edr") the frontend uses to pick the card
+    """Dashboard feed -- pulls the last 50 UAL events, the last 20
+    INKY events, and the last 20 EDR alerts and returns them merged and
+    timestamp-sorted. Each row carries a ``source`` field
+    ("ual" | "inky" | "edr") that the frontend uses to pick the card
     treatment."""
     return _merge_feed(
         _fetch_ual_feed_rows(ual_limit),
@@ -638,6 +681,28 @@ def dashboard_feed(
 # ============================================================================
 # INKY stats (used by the Sources page card)
 # ============================================================================
+
+@app.get("/api/sources/edr-count")
+def sources_edr_count() -> dict:
+    """Total EDR events in vector_edr_events, with a per-severity
+    breakdown so the Sources card can render both a headline count and
+    a severity highlight."""
+    total_row = db.fetch_one(
+        "SELECT COUNT(*)::bigint AS count FROM vector_edr_events"
+    ) or {}
+    by_severity = db.fetch_all(
+        """
+        SELECT severity, COUNT(*)::bigint AS count
+        FROM vector_edr_events
+        GROUP BY severity
+        ORDER BY count DESC
+        """
+    )
+    return {
+        "count":       int(total_row.get("count") or 0),
+        "by_severity": by_severity,
+    }
+
 
 @app.get("/api/sources/inky-count")
 def sources_inky_count() -> dict:
@@ -659,177 +724,6 @@ def sources_inky_count() -> dict:
         "count":      int(total_row.get("count") or 0),
         "by_verdict": by_verdict,
     }
-
-
-@app.get("/api/sources/edr-count")
-def sources_edr_count() -> dict:
-    """Total EDR events in vector_edr_events plus a per-severity
-    breakdown for the Sources page card."""
-    total_row = db.fetch_one(
-        "SELECT COUNT(*)::bigint AS count FROM vector_edr_events"
-    ) or {}
-    by_severity = db.fetch_all(
-        """
-        SELECT severity, COUNT(*)::bigint AS count
-        FROM vector_edr_events
-        GROUP BY severity
-        ORDER BY count DESC
-        """
-    )
-    return {
-        "count":       int(total_row.get("count") or 0),
-        "by_severity": by_severity,
-    }
-
-
-# ============================================================================
-# Per-user EDR events (used by the UserDetail "Endpoint" tab)
-# ============================================================================
-
-# ============================================================================
-# IOC matches (OpenCTI enrichment results)
-# ============================================================================
-
-@app.get("/api/ioc/matches")
-def ioc_matches(
-    limit: int = Query(50, ge=1, le=500),
-    min_confidence: int = Query(0, ge=0, le=100),
-) -> list[dict]:
-    """Recent IOC matches from the OpenCTI enricher."""
-    return db.fetch_all(
-        """
-        SELECT
-            id::text,
-            tenant_id,
-            client_name,
-            ioc_type,
-            ioc_value,
-            opencti_id,
-            indicator_name,
-            confidence,
-            matched_event_id::text,
-            matched_at,
-            raw_json
-        FROM vector_ioc_matches
-        WHERE confidence >= %s
-        ORDER BY matched_at DESC
-        LIMIT %s
-        """,
-        (min_confidence, limit),
-    )
-
-
-@app.get("/api/ioc/matches/{ioc_value}")
-def ioc_matches_by_value(ioc_value: str) -> list[dict]:
-    """Every match row for a specific IOC (IP, email or hash)."""
-    return db.fetch_all(
-        """
-        SELECT
-            id::text,
-            tenant_id,
-            client_name,
-            ioc_type,
-            ioc_value,
-            opencti_id,
-            indicator_name,
-            confidence,
-            matched_event_id::text,
-            matched_at,
-            raw_json
-        FROM vector_ioc_matches
-        WHERE LOWER(ioc_value) = LOWER(%s)
-        ORDER BY matched_at DESC
-        LIMIT 200
-        """,
-        (ioc_value,),
-    )
-
-
-@app.get("/api/users/{entity_key}/ioc")
-def user_ioc(entity_key: str, limit: int = Query(100, ge=1, le=500)) -> list[dict]:
-    """IOC matches linked to this user's recent UAL / defender events.
-
-    The enricher stores the source ``matched_event_id`` so we can join
-    back through vector_events (client_ip / sender email paths) and
-    vector_defender_hunting (SHA256 path) to find the matches that
-    correspond to this specific user.
-    """
-    email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
-    return db.fetch_all(
-        """
-        SELECT
-            m.id::text,
-            m.tenant_id,
-            m.client_name,
-            m.ioc_type,
-            m.ioc_value,
-            m.opencti_id,
-            m.indicator_name,
-            m.confidence,
-            m.matched_event_id::text,
-            m.matched_at,
-            m.raw_json
-        FROM vector_ioc_matches m
-        LEFT JOIN vector_events ve          ON ve.id = m.matched_event_id
-        LEFT JOIN vector_defender_hunting dh ON dh.id = m.matched_event_id
-        WHERE LOWER(ve.user_id) = LOWER(%s)
-           OR LOWER(dh.account_upn) = LOWER(%s)
-           OR LOWER(m.ioc_value) = LOWER(%s)
-        ORDER BY m.matched_at DESC
-        LIMIT %s
-        """,
-        (email, email, email, limit),
-    )
-
-
-@app.get("/api/users/{entity_key}/edr")
-def user_edr(entity_key: str, limit: int = Query(100, ge=1, le=500)) -> list[dict]:
-    """Datto EDR alerts for a single user.
-
-    Matches via two join keys:
-      (a) vector_edr_events.user_account = <email>  (case-insensitive)
-      (b) vector_edr_events.host_name IN (
-            SELECT raw_json->>'DeviceName' FROM vector_events
-            WHERE user_id = <email> AND raw_json ? 'DeviceName'
-          )
-
-    so a user is surfaced even if the EDR alert didn't carry the UPN
-    directly, as long as the device name ties back to their UAL
-    events.
-    """
-    email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
-    return db.fetch_all(
-        """
-        SELECT
-            id::text,
-            tenant_id,
-            client_name,
-            event_type,
-            severity,
-            host_name,
-            host_ip,
-            user_account,
-            process_name,
-            process_path,
-            command_line,
-            threat_name,
-            threat_score,
-            action_taken,
-            timestamp,
-            raw_json
-        FROM vector_edr_events
-        WHERE LOWER(user_account) = LOWER(%s)
-           OR LOWER(host_name) IN (
-                SELECT DISTINCT LOWER(raw_json->>'DeviceName')
-                FROM vector_events
-                WHERE user_id = %s
-                  AND raw_json ? 'DeviceName'
-           )
-        ORDER BY timestamp DESC
-        LIMIT %s
-        """,
-        (email, email, limit),
-    )
 
 
 # ============================================================================
@@ -1041,6 +935,60 @@ def governance_downloads(
 # severity pill (CRITICAL / REVIEW REQUIRED / MONITOR).
 
 _GCS = "GameChange Solar"
+
+
+@app.get("/api/governance/threatlocker")
+def governance_threatlocker() -> list[dict]:
+    """ThreatLocker block/ringfenced/elevation events grouped by
+    (host, user, action). action_id filter matches the blocking
+    action codes: 2=Deny, 3=Ringfenced, 6=Elevated."""
+    return db.fetch_all(
+        """
+        SELECT
+            hostname,
+            username,
+            action_type,
+            action,
+            action_id,
+            policy_name,
+            COUNT(*)::bigint           AS event_count,
+            MAX(event_time)            AS last_seen
+        FROM vector_threatlocker_events
+        WHERE action_id IN (2, 3, 6)
+          AND client_name = %s
+        GROUP BY hostname, username, action_type, action, action_id, policy_name
+        ORDER BY event_count DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
+
+
+@app.get("/api/governance/edr-alerts")
+def governance_edr_alerts() -> list[dict]:
+    """Datto EDR alerts aggregated by (host, user, threat, severity)."""
+    return db.fetch_all(
+        """
+        SELECT
+            host_name,
+            user_account,
+            threat_name,
+            severity,
+            COUNT(*)::bigint            AS alert_count,
+            MAX(timestamp)              AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT action_taken)
+                    FILTER (WHERE action_taken IS NOT NULL),
+                ARRAY[]::text[]
+            )                           AS actions
+        FROM vector_edr_events
+        WHERE client_name = %s
+        GROUP BY host_name, user_account, threat_name, severity
+        ORDER BY alert_count DESC
+        LIMIT 200
+        """,
+        (_GCS,),
+    )
 
 
 @app.get("/api/governance/external-forwarding")
@@ -1365,34 +1313,6 @@ def governance_broken_inheritance() -> list[dict]:
         LIMIT 100
         """,
         (_GCS,),
-    )
-
-
-@app.get("/api/governance/edr-alerts")
-def governance_edr_alerts(tenant: str | None = Query(None)) -> list[dict]:
-    """Datto EDR alerts rolled up by host + user + threat + severity."""
-    tenant_filter = tenant or _GCS
-    return db.fetch_all(
-        """
-        SELECT
-            host_name,
-            user_account,
-            threat_name,
-            severity,
-            COUNT(*)::bigint AS alert_count,
-            MAX(timestamp)   AS last_seen,
-            COALESCE(
-                array_agg(DISTINCT action_taken)
-                    FILTER (WHERE action_taken IS NOT NULL),
-                ARRAY[]::text[]
-            ) AS actions
-        FROM vector_edr_events
-        WHERE (%s::text IS NULL OR client_name = %s)
-        GROUP BY host_name, user_account, threat_name, severity
-        ORDER BY alert_count DESC
-        LIMIT 200
-        """,
-        (tenant_filter, tenant_filter),
     )
 
 

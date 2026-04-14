@@ -1,10 +1,11 @@
 // Hardcoded source catalogue for the v0.1 build. Each entry drives a card
-// with a status ring + label + description. Event counts for live webhook
-// sources (INKY, Datto EDR) are pulled from /api/sources/*-count on mount.
+// with a status ring + label + description. Once connectors expose real
+// health checks this should move onto /api/sources.
 
 import { useEffect, useState } from "react";
 
 import { api } from "../api.js";
+import { fmtNumber } from "../utils/format.js";
 
 const SOURCES = [
   {
@@ -32,7 +33,6 @@ const SOURCES = [
     name: "INKY MailShield",
     status: "live",
     label: "LIVE",
-    countKey: "inky",
     description:
       "Inbound email threat verdicts and AiTM phishing detection. SIEM webhook active — Danger verdicts trigger watchlist correlation windows.",
   },
@@ -40,14 +40,14 @@ const SOURCES = [
     name: "Datto EDR",
     status: "live",
     label: "LIVE",
-    countKey: "edr",
     description:
       "Endpoint behavioral telemetry and threat detections. Webhook active — receiving alerts from Infocyte.",
+    countKey: "edr",
   },
   {
     name: "ThreatLocker",
-    status: "planned",
-    label: "PLANNED",
+    status: "live",
+    label: "LIVE",
     description:
       "Application allowlisting and ringfencing telemetry. Blocked execution events and policy violations feed into Vector for endpoint correlation.",
   },
@@ -121,27 +121,19 @@ function StatusRing({ color }) {
   );
 }
 
-function fmtCount(n) {
-  return Number(n || 0).toLocaleString("en-US");
-}
-
 export default function Sources() {
-  const [counts, setCounts] = useState({ inky: null, edr: null });
+  const [edrCount, setEdrCount] = useState(null);
 
   useEffect(() => {
     let cancel = false;
     api
-      .inkyCount()
-      .then((r) => {
-        if (!cancel && r) setCounts((c) => ({ ...c, inky: r.count ?? 0 }));
-      })
-      .catch(() => {});
-    api
       .edrCount()
       .then((r) => {
-        if (!cancel && r) setCounts((c) => ({ ...c, edr: r.count ?? 0 }));
+        if (!cancel) setEdrCount(Number(r?.count || 0));
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancel) setEdrCount(null);
+      });
     return () => {
       cancel = true;
     };
@@ -159,23 +151,32 @@ export default function Sources() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {SOURCES.map((s) => {
           const color = COLOR[s.status] || COLOR.passthrough;
-          const count = s.countKey ? counts[s.countKey] : null;
+          const count = s.countKey === "edr" ? edrCount : null;
           return (
             <div key={s.name} className="card p-5 flex items-start gap-4">
               <StatusRing color={color} />
-              <div className="min-w-0">
-                <div className="font-semibold text-base">{s.name}</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="font-semibold text-base">{s.name}</div>
+                  {count !== null && (
+                    <span
+                      className="text-[11px] font-semibold tabular-nums px-2 py-[2px] rounded-full border"
+                      style={{
+                        color,
+                        borderColor: color + "55",
+                        backgroundColor: color + "14",
+                      }}
+                    >
+                      {fmtNumber(count)} events
+                    </span>
+                  )}
+                </div>
                 <div
                   className="text-[10px] font-semibold uppercase tracking-wider mt-1"
                   style={{ color }}
                 >
                   {s.label}
                 </div>
-                {count !== null && count !== undefined && (
-                  <div className="text-[10px] text-white/50 mt-1 tabular-nums">
-                    {fmtCount(count)} events received
-                  </div>
-                )}
                 <div className="text-sm text-white/60 mt-3 leading-relaxed">
                   {s.description}
                 </div>
