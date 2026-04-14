@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth.jsx";
 import Layout from "./components/Layout.jsx";
 import Placeholder from "./components/Placeholder.jsx";
+import Incidents from "./pages/Incidents.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Events from "./pages/Events.jsx";
 import Users from "./pages/Users.jsx";
@@ -20,7 +21,7 @@ export default function App() {
           <Route path="/dashboard"        element={<Dashboard />} />
           <Route
             path="/incidents"
-            element={<Placeholder message="Incident correlation engine — Phase 2" />}
+            element={<Incidents />}
           />
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/events"           element={<Events />} />
