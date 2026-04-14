@@ -184,7 +184,7 @@ class BaselineEngine:
                 """
                 SELECT DISTINCT client_ip AS val
                 FROM vector_events
-                WHERE username ILIKE %s
+                WHERE user_id = %s
                   AND timestamp > now() - INTERVAL '14 days'
                   AND client_ip IS NOT NULL
                 """,
@@ -194,7 +194,7 @@ class BaselineEngine:
                 """
                 SELECT DISTINCT raw_json->>'Country' AS val
                 FROM vector_events
-                WHERE username ILIKE %s
+                WHERE user_id = %s
                   AND event_type = 'UserLoggedIn'
                   AND timestamp > now() - INTERVAL '14 days'
                   AND raw_json ? 'Country'
@@ -205,7 +205,7 @@ class BaselineEngine:
                 """
                 SELECT DISTINCT raw_json->>'DeviceName' AS val
                 FROM vector_events
-                WHERE username ILIKE %s
+                WHERE user_id = %s
                   AND timestamp > now() - INTERVAL '14 days'
                   AND raw_json ? 'DeviceName'
                 """,
