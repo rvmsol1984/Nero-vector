@@ -134,6 +134,14 @@ class Database:
             raise RuntimeError("Database.connect() has not been called")
         return self._conn
 
+    def fetch_all(self, query: str, params=None) -> list:
+        """Execute a query and return all rows as a list of dicts."""
+        with self.conn.cursor() as cur:
+            cur.execute(query, params or ())
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
     # ------------------------------------------------------------------ migrations
     def run_migrations(self, migrations_dir: str | Path) -> None:
         """Apply every *.sql file in ``migrations_dir`` exactly once.
