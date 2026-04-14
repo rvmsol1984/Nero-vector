@@ -22,6 +22,7 @@ from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
 from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
+from vector_ingest.threatlocker_ingest import ThreatLockerIngestor
 
 
 def configure_logging() -> None:
@@ -116,6 +117,35 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
             )
 
     # Global workers -- not per-tenant but share the same poll cadence.
+    # ThreatLocker is a separate SaaS outside Azure AD so it's wired
+    # off a dedicated env token rather than the tenants.json file.
+    # Skipping entirely (not even constructing the ingestor) keeps
+    # installs that don't have ThreatLocker from logging 401 warnings
+    # every 5 minutes.
+    tl_token = os.environ.get("THREATLOCKER_API_TOKEN", "").strip()
+    tl_org_id = os.environ.get("THREATLOCKER_ORG_ID", "").strip()
+    tl_client_name = os.environ.get(
+        "THREATLOCKER_CLIENT_NAME", "GameChange Solar"
+    ).strip() or "GameChange Solar"
+    if tl_token and tl_org_id:
+        logger.info(
+            "[threatlocker] building ingestor",
+            extra={"org_id": tl_org_id, "client_name": tl_client_name},
+        )
+        ingestors.append(
+            ThreatLockerIngestor(
+                tenant_id=tl_org_id,
+                client_name=tl_client_name,
+                api_token=tl_token,
+                db=db,
+            )
+        )
+    else:
+        logger.info(
+            "[threatlocker] token/org not set, skipping ingestor",
+            extra={"has_token": bool(tl_token), "has_org_id": bool(tl_org_id)},
+        )
+
     # IocEnricher runs once per cycle and walks every tenant's recent
     # events looking for OpenCTI-backed indicator matches. It's last in
     # the list so it runs after the other ingestors have committed any

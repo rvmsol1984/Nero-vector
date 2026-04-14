@@ -46,8 +46,8 @@ const SOURCES = [
   },
   {
     name: "ThreatLocker",
-    status: "planned",
-    label: "PLANNED",
+    status: "live",
+    label: "LIVE",
     description:
       "Application allowlisting and ringfencing telemetry. Blocked execution events and policy violations feed into Vector for endpoint correlation.",
   },

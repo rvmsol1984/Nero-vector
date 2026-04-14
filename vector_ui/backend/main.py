@@ -401,6 +401,52 @@ def user_edr(entity_key: str) -> list[dict]:
     )
 
 
+@app.get("/api/users/{entity_key}/threatlocker")
+def user_threatlocker(entity_key: str) -> list[dict]:
+    """ThreatLocker ActionLog events for this user.
+
+    Matching strategy mirrors the EDR tab: fall back from an exact
+    username match (case-insensitive) to a local-part substring
+    match on ``username``, and union with any row whose ``hostname``
+    matches a DeviceName seen for this user in UAL. This covers the
+    common case where ThreatLocker records the Windows login name
+    (not the UPN) while UAL carries the UPN plus a device list.
+    """
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    local_part = user_email.split("@", 1)[0] if "@" in user_email else user_email
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            event_time,
+            hostname,
+            username,
+            full_path,
+            process_path,
+            action_type,
+            action,
+            action_id,
+            policy_name,
+            hash,
+            client_name,
+            tenant_id,
+            raw_json
+        FROM vector_threatlocker_events
+        WHERE LOWER(username) = LOWER(%s)
+           OR LOWER(username) LIKE '%%' || LOWER(%s) || '%%'
+           OR LOWER(hostname) IN (
+               SELECT LOWER(raw_json->>'DeviceName')
+               FROM vector_events
+               WHERE user_id = %s
+                 AND raw_json->>'DeviceName' IS NOT NULL
+           )
+        ORDER BY event_time DESC
+        LIMIT 100
+        """,
+        (user_email, local_part, user_email),
+    )
+
+
 @app.get("/api/users/{entity_key}/ioc")
 def user_ioc_matches(entity_key: str) -> list[dict]:
     """OpenCTI IOC matches whose triggering event belongs to this user.
@@ -889,6 +935,33 @@ def governance_downloads(
 # severity pill (CRITICAL / REVIEW REQUIRED / MONITOR).
 
 _GCS = "GameChange Solar"
+
+
+@app.get("/api/governance/threatlocker")
+def governance_threatlocker() -> list[dict]:
+    """ThreatLocker block/ringfenced/elevation events grouped by
+    (host, user, action). action_id filter matches the blocking
+    action codes: 2=Deny, 3=Ringfenced, 6=Elevated."""
+    return db.fetch_all(
+        """
+        SELECT
+            hostname,
+            username,
+            action_type,
+            action,
+            action_id,
+            policy_name,
+            COUNT(*)::bigint           AS event_count,
+            MAX(event_time)            AS last_seen
+        FROM vector_threatlocker_events
+        WHERE action_id IN (2, 3, 6)
+          AND client_name = %s
+        GROUP BY hostname, username, action_type, action, action_id, policy_name
+        ORDER BY event_count DESC
+        LIMIT 100
+        """,
+        (_GCS,),
+    )
 
 
 @app.get("/api/governance/edr-alerts")

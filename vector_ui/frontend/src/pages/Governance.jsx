@@ -27,6 +27,7 @@ const TABS = [
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
   { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
   { id: "edrAlerts",         label: "EDR Alerts",        endpoint: "govEdrAlerts",         severity: "critical", withTenant: false },
+  { id: "threatLocker",      label: "ThreatLocker",      endpoint: "govThreatLocker",      severity: "critical", withTenant: false },
   { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
 ];
 
@@ -260,6 +261,13 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
         </div>
       );
     }
+    if (tabId === "threatLocker") {
+      return (
+        <div className="card">
+          <EmptyState message="No blocked events detected" />
+        </div>
+      );
+    }
     return (
       <div className="card">
         <EmptyState />
@@ -281,6 +289,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
+    case "threatLocker":      return <ThreatLockerTable rows={rows} />;
     case "iocMatches":        return <IocMatchesTable rows={rows} />;
     case "aiActivity":
       // Handled above -- this branch is unreachable because TabPanel
@@ -1864,6 +1873,118 @@ function EdrAlertsTable({ rows }) {
                   ) : (
                     <span className="text-white/30">—</span>
                   )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ThreatLocker ActionLog
+// ---------------------------------------------------------------------------
+
+// Map ThreatLocker action strings onto our severity pills. Deny is the
+// hard block (CRITICAL red), Ringfenced is a policy-scoped block
+// (REVIEW orange), elevations and anything else fall through to
+// MONITOR so they still render without shouting.
+function threatLockerActionPill(row) {
+  const explicit = String(row?.action || "").trim().toLowerCase();
+  const actionType = String(row?.action_type || "").trim().toLowerCase();
+  const id = Number(row?.action_id) || 0;
+  if (explicit === "deny" || actionType === "deny" || id === 2) return "critical";
+  if (
+    explicit === "ringfenced" ||
+    actionType === "ringfenced" ||
+    id === 3
+  ) return "review";
+  return "monitor";
+}
+
+function ThreatLockerActionBadge({ row }) {
+  const tier = threatLockerActionPill(row);
+  const label =
+    tier === "critical"
+      ? "DENY"
+      : tier === "review"
+      ? "RINGFENCED"
+      : (row?.action || row?.action_type || "—").toString().toUpperCase();
+  const color =
+    tier === "critical"
+      ? "#EF4444"
+      : tier === "review"
+      ? "#F97316"
+      : "rgba(255,255,255,0.5)";
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function ThreatLockerTable({ rows }) {
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>Host</Th>
+            <Th>User</Th>
+            <Th>Action</Th>
+            <Th>Action Type</Th>
+            <Th>Policy</Th>
+            <Th align="right">Count</Th>
+            <Th>Last Seen</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row, idx) => {
+            const key = `${row.hostname || ""}|${row.username || ""}|${row.action || ""}|${row.action_type || ""}|${row.policy_name || ""}|${idx}`;
+            return (
+              <tr key={key} className="hover:bg-white/[0.03]">
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
+                  title={row.hostname || ""}
+                >
+                  {row.hostname || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
+                  title={row.username || ""}
+                >
+                  {row.username || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5 space-x-2">
+                  <ThreatLockerActionBadge row={row} />
+                  <SeverityPill severity={threatLockerActionPill(row)} />
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[180px]"
+                  title={row.action_type || ""}
+                >
+                  {row.action_type || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/60 truncate max-w-[220px]"
+                  title={row.policy_name || ""}
+                >
+                  {row.policy_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  {fmtNumber(row.event_count)}
+                </td>
+                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                  {fmtRelative(row.last_seen)}
                 </td>
               </tr>
             );
