@@ -608,6 +608,102 @@ def sources_edr_count() -> dict:
 # Per-user EDR events (used by the UserDetail "Endpoint" tab)
 # ============================================================================
 
+# ============================================================================
+# IOC matches (OpenCTI enrichment results)
+# ============================================================================
+
+@app.get("/api/ioc/matches")
+def ioc_matches(
+    limit: int = Query(50, ge=1, le=500),
+    min_confidence: int = Query(0, ge=0, le=100),
+) -> list[dict]:
+    """Recent IOC matches from the OpenCTI enricher."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            ioc_type,
+            ioc_value,
+            opencti_id,
+            indicator_name,
+            confidence,
+            matched_event_id::text,
+            matched_at,
+            raw_json
+        FROM vector_ioc_matches
+        WHERE confidence >= %s
+        ORDER BY matched_at DESC
+        LIMIT %s
+        """,
+        (min_confidence, limit),
+    )
+
+
+@app.get("/api/ioc/matches/{ioc_value}")
+def ioc_matches_by_value(ioc_value: str) -> list[dict]:
+    """Every match row for a specific IOC (IP, email or hash)."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            ioc_type,
+            ioc_value,
+            opencti_id,
+            indicator_name,
+            confidence,
+            matched_event_id::text,
+            matched_at,
+            raw_json
+        FROM vector_ioc_matches
+        WHERE LOWER(ioc_value) = LOWER(%s)
+        ORDER BY matched_at DESC
+        LIMIT 200
+        """,
+        (ioc_value,),
+    )
+
+
+@app.get("/api/users/{entity_key}/ioc")
+def user_ioc(entity_key: str, limit: int = Query(100, ge=1, le=500)) -> list[dict]:
+    """IOC matches linked to this user's recent UAL / defender events.
+
+    The enricher stores the source ``matched_event_id`` so we can join
+    back through vector_events (client_ip / sender email paths) and
+    vector_defender_hunting (SHA256 path) to find the matches that
+    correspond to this specific user.
+    """
+    email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    return db.fetch_all(
+        """
+        SELECT
+            m.id::text,
+            m.tenant_id,
+            m.client_name,
+            m.ioc_type,
+            m.ioc_value,
+            m.opencti_id,
+            m.indicator_name,
+            m.confidence,
+            m.matched_event_id::text,
+            m.matched_at,
+            m.raw_json
+        FROM vector_ioc_matches m
+        LEFT JOIN vector_events ve          ON ve.id = m.matched_event_id
+        LEFT JOIN vector_defender_hunting dh ON dh.id = m.matched_event_id
+        WHERE LOWER(ve.user_id) = LOWER(%s)
+           OR LOWER(dh.account_upn) = LOWER(%s)
+           OR LOWER(m.ioc_value) = LOWER(%s)
+        ORDER BY m.matched_at DESC
+        LIMIT %s
+        """,
+        (email, email, email, limit),
+    )
+
+
 @app.get("/api/users/{entity_key}/edr")
 def user_edr(entity_key: str, limit: int = Query(100, ge=1, le=500)) -> list[dict]:
     """Datto EDR alerts for a single user.

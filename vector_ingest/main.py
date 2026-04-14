@@ -20,6 +20,7 @@ from pythonjsonlogger import jsonlogger
 from vector_ingest.db import Database
 from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
+from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
 
 
@@ -113,6 +114,13 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                     db=db,
                 )
             )
+
+    # One tenant-agnostic IOC enricher runs alongside the per-tenant
+    # pollers. It pulls candidates from the shared vector_events +
+    # vector_defender_hunting tables, so it doesn't need per-tenant
+    # scoping at this layer.
+    logger.info("[ioc] building OpenCTI enricher")
+    ingestors.append(IocEnricher(db=db))
     return ingestors
 
 

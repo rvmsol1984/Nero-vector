@@ -59,6 +59,13 @@ export const api = {
                  get(`/api/users/${path(entityKey)}/emails${qs({ direction, search, limit, offset })}`),
   userEdr:     (entityKey, { limit = 100 } = {}) =>
                  get(`/api/users/${path(entityKey)}/edr${qs({ limit })}`),
+  userIoc:     (entityKey, { limit = 100 } = {}) =>
+                 get(`/api/users/${path(entityKey)}/ioc${qs({ limit })}`),
+
+  // ----- IOC matches (OpenCTI enrichment) -------------------------------
+  iocMatches:  ({ limit = 50, min_confidence } = {}) =>
+                 get(`/api/ioc/matches${qs({ limit, min_confidence })}`),
+  iocByValue:  (value) => get(`/api/ioc/matches/${encodeURIComponent(value)}`),
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
