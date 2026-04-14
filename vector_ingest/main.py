@@ -20,6 +20,7 @@ from pythonjsonlogger import jsonlogger
 from vector_ingest.db import Database
 from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
+from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
 
 
@@ -113,6 +114,13 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                     db=db,
                 )
             )
+
+    # Global workers -- not per-tenant but share the same poll cadence.
+    # IocEnricher runs once per cycle and walks every tenant's recent
+    # events looking for OpenCTI-backed indicator matches. It's last in
+    # the list so it runs after the other ingestors have committed any
+    # new rows this cycle.
+    ingestors.append(IocEnricher(db=db))
     return ingestors
 
 

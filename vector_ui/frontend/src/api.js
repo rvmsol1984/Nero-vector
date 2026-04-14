@@ -58,6 +58,11 @@ export const api = {
   userEmails:  (entityKey, { direction, search, limit = 50, offset = 0 } = {}) =>
                  get(`/api/users/${path(entityKey)}/emails${qs({ direction, search, limit, offset })}`),
   userEdr:     (entityKey) => get(`/api/users/${path(entityKey)}/edr`),
+  userIoc:     (entityKey) => get(`/api/users/${path(entityKey)}/ioc`),
+
+  // ----- IOC enrichment (OpenCTI) ---------------------------------------
+  iocMatches:        (limit = 50) => get(`/api/ioc/matches${qs({ limit })}`),
+  iocMatchesByValue: (value) => get(`/api/ioc/matches/${encodeURIComponent(value)}`),
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
@@ -91,4 +96,5 @@ export const api = {
   govPrivilegedRoles:    () => get("/api/governance/privileged-roles"),
   govGuestUsers:         () => get("/api/governance/guest-users"),
   govEdrAlerts:          () => get("/api/governance/edr-alerts"),
+  govIocMatches:         () => get("/api/ioc/matches?limit=200"),
 };

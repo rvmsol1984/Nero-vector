@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import Avatar from "../components/Avatar.jsx";
+import JsonBlock from "../components/JsonBlock.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
@@ -26,6 +27,7 @@ const TABS = [
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
   { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
   { id: "edrAlerts",         label: "EDR Alerts",        endpoint: "govEdrAlerts",         severity: "critical", withTenant: false },
+  { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
 ];
 
 // GCS tenant -- hardcoded here because the Governance board is GCS-only and
@@ -251,6 +253,13 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
         </div>
       );
     }
+    if (tabId === "iocMatches") {
+      return (
+        <div className="card">
+          <EmptyState message="No IOC matches detected" />
+        </div>
+      );
+    }
     return (
       <div className="card">
         <EmptyState />
@@ -272,6 +281,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
+    case "iocMatches":        return <IocMatchesTable rows={rows} />;
     case "aiActivity":
       // Handled above -- this branch is unreachable because TabPanel
       // short-circuits on tabId === "aiActivity" before the switch.
@@ -1856,6 +1866,151 @@ function EdrAlertsTable({ rows }) {
                   )}
                 </td>
               </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// IOC Matches (OpenCTI enrichment)
+// ---------------------------------------------------------------------------
+
+// Map raw OpenCTI confidence (0-100) onto our governance severity pills.
+// >= 90 -> CRITICAL red, 75-89 -> review (orange), 50-74 -> monitor (yellow).
+function iocConfidencePill(confidence) {
+  const c = Number(confidence) || 0;
+  if (c >= 90) return "critical";
+  if (c >= 75) return "review";
+  return "monitor";
+}
+
+function IocTypeBadge({ type }) {
+  const key = String(type || "").toLowerCase();
+  const color = {
+    ipv4:   "#3B82F6",
+    ipv6:   "#3B82F6",
+    domain: "#8B5CF6",
+    url:    "#A855F7",
+    email:  "#F97316",
+    sha256: "#10B981",
+  }[key] || "rgba(255,255,255,0.4)";
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[2px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {key || "—"}
+    </span>
+  );
+}
+
+function IocMatchesTable({ rows }) {
+  const [open, setOpen] = useState(null);
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>IOC Value</Th>
+            <Th>Type</Th>
+            <Th>Confidence</Th>
+            <Th>Indicator</Th>
+            <Th>Client</Th>
+            <Th>User</Th>
+            <Th>Matched</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row) => {
+            const isOpen = open === row.id;
+            return (
+              <Fragment key={row.id}>
+                <tr
+                  onClick={() => setOpen(isOpen ? null : row.id)}
+                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
+                >
+                  <td
+                    className="px-4 py-2.5 font-mono text-[11px] text-white truncate max-w-[260px]"
+                    title={row.ioc_value}
+                  >
+                    {row.ioc_value}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <IocTypeBadge type={row.ioc_type} />
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <SeverityPill severity={iocConfidencePill(row.confidence)} />
+                    <span className="ml-2 text-[10px] text-white/50 tabular-nums">
+                      {Number(row.confidence) || 0}
+                    </span>
+                  </td>
+                  <td
+                    className="px-4 py-2.5 text-white/80 truncate max-w-[260px]"
+                    title={row.indicator_name || ""}
+                  >
+                    {row.indicator_name || <span className="text-white/30">—</span>}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {row.client_name ? (
+                      <TenantBadge name={row.client_name} />
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {row.entity_key ? (
+                      <Link
+                        to={`/users/${encodeURIComponent(row.entity_key)}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-primary-light hover:underline truncate max-w-[220px] inline-block align-middle"
+                        title={row.user_id || row.entity_key}
+                      >
+                        {row.user_id || row.entity_key}
+                      </Link>
+                    ) : (
+                      <span className="text-white/30">—</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                    {fmtRelative(row.matched_at)}
+                  </td>
+                </tr>
+                {isOpen && (
+                  <tr className="bg-black/30">
+                    <td colSpan={7} className="px-4 py-3 border-t border-white/5">
+                      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
+                        OpenCTI indicator details
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] mb-3">
+                        <div>
+                          <div className="text-white/40 uppercase tracking-wider text-[9px]">
+                            OpenCTI id
+                          </div>
+                          <div className="font-mono text-white/80 break-all">
+                            {row.opencti_id || "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-white/40 uppercase tracking-wider text-[9px]">
+                            Matched at
+                          </div>
+                          <div className="text-white/80">
+                            {fmtTime(row.matched_at)}
+                          </div>
+                        </div>
+                      </div>
+                      <JsonBlock data={row.raw_json} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             );
           })}
         </tbody>

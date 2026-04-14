@@ -51,13 +51,16 @@ export default function UserDetail() {
 
   const [profile, setProfile] = useState(null);
   const [profileErr, setProfileErr] = useState(null);
+  const [iocMatches, setIocMatches] = useState([]);
 
   const [tab, setTab] = useState("timeline");
 
   useEffect(() => {
     setProfile(null);
     setProfileErr(null);
+    setIocMatches([]);
     api.userProfile(entityKey).then(setProfile).catch((e) => setProfileErr(e.message));
+    api.userIoc(entityKey).then((r) => setIocMatches(r || [])).catch(() => setIocMatches([]));
   }, [entityKey]);
 
   const header = useMemo(() => {
@@ -110,6 +113,8 @@ export default function UserDetail() {
 
       {header}
 
+      <IocMatchBanner matches={iocMatches} />
+
       <div className="border-b border-white/5 flex items-center gap-1 flex-wrap overflow-x-auto">
         {TABS.map((t) => {
           const active = tab === t.id;
@@ -141,6 +146,57 @@ export default function UserDetail() {
 }
 
 // ---------------------------------------------------------------------------
+
+function IocMatchBanner({ matches }) {
+  if (!matches || matches.length === 0) return null;
+  const count = matches.length;
+  const maxConfidence = matches.reduce(
+    (acc, m) => Math.max(acc, Number(m.confidence) || 0),
+    0,
+  );
+  return (
+    <div
+      className="card p-4 animate-fade-in flex items-center gap-3 flex-wrap"
+      style={{
+        borderLeft: "3px solid #EF4444",
+        backgroundColor: "rgba(239,68,68,0.06)",
+      }}
+    >
+      <div
+        className="h-9 w-9 rounded-full flex items-center justify-center text-lg shrink-0"
+        style={{
+          background: "rgba(239,68,68,0.15)",
+          color: "#EF4444",
+        }}
+        aria-hidden="true"
+      >
+        ⚠
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-semibold text-white">
+          IOC match detected — this user's activity matches known threat
+          indicators
+        </div>
+        <div className="mt-0.5 text-[11px] text-white/60">
+          {count} match{count === 1 ? "" : "es"} · max confidence{" "}
+          <span className="font-semibold text-white">
+            {maxConfidence || "?"}
+          </span>
+        </div>
+      </div>
+      <span
+        className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wider rounded-full border whitespace-nowrap"
+        style={{
+          color: "#EF4444",
+          borderColor: "#EF444455",
+          backgroundColor: "#EF444414",
+        }}
+      >
+        IOC Match
+      </span>
+    </div>
+  );
+}
 
 function MiniStat({ label, value, color }) {
   return (
