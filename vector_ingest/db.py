@@ -142,6 +142,17 @@ class Database:
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+
+    def fetch_one(self, query: str, params=None):
+        """Execute a query and return one row as a dict or None."""
+        with self.conn.cursor() as cur:
+            cur.execute(query, params or ())
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+
     # ------------------------------------------------------------------ migrations
     def run_migrations(self, migrations_dir: str | Path) -> None:
         """Apply every *.sql file in ``migrations_dir`` exactly once.
