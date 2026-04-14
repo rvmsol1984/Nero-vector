@@ -30,7 +30,7 @@ BASELINE_POLL_INTERVAL = timedelta(minutes=60)
 SCORING_POLL_INTERVAL  = timedelta(minutes=5)
 
 # Lookback windows used by each engine.
-BASELINE_MIN_HISTORY = timedelta(days=7)
+BASELINE_MIN_HISTORY = timedelta(days=3)
 BASELINE_WINDOW      = timedelta(days=14)
 SCORING_WINDOW       = timedelta(minutes=30)
 IMMEDIATE_WINDOW     = timedelta(minutes=5)
@@ -168,7 +168,7 @@ class BaselineEngine:
             FROM vector_events
             WHERE user_id IS NOT NULL
             GROUP BY user_id
-            HAVING MAX(timestamp) - MIN(timestamp) >= INTERVAL '7 days'
+            HAVING MAX(timestamp) - MIN(timestamp) >= INTERVAL '3 days'
             LIMIT 5000
             """
         )
