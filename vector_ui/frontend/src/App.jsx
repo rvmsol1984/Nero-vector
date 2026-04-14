@@ -29,7 +29,7 @@ export default function App() {
           <Route path="/users/:entityKey" element={<UserDetail />} />
           <Route
             path="/baseline"
-            element={<Placeholder message="Behavioral baseline engine — Phase 2" />}
+            element={<Navigate to="/incidents" replace />}
           />
           <Route path="/governance"       element={<Governance />} />
           <Route path="/sources"          element={<Sources />} />
