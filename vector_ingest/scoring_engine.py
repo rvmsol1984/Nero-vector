@@ -554,7 +554,7 @@ class ScoringEngine:
                 SELECT event_type, client_ip, raw_json, timestamp
                 FROM vector_events
                 WHERE user_id = %s
-                  AND timestamp > now() - INTERVAL '30 minutes'
+                  AND event_time > now() - INTERVAL '30 minutes'
                 """,
                 (user_id,),
             )
@@ -627,7 +627,7 @@ class ScoringEngine:
                     SELECT id FROM vector_threatlocker_events
                     WHERE username ILIKE %s
                       AND action ILIKE 'deny%%'
-                      AND timestamp > now() - INTERVAL '30 minutes'
+                      AND event_time > now() - INTERVAL '30 minutes'
                     LIMIT 1
                     """,
                     (user_id,),
