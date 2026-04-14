@@ -168,7 +168,7 @@ class BaselineEngine:
             FROM vector_events
             WHERE user_id IS NOT NULL
             GROUP BY user_id
-            HAVING MAX(timestamp) - MIN(timestamp) >= INTERVAL '3 days'
+            HAVING MAX(timestamp) - MIN(timestamp) >= INTERVAL '2 days' OR COUNT(*) >= 50
             LIMIT 5000
             """
         )
