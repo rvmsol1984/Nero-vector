@@ -13,12 +13,47 @@ import { fmtRelative, workloadColor } from "../utils/format.js";
 // email events stand out in a mixed feed.
 const INKY_COLOR = "#c084fc";
 
+// EDR accent color (orange), matches the Datto/endpoint branding and keeps
+// endpoint telemetry visually distinct from UAL and email events.
+const EDR_COLOR = "#F97316";
+
 // Verdict pill colors for INKY rows.
 const VERDICT_STYLES = {
   danger:  { label: "DANGER",  color: "#EF4444" },
   caution: { label: "CAUTION", color: "#EAB308" },
   neutral: { label: "NEUTRAL", color: "rgba(255,255,255,0.5)" },
 };
+
+// Severity pill colors for EDR rows.
+const EDR_SEVERITY_STYLES = {
+  high:          { label: "HIGH",          color: "#EF4444" },
+  critical:      { label: "CRITICAL",      color: "#EF4444" },
+  medium:        { label: "MEDIUM",        color: "#F97316" },
+  moderate:      { label: "MEDIUM",        color: "#F97316" },
+  low:           { label: "LOW",           color: "#EAB308" },
+  informational: { label: "INFORMATIONAL", color: "rgba(255,255,255,0.5)" },
+  info:          { label: "INFORMATIONAL", color: "rgba(255,255,255,0.5)" },
+};
+
+function EdrSeverityBadge({ severity }) {
+  if (!severity) return null;
+  const cfg = EDR_SEVERITY_STYLES[String(severity).toLowerCase()] || {
+    label: String(severity).toUpperCase(),
+    color: "rgba(255,255,255,0.5)",
+  };
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-full border whitespace-nowrap"
+      style={{
+        color: cfg.color,
+        borderColor: cfg.color + "55",
+        backgroundColor: cfg.color + "14",
+      }}
+    >
+      {cfg.label}
+    </span>
+  );
+}
 
 function VerdictBadge({ verdict }) {
   if (!verdict) return null;
@@ -48,12 +83,16 @@ export default function EventCard({ event }) {
   // `kind` field (older /api/feed/recent rows) so EventCard renders
   // correctly regardless of which endpoint the caller used.
   const isInky = event.source === "inky" || event.kind === "inky";
-  const color = isInky ? INKY_COLOR : workloadColor(event.workload);
+  const isEdr  = event.source === "edr"  || event.kind === "edr";
+  const color = isEdr
+    ? EDR_COLOR
+    : isInky
+    ? INKY_COLOR
+    : workloadColor(event.workload);
 
   async function toggle() {
-    if (isInky) {
-      // INKY events don't have a fetchable raw JSON endpoint in this
-      // session — the whole row is already self-describing.
+    if (isInky || isEdr) {
+      // INKY and EDR events carry everything we need on the row already.
       setOpen((v) => !v);
       return;
     }
@@ -86,11 +125,34 @@ export default function EventCard({ event }) {
         onClick={toggle}
         className="w-full text-left p-4 flex items-center gap-3 hover:bg-white/[0.03] active:scale-[0.997] transition-all"
       >
-        <Avatar email={event.user_id} tenant={event.client_name} size={36} />
+        {isEdr ? (
+          <div
+            className="rounded-full flex items-center justify-center font-bold text-white shrink-0 select-none"
+            style={{
+              width: 36,
+              height: 36,
+              background: EDR_COLOR,
+              fontSize: 12,
+              boxShadow: `0 0 0 1px ${EDR_COLOR}66 inset`,
+            }}
+            aria-label="EDR alert"
+          >
+            ED
+          </div>
+        ) : (
+          <Avatar email={event.user_id} tenant={event.client_name} size={36} />
+        )}
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            {userLink ? (
+            {isEdr ? (
+              <span
+                className="font-medium text-sm text-white truncate max-w-[260px]"
+                title={event.host_name || event.user_id || ""}
+              >
+                {event.host_name || event.user_id || "unknown host"}
+              </span>
+            ) : userLink ? (
               <Link
                 to={userLink}
                 onClick={(e) => e.stopPropagation()}
@@ -107,7 +169,21 @@ export default function EventCard({ event }) {
                 {event.user_id}
               </span>
             )}
-            {isInky ? (
+            {isEdr ? (
+              <>
+                <span
+                  className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+                  style={{
+                    color: EDR_COLOR,
+                    borderColor: EDR_COLOR + "55",
+                    backgroundColor: EDR_COLOR + "14",
+                  }}
+                >
+                  EDR Alert
+                </span>
+                <EdrSeverityBadge severity={event.severity} />
+              </>
+            ) : isInky ? (
               <>
                 <VerdictBadge verdict={event.verdict} />
                 {event.aitm_detected && (
@@ -136,7 +212,21 @@ export default function EventCard({ event }) {
               {fmtRelative(event.timestamp)}
             </span>
             <span className="opacity-60">·</span>
-            {isInky ? (
+            {isEdr ? (
+              <>
+                <span className="truncate" title={event.threat_name || ""}>
+                  {event.threat_name || <span className="text-white/30">(no threat name)</span>}
+                </span>
+                {event.action_taken && (
+                  <>
+                    <span className="opacity-60">·</span>
+                    <span className="truncate max-w-[200px]" title={event.action_taken}>
+                      {event.action_taken}
+                    </span>
+                  </>
+                )}
+              </>
+            ) : isInky ? (
               <>
                 <span className="truncate" title={event.subject || ""}>
                   {event.subject || <span className="text-white/30">(no subject)</span>}
@@ -164,15 +254,15 @@ export default function EventCard({ event }) {
           </div>
         </div>
 
-        {!isInky && <StatusPill status={event.result_status} dot />}
+        {!isInky && !isEdr && <StatusPill status={event.result_status} dot />}
       </button>
 
-      {open && !isInky && (
+      {open && !isInky && !isEdr && (
         <div className="px-4 pb-4">
           <JsonBlock data={raw?.raw_json ?? raw} loading={raw === null} />
         </div>
       )}
-      {open && isInky && (
+      {open && (isInky || isEdr) && (
         <div className="px-4 pb-4">
           <JsonBlock data={event} />
         </div>

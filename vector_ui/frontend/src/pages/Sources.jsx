@@ -2,6 +2,11 @@
 // with a status ring + label + description. Once connectors expose real
 // health checks this should move onto /api/sources.
 
+import { useEffect, useState } from "react";
+
+import { api } from "../api.js";
+import { fmtNumber } from "../utils/format.js";
+
 const SOURCES = [
   {
     name: "Microsoft UAL",
@@ -33,10 +38,11 @@ const SOURCES = [
   },
   {
     name: "Datto EDR",
-    status: "pending",
-    label: "PENDING",
+    status: "live",
+    label: "LIVE",
     description:
-      "Endpoint behavioral telemetry. Webhook receiver active — awaiting first event from Infocyte.",
+      "Endpoint behavioral telemetry and threat detections. Webhook active — receiving alerts from Infocyte.",
+    countKey: "edr",
   },
   {
     name: "ThreatLocker",
@@ -116,6 +122,23 @@ function StatusRing({ color }) {
 }
 
 export default function Sources() {
+  const [edrCount, setEdrCount] = useState(null);
+
+  useEffect(() => {
+    let cancel = false;
+    api
+      .edrCount()
+      .then((r) => {
+        if (!cancel) setEdrCount(Number(r?.count || 0));
+      })
+      .catch(() => {
+        if (!cancel) setEdrCount(null);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, []);
+
   return (
     <div className="space-y-5 animate-fade-in">
       <div>
@@ -128,11 +151,26 @@ export default function Sources() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {SOURCES.map((s) => {
           const color = COLOR[s.status] || COLOR.passthrough;
+          const count = s.countKey === "edr" ? edrCount : null;
           return (
             <div key={s.name} className="card p-5 flex items-start gap-4">
               <StatusRing color={color} />
-              <div className="min-w-0">
-                <div className="font-semibold text-base">{s.name}</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="font-semibold text-base">{s.name}</div>
+                  {count !== null && (
+                    <span
+                      className="text-[11px] font-semibold tabular-nums px-2 py-[2px] rounded-full border"
+                      style={{
+                        color,
+                        borderColor: color + "55",
+                        backgroundColor: color + "14",
+                      }}
+                    >
+                      {fmtNumber(count)} events
+                    </span>
+                  )}
+                </div>
                 <div
                   className="text-[10px] font-semibold uppercase tracking-wider mt-1"
                   style={{ color }}

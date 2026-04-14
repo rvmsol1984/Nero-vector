@@ -22,6 +22,7 @@ const TABS = [
   { id: "files",    label: "Files"    },
   { id: "email",    label: "Email"    },
   { id: "logins",   label: "Logins"   },
+  { id: "endpoint", label: "Endpoint" },
   { id: "raw",      label: "Raw"      },
 ];
 
@@ -133,6 +134,7 @@ export default function UserDetail() {
       {tab === "files"    && <FilesTab    entityKey={entityKey} />}
       {tab === "email"    && <EmailTraceTab entityKey={entityKey} />}
       {tab === "logins"   && <ServerTab entityKey={entityKey} kind="logins" />}
+      {tab === "endpoint" && <EndpointTab entityKey={entityKey} />}
       {tab === "raw"      && <ServerTab entityKey={entityKey} kind="raw" />}
     </div>
   );
@@ -645,6 +647,168 @@ function RawRow({ row }) {
       <StatusPill status={row.result_status} dot />
       <div className="ml-auto text-[11px] text-white/50 whitespace-nowrap tabular-nums">
         {fmtTime(row.timestamp)}
+      </div>
+    </div>
+  );
+}
+
+// ---- Endpoint (Datto EDR) ------------------------------------------------
+//
+// Backed by vector_edr_events via /api/users/{entity_key}/edr. Matching is
+// either user_account (case-insensitive) or host_name against any device
+// seen in UAL for this user. Rows are click-to-expand like the other tabs.
+
+const EDR_SEVERITY_STYLE = {
+  high:          { label: "High",          color: "#EF4444" },
+  critical:      { label: "Critical",      color: "#EF4444" },
+  medium:        { label: "Medium",        color: "#F97316" },
+  moderate:      { label: "Medium",        color: "#F97316" },
+  low:           { label: "Low",           color: "#EAB308" },
+  informational: { label: "Informational", color: "rgba(255,255,255,0.5)" },
+  info:          { label: "Informational", color: "rgba(255,255,255,0.5)" },
+};
+
+function EdrSeverityPill({ severity }) {
+  const key = String(severity || "").trim().toLowerCase();
+  const cfg = EDR_SEVERITY_STYLE[key] || {
+    label: severity || "—",
+    color: "rgba(255,255,255,0.5)",
+  };
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-full border whitespace-nowrap"
+      style={{
+        color: cfg.color,
+        borderColor: cfg.color + "55",
+        backgroundColor: cfg.color + "14",
+      }}
+    >
+      {cfg.label}
+    </span>
+  );
+}
+
+function EventTypeBadgeEdr({ type }) {
+  const label = String(type || "alert").toUpperCase();
+  const color = "#F97316";
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function EndpointTab({ entityKey }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => {
+    let cancel = false;
+    setLoading(true);
+    setExpanded(null);
+    api
+      .userEdr(entityKey)
+      .then((r) => {
+        if (!cancel) setRows(r || []);
+      })
+      .catch(() => {
+        if (!cancel) setRows([]);
+      })
+      .finally(() => {
+        if (!cancel) setLoading(false);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [entityKey]);
+
+  return (
+    <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead>
+            <tr>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Type</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Severity</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Host</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Threat</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Process</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Action</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {rows.map((r) => (
+              <Fragment key={r.id}>
+                <tr
+                  onClick={() =>
+                    setExpanded((prev) => (prev === r.id ? null : r.id))
+                  }
+                  className="hover:bg-white/[0.03] cursor-pointer"
+                  style={{
+                    borderLeft: "3px solid #F97316",
+                  }}
+                >
+                  <td className="px-3 py-2 text-white/50 whitespace-nowrap tabular-nums">
+                    {fmtTime(r.timestamp)}
+                  </td>
+                  <td className="px-3 py-2">
+                    <EventTypeBadgeEdr type={r.event_type} />
+                  </td>
+                  <td className="px-3 py-2">
+                    <EdrSeverityPill severity={r.severity} />
+                  </td>
+                  <td
+                    className="px-3 py-2 text-white/80 truncate max-w-[200px]"
+                    title={r.host_name || ""}
+                  >
+                    {r.host_name || <span className="text-white/30">—</span>}
+                  </td>
+                  <td
+                    className="px-3 py-2 text-white/80 truncate max-w-[220px]"
+                    title={r.threat_name || ""}
+                  >
+                    {r.threat_name || <span className="text-white/30">—</span>}
+                  </td>
+                  <td
+                    className="px-3 py-2 text-white/70 truncate max-w-[200px]"
+                    title={r.process_name || ""}
+                  >
+                    {r.process_name || <span className="text-white/30">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-white/70 whitespace-nowrap">
+                    {r.action_taken || <span className="text-white/30">—</span>}
+                  </td>
+                </tr>
+                {expanded === r.id && (
+                  <tr className="bg-white/[0.02]">
+                    <td colSpan={7} className="px-3 py-3">
+                      <JsonBlock data={r.raw_json} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            ))}
+            {!loading && rows.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-3 py-10 text-center text-white/40">
+                  no endpoint alerts
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40">
+        Datto EDR alerts matched by user account or device name.
       </div>
     </div>
   );

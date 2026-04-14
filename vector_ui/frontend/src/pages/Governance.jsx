@@ -25,6 +25,7 @@ const TABS = [
   { id: "unmanagedDevices",  label: "Unmanaged Devices", endpoint: "govUnmanagedDevices",  severity: "review",   withTenant: false },
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
   { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
+  { id: "edrAlerts",         label: "EDR Alerts",        endpoint: "govEdrAlerts",         severity: "critical", withTenant: false },
 ];
 
 // GCS tenant -- hardcoded here because the Governance board is GCS-only and
@@ -270,6 +271,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
     case "guestUsers":        return <GuestUsersTable rows={rows} />;
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
+    case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
     case "aiActivity":
       // Handled above -- this branch is unreachable because TabPanel
       // short-circuits on tabId === "aiActivity" before the switch.
@@ -1778,6 +1780,87 @@ function DeviceDetailTable({ detail, loading }) {
         </table>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// EDR Alerts (Datto EDR / Infocyte)
+// ---------------------------------------------------------------------------
+
+// Map raw EDR severity strings (High/Medium/Low/Informational/…) onto our
+// governance severity pills. High folds into CRITICAL (red), Medium into
+// REVIEW REQUIRED (orange), everything else into MONITOR.
+function edrSeverityToPill(raw) {
+  const key = String(raw || "").trim().toLowerCase();
+  if (key === "high" || key === "critical") return "critical";
+  if (key === "medium" || key === "moderate") return "review";
+  return "monitor";
+}
+
+function EdrAlertsTable({ rows }) {
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>Host</Th>
+            <Th>User</Th>
+            <Th>Threat</Th>
+            <Th>Severity</Th>
+            <Th align="right">Count</Th>
+            <Th>Last Seen</Th>
+            <Th>Action</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row, idx) => {
+            const key = `${row.host_name || ""}|${row.user_account || ""}|${row.threat_name || ""}|${row.severity || ""}|${idx}`;
+            const actions = (row.actions || []).filter(Boolean);
+            return (
+              <tr key={key} className="hover:bg-white/[0.03]">
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
+                  title={row.host_name || ""}
+                >
+                  {row.host_name || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
+                  title={row.user_account || ""}
+                >
+                  {row.user_account || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[240px]"
+                  title={row.threat_name || ""}
+                >
+                  {row.threat_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5">
+                  <SeverityPill severity={edrSeverityToPill(row.severity)} />
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  {fmtNumber(row.alert_count)}
+                </td>
+                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                  {fmtRelative(row.last_seen)}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/60 truncate max-w-[200px]"
+                  title={actions.join(", ")}
+                >
+                  {actions.length > 0 ? (
+                    actions.join(", ")
+                  ) : (
+                    <span className="text-white/30">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
   );
 }
 
