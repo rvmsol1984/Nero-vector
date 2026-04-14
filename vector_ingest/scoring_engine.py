@@ -540,7 +540,7 @@ class ScoringEngine:
             """
             SELECT known_ips, login_countries, known_devices
             FROM vector_user_baselines
-            WHERE username ILIKE %s
+            WHERE user_id = %s
             """,
             (user_id,),
         ) or {}
