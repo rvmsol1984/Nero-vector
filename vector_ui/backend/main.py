@@ -18,7 +18,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -792,6 +792,174 @@ def ioc_matches_for_value(ioc_value: str) -> list[dict]:
         """,
         (ioc_value,),
     )
+
+
+# ============================================================================
+# incidents (Phase 2 scoring engine output)
+# ============================================================================
+
+_INCIDENT_STATUSES = {"open", "investigating", "contained", "closed"}
+
+
+@app.get("/api/incidents")
+def incidents_list(
+    status: str | None = Query(None),
+    severity: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+) -> list[dict]:
+    """Confirmed incidents produced by the Phase 2 scoring engine.
+
+    Ordered by newest-first so the Incidents page defaults to the
+    latest escalations. ``status`` and ``severity`` are optional
+    string filters.
+    """
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            user_id,
+            entity_key,
+            incident_type,
+            severity,
+            status,
+            score,
+            title,
+            summary,
+            patient_zero,
+            dwell_time_minutes,
+            first_seen,
+            last_seen,
+            confirmed_at,
+            contained_at,
+            evidence,
+            raw_signals,
+            created_at,
+            updated_at
+        FROM vector_incidents
+        WHERE (%s::text IS NULL OR status   = %s)
+          AND (%s::text IS NULL OR severity = %s)
+        ORDER BY confirmed_at DESC
+        LIMIT %s
+        """,
+        (status, status, severity, severity, limit),
+    )
+
+
+@app.get("/api/incidents/stats")
+def incidents_stats() -> dict:
+    """Aggregate counts for the Incidents page header cards."""
+    row = db.fetch_one(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'open')::bigint                                   AS open_count,
+            COUNT(*) FILTER (WHERE severity = 'critical' AND status = 'open')::bigint         AS critical,
+            COUNT(*) FILTER (WHERE severity = 'high'     AND status = 'open')::bigint         AS high,
+            COUNT(*) FILTER (WHERE confirmed_at > now() - INTERVAL '24 hours')::bigint        AS today,
+            COUNT(*)::bigint                                                                  AS total
+        FROM vector_incidents
+        """
+    ) or {}
+    return {
+        "open":     int(row.get("open_count") or 0),
+        "critical": int(row.get("critical")   or 0),
+        "high":     int(row.get("high")       or 0),
+        "today":    int(row.get("today")      or 0),
+        "total":    int(row.get("total")      or 0),
+    }
+
+
+@app.get("/api/incidents/{incident_id}")
+def incidents_detail(incident_id: str) -> dict:
+    """Full detail for one incident including its evidence blob and
+    any linked vector_incident_events rows the scoring engine
+    attached via create_incident()."""
+    row = db.fetch_one(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            user_id,
+            entity_key,
+            incident_type,
+            severity,
+            status,
+            score,
+            title,
+            summary,
+            patient_zero,
+            dwell_time_minutes,
+            first_seen,
+            last_seen,
+            confirmed_at,
+            contained_at,
+            evidence,
+            raw_signals,
+            created_at,
+            updated_at
+        FROM vector_incidents
+        WHERE id = %s
+        """,
+        (incident_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="incident not found")
+    row["events"] = db.fetch_all(
+        """
+        SELECT
+            id::text,
+            incident_id::text,
+            event_source,
+            event_id::text,
+            event_type,
+            timestamp,
+            significance,
+            raw_json,
+            added_at
+        FROM vector_incident_events
+        WHERE incident_id = %s
+        ORDER BY timestamp DESC
+        """,
+        (incident_id,),
+    )
+    return row
+
+
+@app.put("/api/incidents/{incident_id}/status")
+def incidents_update_status(
+    incident_id: str,
+    payload: dict = Body(...),
+) -> dict:
+    """Flip an incident's lifecycle status. Accepted values:
+    ``open``, ``investigating``, ``contained``, ``closed``. The
+    contained_at timestamp is auto-stamped on the first transition
+    to ``contained``."""
+    new_status = str((payload or {}).get("status") or "").strip().lower()
+    if new_status not in _INCIDENT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {sorted(_INCIDENT_STATUSES)}",
+        )
+    row = db.execute_returning(
+        """
+        UPDATE vector_incidents
+        SET
+            status       = %s,
+            updated_at   = now(),
+            contained_at = CASE
+                WHEN %s = 'contained' AND contained_at IS NULL THEN now()
+                ELSE contained_at
+            END
+        WHERE id = %s
+        RETURNING id::text, status, updated_at, contained_at
+        """,
+        (new_status, new_status, incident_id),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="incident not found")
+    return row
 
 
 # ============================================================================

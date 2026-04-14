@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import { api } from "../api.js";
 import { signOut, useAuth } from "../auth.jsx";
 import Logo from "./Logo.jsx";
-import { initialsFrom } from "../utils/format.js";
+import { fmtNumber, initialsFrom } from "../utils/format.js";
 
 // Responsive layout:
 //   desktop (>= 768px): fixed 220px sidebar on the left, 8 nav items
@@ -13,7 +14,7 @@ import { initialsFrom } from "../utils/format.js";
 
 const SIDEBAR_ITEMS = [
   { to: "/dashboard",  label: "Dashboard",  icon: "dashboard"  },
-  { to: "/incidents",  label: "Incidents",  icon: "alert",   phase2: true },
+  { to: "/incidents",  label: "Incidents",  icon: "alert"                       },
   { to: "/watchlist",  label: "Watchlist",  icon: "eye",     phase2: true },
   { to: "/events",     label: "Events",     icon: "events"     },
   { to: "/users",      label: "Users",      icon: "users"      },
@@ -146,11 +147,29 @@ function P2Badge() {
   );
 }
 
+function OpenIncidentsBadge({ count }) {
+  if (!count) return null;
+  return (
+    <span
+      className="inline-flex items-center justify-center px-1.5 py-0.5 text-[9px] font-bold rounded tracking-wider tabular-nums"
+      style={{
+        color: "#EF4444",
+        backgroundColor: "rgba(239,68,68,0.15)",
+        border: "1px solid rgba(239,68,68,0.45)",
+        minWidth: 18,
+      }}
+      title={`${count} open incident${count === 1 ? "" : "s"}`}
+    >
+      {fmtNumber(count)}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // sidebar body (shared between desktop sidebar + mobile drawer)
 // ---------------------------------------------------------------------------
 
-function SidebarBody({ onNavigate, showCloseButton, onClose }) {
+function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
   return (
     <>
       <div className="flex items-center justify-between px-5 py-5 border-b border-white/5">
@@ -193,7 +212,11 @@ function SidebarBody({ onNavigate, showCloseButton, onClose }) {
               <Icon name={item.icon} size={16} />
               <span>{item.label}</span>
             </span>
-            {item.phase2 && <P2Badge />}
+            {item.to === "/incidents" && openIncidents > 0 ? (
+              <OpenIncidentsBadge count={openIncidents} />
+            ) : item.phase2 ? (
+              <P2Badge />
+            ) : null}
           </NavLink>
         ))}
       </nav>
@@ -213,6 +236,7 @@ function SidebarBody({ onNavigate, showCloseButton, onClose }) {
 export default function Layout() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [openIncidents, setOpenIncidents] = useState(0);
   const location = useLocation();
   const user = useAuth();
 
@@ -221,6 +245,29 @@ export default function Layout() {
     setDrawerOpen(false);
     setUserMenuOpen(false);
   }, [location.pathname]);
+
+  // Poll the /api/incidents/stats endpoint every 30s so the sidebar
+  // badge stays in sync with newly-confirmed incidents without
+  // requiring a full page refresh. Auth failures are swallowed
+  // silently -- the badge just stays at its last known count.
+  useEffect(() => {
+    if (!user) return undefined;
+    let cancel = false;
+    async function load() {
+      try {
+        const stats = await api.incidentStats();
+        if (!cancel) setOpenIncidents(Number(stats?.open || 0));
+      } catch {
+        /* ignore -- keep last value */
+      }
+    }
+    load();
+    const t = setInterval(load, 30000);
+    return () => {
+      cancel = true;
+      clearInterval(t);
+    };
+  }, [user]);
 
   // Prevent page scroll while the drawer is open on mobile.
   useEffect(() => {
@@ -360,7 +407,7 @@ export default function Layout() {
             borderRight: "1px solid rgba(255,255,255,0.05)",
           }}
         >
-          <SidebarBody />
+          <SidebarBody openIncidents={openIncidents} />
         </aside>
 
         <main className="flex-1 overflow-auto pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-0">
@@ -420,6 +467,7 @@ export default function Layout() {
           onNavigate={() => setDrawerOpen(false)}
           showCloseButton
           onClose={() => setDrawerOpen(false)}
+          openIncidents={openIncidents}
         />
       </aside>
     </div>

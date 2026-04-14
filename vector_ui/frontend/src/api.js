@@ -25,6 +25,29 @@ async function get(path) {
   return res.json();
 }
 
+async function put(path, body) {
+  const token = getToken();
+  const res = await fetch(path, {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body == null ? undefined : JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    clearToken();
+    redirectToLogin();
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) {
+    throw new Error(`${path} -> ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
 function qs(params) {
   const sp = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
@@ -64,6 +87,14 @@ export const api = {
   // ----- IOC enrichment (OpenCTI) ---------------------------------------
   iocMatches:        (limit = 50) => get(`/api/ioc/matches${qs({ limit })}`),
   iocMatchesByValue: (value) => get(`/api/ioc/matches/${encodeURIComponent(value)}`),
+
+  // ----- incidents (Phase 2 scoring engine output) ----------------------
+  incidents:            ({ status, severity, limit = 50 } = {}) =>
+                          get(`/api/incidents${qs({ status, severity, limit })}`),
+  incidentStats:        () => get("/api/incidents/stats"),
+  incidentDetail:       (id) => get(`/api/incidents/${encodeURIComponent(id)}`),
+  updateIncidentStatus: (id, status) =>
+                          put(`/api/incidents/${encodeURIComponent(id)}/status`, { status }),
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
