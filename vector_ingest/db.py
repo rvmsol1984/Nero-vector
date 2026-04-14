@@ -136,22 +136,30 @@ class Database:
 
     def fetch_all(self, query: str, params=None) -> list:
         """Execute a query and return all rows as a list of dicts."""
-        with self.conn.cursor() as cur:
-            cur.execute(query, params or ())
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(query, params or ())
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:
+            self.conn.rollback()
+            raise
 
 
 
     def fetch_one(self, query: str, params=None):
         """Execute a query and return one row as a dict or None."""
-        with self.conn.cursor() as cur:
-            cur.execute(query, params or ())
-            row = cur.fetchone()
-            if row is None:
-                return None
-            cols = [d[0] for d in cur.description]
-            return dict(zip(cols, row))
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(query, params or ())
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return dict(zip(cols, row))
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # ------------------------------------------------------------------ migrations
     def run_migrations(self, migrations_dir: str | Path) -> None:

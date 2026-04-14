@@ -184,7 +184,7 @@ class BaselineEngine:
                 """
                 SELECT DISTINCT client_ip AS val
                 FROM vector_events
-                WHERE user_id = %s
+                WHERE username ILIKE %s
                   AND timestamp > now() - INTERVAL '14 days'
                   AND client_ip IS NOT NULL
                 """,
@@ -194,7 +194,7 @@ class BaselineEngine:
                 """
                 SELECT DISTINCT raw_json->>'Country' AS val
                 FROM vector_events
-                WHERE user_id = %s
+                WHERE username ILIKE %s
                   AND event_type = 'UserLoggedIn'
                   AND timestamp > now() - INTERVAL '14 days'
                   AND raw_json ? 'Country'
@@ -205,7 +205,7 @@ class BaselineEngine:
                 """
                 SELECT DISTINCT raw_json->>'DeviceName' AS val
                 FROM vector_events
-                WHERE user_id = %s
+                WHERE username ILIKE %s
                   AND timestamp > now() - INTERVAL '14 days'
                   AND raw_json ? 'DeviceName'
                 """,
@@ -540,7 +540,7 @@ class ScoringEngine:
             """
             SELECT known_ips, login_countries, known_devices
             FROM vector_user_baselines
-            WHERE user_id = %s
+            WHERE username ILIKE %s
             """,
             (user_id,),
         ) or {}
@@ -553,7 +553,7 @@ class ScoringEngine:
                 """
                 SELECT event_type, client_ip, raw_json, timestamp
                 FROM vector_events
-                WHERE user_id = %s
+                WHERE username ILIKE %s
                   AND timestamp > now() - INTERVAL '30 minutes'
                 """,
                 (user_id,),
@@ -625,7 +625,7 @@ class ScoringEngine:
                 tl = self.db.fetch_one(
                     """
                     SELECT id FROM vector_threatlocker_events
-                    WHERE user_id = %s
+                    WHERE username ILIKE %s
                       AND action ILIKE 'deny%%'
                       AND timestamp > now() - INTERVAL '30 minutes'
                     LIMIT 1
@@ -636,6 +636,7 @@ class ScoringEngine:
                 logger.exception(
                     "[scoring] threatlocker query failed for %s", user_id
                 )
+                self.db.conn.rollback()
                 tl = None
             if tl:
                 score += SIGNAL_WEIGHTS["threatlocker_deny"]
