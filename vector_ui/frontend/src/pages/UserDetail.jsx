@@ -396,6 +396,164 @@ function TimelineRow({ row }) {
   );
 }
 
+// ---- Endpoint (Datto EDR) ---------------------------------------------------
+//
+// Backed by /api/users/{entity_key}/edr which joins vector_edr_events to
+// the user via user_account OR via the device names touched by that user's
+// UAL events. Row click expands raw_json inline, same pattern as the
+// other tabs.
+
+const EDR_SEVERITY_COLORS = {
+  critical:      "#EF4444",
+  high:          "#EF4444",
+  medium:        "#F97316",
+  low:           "#EAB308",
+  informational: "rgba(255,255,255,0.5)",
+  info:          "rgba(255,255,255,0.5)",
+};
+
+function EdrSeverityPill({ severity }) {
+  if (!severity) return <span className="text-white/30">—</span>;
+  const key = String(severity).trim().toLowerCase();
+  const color = EDR_SEVERITY_COLORS[key] || "rgba(255,255,255,0.5)";
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {severity}
+    </span>
+  );
+}
+
+function EndpointTab({ entityKey }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => {
+    let cancel = false;
+    setLoading(true);
+    setErr(null);
+    api
+      .userEdr(entityKey, { limit: 100 })
+      .then((r) => {
+        if (!cancel) setRows(r || []);
+      })
+      .catch((e) => {
+        if (!cancel) setErr(e.message);
+      })
+      .finally(() => {
+        if (!cancel) setLoading(false);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [entityKey]);
+
+  if (loading) {
+    return (
+      <div className="card py-12 text-center text-white/40 text-sm">
+        loading…
+      </div>
+    );
+  }
+  if (err) {
+    return (
+      <div className="card border-critical/30 text-critical text-sm px-4 py-3">
+        load error: {err}
+      </div>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <div className="card py-10 text-center text-white/50 text-sm">
+        No EDR events for this user
+      </div>
+    );
+  }
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead>
+            <tr>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Type</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Severity</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Host</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Threat</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Process</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Action</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {rows.map((r) => {
+              const isOpen = expanded === r.id;
+              return (
+                <Fragment key={r.id}>
+                  <tr
+                    onClick={() =>
+                      setExpanded((prev) => (prev === r.id ? null : r.id))
+                    }
+                    className={`cursor-pointer ${
+                      isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"
+                    }`}
+                  >
+                    <td className="px-3 py-2 text-white/50 whitespace-nowrap tabular-nums">
+                      {fmtTime(r.timestamp)}
+                    </td>
+                    <td className="px-3 py-2">
+                      <EventTypeBadge type={r.event_type} workload="EDR" />
+                    </td>
+                    <td className="px-3 py-2">
+                      <EdrSeverityPill severity={r.severity} />
+                    </td>
+                    <td
+                      className="px-3 py-2 font-mono truncate max-w-[180px]"
+                      title={r.host_name || ""}
+                    >
+                      {r.host_name || <span className="text-white/30">—</span>}
+                    </td>
+                    <td
+                      className="px-3 py-2 text-white/80 truncate max-w-[220px]"
+                      title={r.threat_name || ""}
+                    >
+                      {r.threat_name || <span className="text-white/30">—</span>}
+                    </td>
+                    <td
+                      className="px-3 py-2 font-mono text-white/60 truncate max-w-[200px]"
+                      title={r.process_name || ""}
+                    >
+                      {r.process_name || <span className="text-white/30">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-white/60 whitespace-nowrap">
+                      {r.action_taken || <span className="text-white/30">—</span>}
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr className="bg-black/30">
+                      <td colSpan={7} className="px-3 py-3 border-t border-white/5 animate-slide-up">
+                        <JsonBlock data={r.raw_json} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ---- Email (Office 365 MessageTrace) ----------------------------------------
 //
 // Different shape from the other tabs: backed by vector_message_trace, not

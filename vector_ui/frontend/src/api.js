@@ -57,12 +57,20 @@ export const api = {
   userStats:   (entityKey) => get(`/api/users/${path(entityKey)}/stats`),
   userEmails:  (entityKey, { direction, search, limit = 50, offset = 0 } = {}) =>
                  get(`/api/users/${path(entityKey)}/emails${qs({ direction, search, limit, offset })}`),
-  userEdr:     (entityKey) => get(`/api/users/${path(entityKey)}/edr`),
+  userEdr:     (entityKey, { limit = 100 } = {}) =>
+                 get(`/api/users/${path(entityKey)}/edr${qs({ limit })}`),
+  userIoc:     (entityKey, { limit = 100 } = {}) =>
+                 get(`/api/users/${path(entityKey)}/ioc${qs({ limit })}`),
+
+  // ----- IOC matches (OpenCTI enrichment) -------------------------------
+  iocMatches:  ({ limit = 50, min_confidence } = {}) =>
+                 get(`/api/ioc/matches${qs({ limit, min_confidence })}`),
+  iocByValue:  (value) => get(`/api/ioc/matches/${encodeURIComponent(value)}`),
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
-  dashboardFeed: ({ ual_limit = 50, inky_limit = 20, edr_limit = 20 } = {}) =>
-    get(`/api/dashboard/feed${qs({ ual_limit, inky_limit, edr_limit })}`),
+  dashboardFeed: ({ ual_limit = 50, inky_limit = 20 } = {}) =>
+    get(`/api/dashboard/feed${qs({ ual_limit, inky_limit })}`),
   inkyCount:   () => get("/api/sources/inky-count"),
   edrCount:    () => get("/api/sources/edr-count"),
   watchlist:   (status) => get(`/api/watchlist${qs({ status })}`),

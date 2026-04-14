@@ -276,6 +276,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
       // Handled above -- this branch is unreachable because TabPanel
       // short-circuits on tabId === "aiActivity" before the switch.
       return null;
+    case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
     default: return null;
   }
 }
@@ -968,6 +969,127 @@ function Chevron({ open }) {
     >
       <polyline points="6 9 12 15 18 9" />
     </svg>
+  );
+}
+
+// ---- EDR Alerts tab --------------------------------------------------------
+
+const EDR_PILL_COLORS = {
+  critical:      "#EF4444",
+  high:          "#EF4444",
+  medium:        "#F97316",
+  low:           "#EAB308",
+  informational: "rgba(255,255,255,0.5)",
+  info:          "rgba(255,255,255,0.5)",
+};
+
+function EdrSeverityPill({ severity }) {
+  if (!severity) return <span className="text-white/30">—</span>;
+  const key = String(severity).trim().toLowerCase();
+  const color = EDR_PILL_COLORS[key] || "rgba(255,255,255,0.5)";
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {severity}
+    </span>
+  );
+}
+
+function edrRollupSeverity(row) {
+  const s = String(row.severity || "").trim().toLowerCase();
+  if (s === "high" || s === "critical") return "critical";
+  if (s === "medium") return "review";
+  return "monitor";
+}
+
+function EdrAlertsTable({ rows }) {
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>Host</Th>
+            <Th>User</Th>
+            <Th>Threat</Th>
+            <Th>Severity</Th>
+            <Th align="right">Alerts</Th>
+            <Th>Last Seen</Th>
+            <Th>Actions</Th>
+            <Th>Status</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row, i) => {
+            const entityKey =
+              row.user_account
+                ? `${GCS_TENANT_ID}::${row.user_account}`
+                : null;
+            const rollup = edrRollupSeverity(row);
+            return (
+              <tr
+                key={`${row.host_name}-${row.user_account}-${row.threat_name}-${row.severity}-${i}`}
+                className="hover:bg-white/[0.03]"
+              >
+                <td
+                  className="px-4 py-2.5 font-mono truncate max-w-[220px]"
+                  title={row.host_name || ""}
+                >
+                  {row.host_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5">
+                  {entityKey ? (
+                    <UserCell
+                      entityKey={entityKey}
+                      userId={row.user_account}
+                      clientName="GameChange Solar"
+                    />
+                  ) : (
+                    <span className="text-white/40 truncate">
+                      {row.user_account || "—"}
+                    </span>
+                  )}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[280px]"
+                  title={row.threat_name || ""}
+                >
+                  {row.threat_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5">
+                  <EdrSeverityPill severity={row.severity} />
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  {fmtNumber(row.alert_count)}
+                </td>
+                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                  {fmtRelative(row.last_seen)}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/60 truncate max-w-[220px]"
+                  title={(row.actions || []).join(", ")}
+                >
+                  {(row.actions || []).slice(0, 2).join(", ") || (
+                    <span className="text-white/30">—</span>
+                  )}
+                  {(row.actions || []).length > 2 && (
+                    <span className="text-white/30"> · +{row.actions.length - 2}</span>
+                  )}
+                </td>
+                <td className="px-4 py-2.5">
+                  <SeverityPill severity={rollup} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
   );
 }
 
