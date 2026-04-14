@@ -277,7 +277,7 @@ class BaselineEngine:
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, now()
                     )
-                    ON CONFLICT (user_id) DO UPDATE SET
+                    ON CONFLICT (tenant_id, user_id) DO UPDATE SET
                         tenant_id       = EXCLUDED.tenant_id,
                         client_name     = EXCLUDED.client_name,
                         known_ips       = EXCLUDED.known_ips,
