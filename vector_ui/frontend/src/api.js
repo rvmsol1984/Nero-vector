@@ -99,4 +99,10 @@ export const api = {
   govEdrAlerts:          () => get("/api/governance/edr-alerts"),
   govThreatLocker:       () => get("/api/governance/threatlocker"),
   govIocMatches:         () => get("/api/ioc/matches?limit=200"),
+
+  // ----- baseline ------------------------------------------------------
+  baselineStats:    () => get("/api/baseline/stats"),
+  baselineList:     ({ limit = 100, search = "" } = {}) =>
+                      get(`/api/baseline/list${qs({ limit, search })}`),
+  baselineDetail:   (entityKey) => get(`/api/baseline/${path(entityKey)}`),
 };
