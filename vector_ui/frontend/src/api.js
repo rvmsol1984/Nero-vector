@@ -57,12 +57,15 @@ export const api = {
   userStats:   (entityKey) => get(`/api/users/${path(entityKey)}/stats`),
   userEmails:  (entityKey, { direction, search, limit = 50, offset = 0 } = {}) =>
                  get(`/api/users/${path(entityKey)}/emails${qs({ direction, search, limit, offset })}`),
+  userEdr:     (entityKey, { limit = 100 } = {}) =>
+                 get(`/api/users/${path(entityKey)}/edr${qs({ limit })}`),
 
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
   dashboardFeed: ({ ual_limit = 50, inky_limit = 20 } = {}) =>
     get(`/api/dashboard/feed${qs({ ual_limit, inky_limit })}`),
   inkyCount:   () => get("/api/sources/inky-count"),
+  edrCount:    () => get("/api/sources/edr-count"),
   watchlist:   (status) => get(`/api/watchlist${qs({ status })}`),
 
   // ----- governance -----------------------------------------------------
@@ -88,4 +91,5 @@ export const api = {
   govMfaChanges:         () => get("/api/governance/mfa-changes"),
   govPrivilegedRoles:    () => get("/api/governance/privileged-roles"),
   govGuestUsers:         () => get("/api/governance/guest-users"),
+  govEdrAlerts:          () => get("/api/governance/edr-alerts"),
 };

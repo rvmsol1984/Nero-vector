@@ -471,8 +471,58 @@ def _fetch_inky_feed_rows(limit: int) -> list[dict]:
     )
 
 
-def _merge_feed(ual_rows: list[dict], inky_rows: list[dict]) -> list[dict]:
-    combined = list(ual_rows or []) + list(inky_rows or [])
+def _fetch_edr_feed_rows(limit: int) -> list[dict]:
+    """EDR alert rows projected into the shared feed shape.
+
+    ``user_id`` is set to ``user_account`` when available and the
+    entity key is synthesised as ``tenant_id::user_account`` so the
+    dashboard can still deep-link to user detail. ``workload`` is
+    hard-coded ``"EDR"``, ``result_status`` carries ``action_taken``
+    for the status pill, and the host / threat fields ride through
+    as extras the frontend uses to render the orange alert card.
+    """
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            'edr'::text      AS kind,
+            'edr'::text      AS source,
+            timestamp,
+            client_name,
+            tenant_id,
+            user_account     AS user_id,
+            CASE
+                WHEN tenant_id IS NOT NULL AND user_account IS NOT NULL
+                THEN tenant_id || '::' || user_account
+                ELSE NULL
+            END              AS entity_key,
+            event_type,
+            'EDR'::text      AS workload,
+            action_taken     AS result_status,
+            host_ip          AS client_ip,
+            NULL::text       AS subject,
+            NULL::text       AS sender,
+            NULL::text       AS verdict,
+            NULL::boolean    AS aitm_detected,
+            host_name,
+            threat_name,
+            severity,
+            action_taken,
+            process_name
+        FROM vector_edr_events
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+
+
+def _merge_feed(
+    ual_rows: list[dict],
+    inky_rows: list[dict],
+    edr_rows: list[dict] | None = None,
+) -> list[dict]:
+    combined = list(ual_rows or []) + list(inky_rows or []) + list(edr_rows or [])
     combined.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
     return combined
 
@@ -480,10 +530,11 @@ def _merge_feed(ual_rows: list[dict], inky_rows: list[dict]) -> list[dict]:
 @app.get("/api/feed/recent")
 def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
     """Original combined feed used by the v0.1 dashboard -- balanced
-    split between UAL and INKY rows."""
+    split between UAL, INKY, and EDR rows."""
     combined = _merge_feed(
         _fetch_ual_feed_rows(limit),
         _fetch_inky_feed_rows(min(limit, 20)),
+        _fetch_edr_feed_rows(min(limit, 20)),
     )
     return combined[:limit]
 
@@ -492,14 +543,17 @@ def feed_recent(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
 def dashboard_feed(
     ual_limit: int = Query(50, ge=1, le=500),
     inky_limit: int = Query(20, ge=0, le=200),
+    edr_limit: int = Query(20, ge=0, le=200),
 ) -> list[dict]:
     """Dashboard feed -- pulls the last 50 UAL events plus the last 20
-    INKY events and returns them merged and timestamp-sorted. Each row
-    carries a ``source`` field ("ual" | "inky") that the frontend uses
-    to pick the card treatment."""
+    INKY events plus the last 20 EDR alerts and returns them merged
+    and timestamp-sorted. Each row carries a ``source`` field
+    ("ual" | "inky" | "edr") the frontend uses to pick the card
+    treatment."""
     return _merge_feed(
         _fetch_ual_feed_rows(ual_limit),
         _fetch_inky_feed_rows(inky_limit),
+        _fetch_edr_feed_rows(edr_limit),
     )
 
 
@@ -527,6 +581,81 @@ def sources_inky_count() -> dict:
         "count":      int(total_row.get("count") or 0),
         "by_verdict": by_verdict,
     }
+
+
+@app.get("/api/sources/edr-count")
+def sources_edr_count() -> dict:
+    """Total EDR events in vector_edr_events plus a per-severity
+    breakdown for the Sources page card."""
+    total_row = db.fetch_one(
+        "SELECT COUNT(*)::bigint AS count FROM vector_edr_events"
+    ) or {}
+    by_severity = db.fetch_all(
+        """
+        SELECT severity, COUNT(*)::bigint AS count
+        FROM vector_edr_events
+        GROUP BY severity
+        ORDER BY count DESC
+        """
+    )
+    return {
+        "count":       int(total_row.get("count") or 0),
+        "by_severity": by_severity,
+    }
+
+
+# ============================================================================
+# Per-user EDR events (used by the UserDetail "Endpoint" tab)
+# ============================================================================
+
+@app.get("/api/users/{entity_key}/edr")
+def user_edr(entity_key: str, limit: int = Query(100, ge=1, le=500)) -> list[dict]:
+    """Datto EDR alerts for a single user.
+
+    Matches via two join keys:
+      (a) vector_edr_events.user_account = <email>  (case-insensitive)
+      (b) vector_edr_events.host_name IN (
+            SELECT raw_json->>'DeviceName' FROM vector_events
+            WHERE user_id = <email> AND raw_json ? 'DeviceName'
+          )
+
+    so a user is surfaced even if the EDR alert didn't carry the UPN
+    directly, as long as the device name ties back to their UAL
+    events.
+    """
+    email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            event_type,
+            severity,
+            host_name,
+            host_ip,
+            user_account,
+            process_name,
+            process_path,
+            command_line,
+            threat_name,
+            threat_score,
+            action_taken,
+            timestamp,
+            raw_json
+        FROM vector_edr_events
+        WHERE LOWER(user_account) = LOWER(%s)
+           OR LOWER(host_name) IN (
+                SELECT DISTINCT LOWER(raw_json->>'DeviceName')
+                FROM vector_events
+                WHERE user_id = %s
+                  AND raw_json ? 'DeviceName'
+           )
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (email, email, limit),
+    )
 
 
 # ============================================================================
@@ -994,6 +1123,34 @@ def governance_broken_inheritance() -> list[dict]:
         LIMIT 100
         """,
         (_GCS,),
+    )
+
+
+@app.get("/api/governance/edr-alerts")
+def governance_edr_alerts(tenant: str | None = Query(None)) -> list[dict]:
+    """Datto EDR alerts rolled up by host + user + threat + severity."""
+    tenant_filter = tenant or _GCS
+    return db.fetch_all(
+        """
+        SELECT
+            host_name,
+            user_account,
+            threat_name,
+            severity,
+            COUNT(*)::bigint AS alert_count,
+            MAX(timestamp)   AS last_seen,
+            COALESCE(
+                array_agg(DISTINCT action_taken)
+                    FILTER (WHERE action_taken IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS actions
+        FROM vector_edr_events
+        WHERE (%s::text IS NULL OR client_name = %s)
+        GROUP BY host_name, user_account, threat_name, severity
+        ORDER BY alert_count DESC
+        LIMIT 200
+        """,
+        (tenant_filter, tenant_filter),
     )
 
 

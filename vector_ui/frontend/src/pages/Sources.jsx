@@ -1,6 +1,10 @@
 // Hardcoded source catalogue for the v0.1 build. Each entry drives a card
-// with a status ring + label + description. Once connectors expose real
-// health checks this should move onto /api/sources.
+// with a status ring + label + description. Event counts for live webhook
+// sources (INKY, Datto EDR) are pulled from /api/sources/*-count on mount.
+
+import { useEffect, useState } from "react";
+
+import { api } from "../api.js";
 
 const SOURCES = [
   {
@@ -28,15 +32,17 @@ const SOURCES = [
     name: "INKY MailShield",
     status: "live",
     label: "LIVE",
+    countKey: "inky",
     description:
       "Inbound email threat verdicts and AiTM phishing detection. SIEM webhook active — Danger verdicts trigger watchlist correlation windows.",
   },
   {
     name: "Datto EDR",
-    status: "pending",
-    label: "PENDING",
+    status: "live",
+    label: "LIVE",
+    countKey: "edr",
     description:
-      "Endpoint behavioral telemetry. Webhook receiver active — awaiting first event from Infocyte.",
+      "Endpoint behavioral telemetry and threat detections. Webhook active — receiving alerts from Infocyte.",
   },
   {
     name: "ThreatLocker",
@@ -115,7 +121,32 @@ function StatusRing({ color }) {
   );
 }
 
+function fmtCount(n) {
+  return Number(n || 0).toLocaleString("en-US");
+}
+
 export default function Sources() {
+  const [counts, setCounts] = useState({ inky: null, edr: null });
+
+  useEffect(() => {
+    let cancel = false;
+    api
+      .inkyCount()
+      .then((r) => {
+        if (!cancel && r) setCounts((c) => ({ ...c, inky: r.count ?? 0 }));
+      })
+      .catch(() => {});
+    api
+      .edrCount()
+      .then((r) => {
+        if (!cancel && r) setCounts((c) => ({ ...c, edr: r.count ?? 0 }));
+      })
+      .catch(() => {});
+    return () => {
+      cancel = true;
+    };
+  }, []);
+
   return (
     <div className="space-y-5 animate-fade-in">
       <div>
@@ -128,6 +159,7 @@ export default function Sources() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {SOURCES.map((s) => {
           const color = COLOR[s.status] || COLOR.passthrough;
+          const count = s.countKey ? counts[s.countKey] : null;
           return (
             <div key={s.name} className="card p-5 flex items-start gap-4">
               <StatusRing color={color} />
@@ -139,6 +171,11 @@ export default function Sources() {
                 >
                   {s.label}
                 </div>
+                {count !== null && count !== undefined && (
+                  <div className="text-[10px] text-white/50 mt-1 tabular-nums">
+                    {fmtCount(count)} events received
+                  </div>
+                )}
                 <div className="text-sm text-white/60 mt-3 leading-relaxed">
                   {s.description}
                 </div>
