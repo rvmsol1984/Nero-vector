@@ -25,29 +25,6 @@ async function get(path) {
   return res.json();
 }
 
-async function put(path, body) {
-  const token = getToken();
-  const res = await fetch(path, {
-    method: "PUT",
-    credentials: "same-origin",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: body == null ? undefined : JSON.stringify(body),
-  });
-  if (res.status === 401) {
-    clearToken();
-    redirectToLogin();
-    throw new Error("unauthorized");
-  }
-  if (!res.ok) {
-    throw new Error(`${path} -> ${res.status} ${res.statusText}`);
-  }
-  return res.json();
-}
-
 function qs(params) {
   const sp = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
@@ -88,14 +65,6 @@ export const api = {
   iocMatches:        (limit = 50) => get(`/api/ioc/matches${qs({ limit })}`),
   iocMatchesByValue: (value) => get(`/api/ioc/matches/${encodeURIComponent(value)}`),
 
-  // ----- incidents (Phase 2 scoring engine output) ----------------------
-  incidents:            ({ status, severity, limit = 50 } = {}) =>
-                          get(`/api/incidents${qs({ status, severity, limit })}`),
-  incidentStats:        () => get("/api/incidents/stats"),
-  incidentDetail:       (id) => get(`/api/incidents/${encodeURIComponent(id)}`),
-  updateIncidentStatus: (id, status) =>
-                          put(`/api/incidents/${encodeURIComponent(id)}/status`, { status }),
-
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
   dashboardFeed: ({ ual_limit = 50, inky_limit = 20, edr_limit = 20 } = {}) =>
@@ -128,14 +97,6 @@ export const api = {
   govPrivilegedRoles:    () => get("/api/governance/privileged-roles"),
   govGuestUsers:         () => get("/api/governance/guest-users"),
   govEdrAlerts:          () => get("/api/governance/edr-alerts"),
-  govEdrAlertsEvents:    ({ hostname, username, threat_name, severity, limit = 10 } = {}) =>
-    get(`/api/governance/edr-alerts/events${qs({ hostname, username, threat_name, severity, limit })}`),
   govThreatLocker:       () => get("/api/governance/threatlocker"),
-  govThreatLockerEvents: ({ hostname, username, action, action_type, policy_name, limit = 10 } = {}) =>
-    get(`/api/governance/threatlocker/events${qs({ hostname, username, action, action_type, policy_name, limit })}`),
-  govEventsByIp:         ({ ip, event_type, limit = 10 } = {}) =>
-    get(`/api/governance/events/by-ip${qs({ ip, event_type, limit })}`),
-  govOauthAppsEvents:    (appId, limit = 10) =>
-    get(`/api/governance/oauth-apps/${encodeURIComponent(appId)}/events${qs({ limit })}`),
   govIocMatches:         () => get("/api/ioc/matches?limit=200"),
 };
