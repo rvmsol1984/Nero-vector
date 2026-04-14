@@ -8,6 +8,7 @@ import Dashboard from "./pages/Dashboard.jsx";
 import Events from "./pages/Events.jsx";
 import Users from "./pages/Users.jsx";
 import UserDetail from "./pages/UserDetail.jsx";
+import Baseline from "./pages/Baseline.jsx";
 import Governance from "./pages/Governance.jsx";
 import Sources from "./pages/Sources.jsx";
 import Watchlist from "./pages/Watchlist.jsx";
@@ -29,7 +30,7 @@ export default function App() {
           <Route path="/users/:entityKey" element={<UserDetail />} />
           <Route
             path="/baseline"
-            element={<Navigate to="/incidents" replace />}
+            element={<Baseline />}
           />
           <Route path="/governance"       element={<Governance />} />
           <Route path="/sources"          element={<Sources />} />
