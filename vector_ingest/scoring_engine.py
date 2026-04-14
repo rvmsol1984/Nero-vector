@@ -553,7 +553,7 @@ class ScoringEngine:
                 """
                 SELECT event_type, client_ip, raw_json, timestamp
                 FROM vector_events
-                WHERE username ILIKE %s
+                WHERE user_id = %s
                   AND timestamp > now() - INTERVAL '30 minutes'
                 """,
                 (user_id,),
