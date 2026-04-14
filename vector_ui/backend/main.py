@@ -617,24 +617,30 @@ def ioc_matches(
     limit: int = Query(50, ge=1, le=500),
     min_confidence: int = Query(0, ge=0, le=100),
 ) -> list[dict]:
-    """Recent IOC matches from the OpenCTI enricher."""
+    """Recent IOC matches from the OpenCTI enricher. user_id /
+    entity_key are joined in from vector_events via
+    matched_event_id so the frontend can deep-link to user detail
+    for the user whose event triggered the match."""
     return db.fetch_all(
         """
         SELECT
-            id::text,
-            tenant_id,
-            client_name,
-            ioc_type,
-            ioc_value,
-            opencti_id,
-            indicator_name,
-            confidence,
-            matched_event_id::text,
-            matched_at,
-            raw_json
-        FROM vector_ioc_matches
-        WHERE confidence >= %s
-        ORDER BY matched_at DESC
+            m.id::text,
+            m.tenant_id,
+            m.client_name,
+            m.ioc_type,
+            m.ioc_value,
+            m.opencti_id,
+            m.indicator_name,
+            m.confidence,
+            m.matched_event_id::text,
+            m.matched_at,
+            m.raw_json,
+            ve.user_id,
+            ve.entity_key
+        FROM vector_ioc_matches m
+        LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
+        WHERE m.confidence >= %s
+        ORDER BY m.matched_at DESC
         LIMIT %s
         """,
         (min_confidence, limit),
@@ -647,20 +653,23 @@ def ioc_matches_by_value(ioc_value: str) -> list[dict]:
     return db.fetch_all(
         """
         SELECT
-            id::text,
-            tenant_id,
-            client_name,
-            ioc_type,
-            ioc_value,
-            opencti_id,
-            indicator_name,
-            confidence,
-            matched_event_id::text,
-            matched_at,
-            raw_json
-        FROM vector_ioc_matches
-        WHERE LOWER(ioc_value) = LOWER(%s)
-        ORDER BY matched_at DESC
+            m.id::text,
+            m.tenant_id,
+            m.client_name,
+            m.ioc_type,
+            m.ioc_value,
+            m.opencti_id,
+            m.indicator_name,
+            m.confidence,
+            m.matched_event_id::text,
+            m.matched_at,
+            m.raw_json,
+            ve.user_id,
+            ve.entity_key
+        FROM vector_ioc_matches m
+        LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
+        WHERE LOWER(m.ioc_value) = LOWER(%s)
+        ORDER BY m.matched_at DESC
         LIMIT 200
         """,
         (ioc_value,),
