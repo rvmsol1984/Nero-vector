@@ -89,12 +89,12 @@ def _looks_like_sha256(value: str) -> bool:
 # different entity type. OpenCTI is flexible about which filter key it
 # accepts ("value" works for observables across types).
 
-_GQL_QUERY = """
-query ($value: String!) {
+_GQL_QUERY_TMPL = """
+query {
   stixCyberObservables(
     filters: {
       mode: and
-      filters: [{ key: "value", values: [$value] }]
+      filters: [{ key: "value", values: ["%s"] }]
       filterGroups: []
     }
   ) {
@@ -188,7 +188,7 @@ class IocEnricher:
             resp = self._session.post(
                 self._url,
                 headers=self._headers(),
-                json={"query": _GQL_QUERY, "variables": {"value": value}},
+                json={"query": _GQL_QUERY_TMPL % value},
                 timeout=15,
             )
         except requests.RequestException as exc:
@@ -278,31 +278,44 @@ class IocEnricher:
         now_window = datetime.now(timezone.utc) - LOOKBACK_WINDOW
 
         # IPs + sender emails from vector_events.
-        ip_and_email_rows = self.db.fetch_all(
-            """
-            SELECT id, tenant_id, client_name, client_ip,
-                   raw_json->>'SenderFromAddress' AS sender_email
-            FROM vector_events
-            WHERE timestamp >= %s
-              AND (
-                client_ip IS NOT NULL
-                OR raw_json ? 'SenderFromAddress'
-              )
-            """,
-            (now_window,),
-        )
+        with self.db.conn.cursor() as _cur:
+            _cur.execute(
+                """
+                SELECT id, tenant_id, client_name, client_ip,
+                       raw_json->>'SenderFromAddress' AS sender_email
+                FROM vector_events
+                WHERE timestamp >= %s
+                  AND (
+                    client_ip IS NOT NULL
+                    OR raw_json ? 'SenderFromAddress'
+                  )
+                """,
+                (now_window,),
+            )
+            ip_and_email_rows = _cur.fetchall()
+            ip_and_email_rows = [
+                {"id": r[0], "tenant_id": r[1], "client_name": r[2],
+                 "client_ip": r[3], "sender_email": r[4]}
+                for r in ip_and_email_rows
+            ]
 
         # SHA256 hashes from defender hunting results.
-        hash_rows = self.db.fetch_all(
-            """
-            SELECT id, tenant_id, client_name,
-                   raw_json->>'SHA256' AS sha256
-            FROM vector_defender_hunting
-            WHERE timestamp >= %s
-              AND raw_json ? 'SHA256'
-            """,
-            (now_window,),
-        )
+        with self.db.conn.cursor() as _cur2:
+            _cur2.execute(
+                """
+                SELECT id, tenant_id, client_name,
+                       raw_json->>'SHA256' AS sha256
+                FROM vector_defender_hunting
+                WHERE timestamp >= %s
+                  AND raw_json ? 'SHA256'
+                """,
+                (now_window,),
+            )
+            hash_rows = _cur2.fetchall()
+            hash_rows = [
+                {"id": r[0], "tenant_id": r[1], "client_name": r[2], "sha256": r[3]}
+                for r in hash_rows
+            ]
 
         seen: set[tuple[str, str]] = set()
         out: list[dict] = []
