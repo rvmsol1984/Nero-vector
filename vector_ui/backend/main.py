@@ -18,7 +18,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -795,6 +795,174 @@ def ioc_matches_for_value(ioc_value: str) -> list[dict]:
 
 
 # ============================================================================
+# incidents (Phase 2 scoring engine output)
+# ============================================================================
+
+_INCIDENT_STATUSES = {"open", "investigating", "contained", "closed"}
+
+
+@app.get("/api/incidents")
+def incidents_list(
+    status: str | None = Query(None),
+    severity: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+) -> list[dict]:
+    """Confirmed incidents produced by the Phase 2 scoring engine.
+
+    Ordered by newest-first so the Incidents page defaults to the
+    latest escalations. ``status`` and ``severity`` are optional
+    string filters.
+    """
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            user_id,
+            entity_key,
+            incident_type,
+            severity,
+            status,
+            score,
+            title,
+            summary,
+            patient_zero,
+            dwell_time_minutes,
+            first_seen,
+            last_seen,
+            confirmed_at,
+            contained_at,
+            evidence,
+            raw_signals,
+            created_at,
+            updated_at
+        FROM vector_incidents
+        WHERE (%s::text IS NULL OR status   = %s)
+          AND (%s::text IS NULL OR severity = %s)
+        ORDER BY confirmed_at DESC
+        LIMIT %s
+        """,
+        (status, status, severity, severity, limit),
+    )
+
+
+@app.get("/api/incidents/stats")
+def incidents_stats() -> dict:
+    """Aggregate counts for the Incidents page header cards."""
+    row = db.fetch_one(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'open')::bigint                                   AS open_count,
+            COUNT(*) FILTER (WHERE severity = 'critical' AND status = 'open')::bigint         AS critical,
+            COUNT(*) FILTER (WHERE severity = 'high'     AND status = 'open')::bigint         AS high,
+            COUNT(*) FILTER (WHERE confirmed_at > now() - INTERVAL '24 hours')::bigint        AS today,
+            COUNT(*)::bigint                                                                  AS total
+        FROM vector_incidents
+        """
+    ) or {}
+    return {
+        "open":     int(row.get("open_count") or 0),
+        "critical": int(row.get("critical")   or 0),
+        "high":     int(row.get("high")       or 0),
+        "today":    int(row.get("today")      or 0),
+        "total":    int(row.get("total")      or 0),
+    }
+
+
+@app.get("/api/incidents/{incident_id}")
+def incidents_detail(incident_id: str) -> dict:
+    """Full detail for one incident including its evidence blob and
+    any linked vector_incident_events rows the scoring engine
+    attached via create_incident()."""
+    row = db.fetch_one(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            user_id,
+            entity_key,
+            incident_type,
+            severity,
+            status,
+            score,
+            title,
+            summary,
+            patient_zero,
+            dwell_time_minutes,
+            first_seen,
+            last_seen,
+            confirmed_at,
+            contained_at,
+            evidence,
+            raw_signals,
+            created_at,
+            updated_at
+        FROM vector_incidents
+        WHERE id = %s
+        """,
+        (incident_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="incident not found")
+    row["events"] = db.fetch_all(
+        """
+        SELECT
+            id::text,
+            incident_id::text,
+            event_source,
+            event_id::text,
+            event_type,
+            timestamp,
+            significance,
+            raw_json,
+            added_at
+        FROM vector_incident_events
+        WHERE incident_id = %s
+        ORDER BY timestamp DESC
+        """,
+        (incident_id,),
+    )
+    return row
+
+
+@app.put("/api/incidents/{incident_id}/status")
+def incidents_update_status(
+    incident_id: str,
+    payload: dict = Body(...),
+) -> dict:
+    """Flip an incident's lifecycle status. Accepted values:
+    ``open``, ``investigating``, ``contained``, ``closed``. The
+    contained_at timestamp is auto-stamped on the first transition
+    to ``contained``."""
+    new_status = str((payload or {}).get("status") or "").strip().lower()
+    if new_status not in _INCIDENT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {sorted(_INCIDENT_STATUSES)}",
+        )
+    row = db.execute_returning(
+        """
+        UPDATE vector_incidents
+        SET
+            status       = %s,
+            updated_at   = now(),
+            contained_at = CASE
+                WHEN %s = 'contained' AND contained_at IS NULL THEN now()
+                ELSE contained_at
+            END
+        WHERE id = %s
+        RETURNING id::text, status, updated_at, contained_at
+        """,
+        (new_status, new_status, incident_id),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="incident not found")
+    return row
+
+
+# ============================================================================
 # watchlist (active INKY correlation pins)
 # ============================================================================
 
@@ -964,6 +1132,55 @@ def governance_threatlocker() -> list[dict]:
     )
 
 
+@app.get("/api/governance/threatlocker/events")
+def governance_threatlocker_events(
+    hostname: str | None = Query(None),
+    username: str | None = Query(None),
+    action: str | None = Query(None),
+    action_type: str | None = Query(None),
+    policy_name: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Raw ThreatLocker ActionLog rows filtered to one governance
+    aggregation cell. Used by the Governance ThreatLocker tab's
+    in-place row expand."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            event_time,
+            hostname,
+            username,
+            full_path,
+            process_path,
+            action_type,
+            action,
+            action_id,
+            policy_name,
+            hash,
+            raw_json
+        FROM vector_threatlocker_events
+        WHERE client_name = %s
+          AND (%s::text IS NULL OR hostname    = %s)
+          AND (%s::text IS NULL OR username    = %s)
+          AND (%s::text IS NULL OR action      = %s)
+          AND (%s::text IS NULL OR action_type = %s)
+          AND (%s::text IS NULL OR policy_name = %s)
+        ORDER BY event_time DESC
+        LIMIT %s
+        """,
+        (
+            _GCS,
+            hostname, hostname,
+            username, username,
+            action, action,
+            action_type, action_type,
+            policy_name, policy_name,
+            limit,
+        ),
+    )
+
+
 @app.get("/api/governance/edr-alerts")
 def governance_edr_alerts() -> list[dict]:
     """Datto EDR alerts aggregated by (host, user, threat, severity)."""
@@ -988,6 +1205,116 @@ def governance_edr_alerts() -> list[dict]:
         LIMIT 200
         """,
         (_GCS,),
+    )
+
+
+@app.get("/api/governance/edr-alerts/events")
+def governance_edr_alerts_events(
+    hostname: str | None = Query(None),
+    username: str | None = Query(None),
+    threat_name: str | None = Query(None),
+    severity: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Raw EDR events filtered to one governance aggregation cell.
+    Used by the Governance EDR Alerts tab's in-place row expand."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            timestamp,
+            event_type,
+            severity,
+            host_name,
+            host_ip,
+            user_account,
+            process_name,
+            process_path,
+            threat_name,
+            threat_score,
+            action_taken,
+            raw_json
+        FROM vector_edr_events
+        WHERE client_name = %s
+          AND (%s::text IS NULL OR host_name    = %s)
+          AND (%s::text IS NULL OR user_account = %s)
+          AND (%s::text IS NULL OR threat_name  = %s)
+          AND (%s::text IS NULL OR severity     = %s)
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (
+            _GCS,
+            hostname, hostname,
+            username, username,
+            threat_name, threat_name,
+            severity, severity,
+            limit,
+        ),
+    )
+
+
+@app.get("/api/governance/events/by-ip")
+def governance_events_by_ip(
+    ip: str = Query(..., description="client_ip to filter on"),
+    event_type: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Recent UAL rows by source IP. Backs the Password Spray row
+    expand so an operator can see which users the source IP actually
+    hit without leaving the governance tab."""
+    return db.fetch_all(
+        """
+        SELECT id::text,
+               timestamp,
+               client_name,
+               tenant_id,
+               user_id,
+               entity_key,
+               event_type,
+               workload,
+               result_status,
+               client_ip
+        FROM vector_events
+        WHERE client_ip = %s
+          AND (%s::text IS NULL OR event_type = %s)
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (ip, event_type, event_type, limit),
+    )
+
+
+@app.get("/api/governance/oauth-apps/{app_id}/events")
+def governance_oauth_apps_events(
+    app_id: str,
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Recent 'Consent to application.' rows for a single OAuth app.
+    Matches the `ObjectId` value used by the governance aggregate so
+    expanding a row on the OAuth Apps tab renders the actual consent
+    audit log for that specific application."""
+    return db.fetch_all(
+        """
+        SELECT id::text,
+               timestamp,
+               client_name,
+               tenant_id,
+               user_id,
+               entity_key,
+               event_type,
+               workload,
+               result_status,
+               client_ip,
+               raw_json
+        FROM vector_events
+        WHERE event_type = 'Consent to application.'
+          AND client_name = %s
+          AND COALESCE(raw_json->>'ObjectId', '') = %s
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (_GCS, app_id, limit),
     )
 
 
