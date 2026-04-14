@@ -2,7 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AuthProvider } from "./auth.jsx";
 import Layout from "./components/Layout.jsx";
-import Placeholder from "./components/Placeholder.jsx";
+import Baseline from "./pages/Baseline.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Events from "./pages/Events.jsx";
 import Incidents from "./pages/Incidents.jsx";
@@ -24,10 +24,7 @@ export default function App() {
           <Route path="/events"           element={<Events />} />
           <Route path="/users"            element={<Users />} />
           <Route path="/users/:entityKey" element={<UserDetail />} />
-          <Route
-            path="/baseline"
-            element={<Placeholder message="Behavioral baseline engine — Phase 2" />}
-          />
+          <Route path="/baseline" element={<Baseline />} />
           <Route path="/governance"       element={<Governance />} />
           <Route path="/sources"          element={<Sources />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

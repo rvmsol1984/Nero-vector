@@ -963,6 +963,157 @@ def incidents_update_status(
 
 
 # ============================================================================
+# baseline profiles (Phase 2 scoring engine input)
+# ============================================================================
+
+@app.get("/api/baseline/stats")
+def baseline_stats() -> dict:
+    """Aggregate header card counts for the Baseline page.
+
+    ``login_countries`` is stored as a JSONB object
+    (``{"US": 42, ...}``) by the scoring engine's BaselineEngine, so
+    we count its keys instead of its array length. ``known_ips`` is
+    a flat JSONB array.
+    """
+    row = db.fetch_one(
+        """
+        SELECT
+            COUNT(*)::bigint                                                 AS total_baselines,
+            COUNT(*) FILTER (WHERE computed_at > now() - INTERVAL '1 hour')::bigint AS fresh,
+            MAX(computed_at)                                                 AS last_computed,
+            AVG(
+                CASE
+                    WHEN jsonb_typeof(known_ips) = 'array'
+                    THEN jsonb_array_length(known_ips)
+                    ELSE 0
+                END
+            )::float                                                         AS avg_known_ips,
+            AVG(
+                CASE
+                    WHEN jsonb_typeof(login_countries) = 'object'
+                    THEN (SELECT COUNT(*) FROM jsonb_object_keys(login_countries))
+                    WHEN jsonb_typeof(login_countries) = 'array'
+                    THEN jsonb_array_length(login_countries)
+                    ELSE 0
+                END
+            )::float                                                         AS avg_countries
+        FROM vector_user_baselines
+        """
+    ) or {}
+    return {
+        "total_baselines": int(row.get("total_baselines") or 0),
+        "fresh":           int(row.get("fresh")           or 0),
+        "last_computed":   row.get("last_computed"),
+        "avg_known_ips":   float(row.get("avg_known_ips")  or 0),
+        "avg_countries":   float(row.get("avg_countries")  or 0),
+    }
+
+
+@app.get("/api/baseline/list")
+def baseline_list(
+    limit: int = Query(50, ge=1, le=500),
+    search: str | None = Query(None),
+) -> list[dict]:
+    """Baseline rows for the Baseline page table. ``search`` is a
+    substring match against ``user_id``; empty/missing returns every
+    row. Returns the full JSONB blobs for ``known_ips``,
+    ``login_countries`` and ``known_devices`` so the expand panel
+    can render them without a second round-trip.
+    """
+    s = (search or "").strip() or None
+    return db.fetch_all(
+        """
+        SELECT
+            user_id,
+            tenant_id,
+            computed_at,
+            CASE
+                WHEN jsonb_typeof(known_ips) = 'array'
+                THEN jsonb_array_length(known_ips)
+                ELSE 0
+            END                                                              AS ip_count,
+            CASE
+                WHEN jsonb_typeof(login_countries) = 'object'
+                THEN (SELECT COUNT(*)::int FROM jsonb_object_keys(login_countries))
+                WHEN jsonb_typeof(login_countries) = 'array'
+                THEN jsonb_array_length(login_countries)
+                ELSE 0
+            END                                                              AS country_count,
+            CASE
+                WHEN jsonb_typeof(known_devices) = 'array'
+                THEN jsonb_array_length(known_devices)
+                ELSE 0
+            END                                                              AS device_count,
+            login_countries,
+            known_ips,
+            known_devices,
+            avg_daily_events,
+            avg_daily_logins,
+            baseline_days
+        FROM vector_user_baselines
+        WHERE (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
+        ORDER BY computed_at DESC
+        LIMIT %s
+        """,
+        (s, s, limit),
+    )
+
+
+@app.get("/api/baseline/{entity_key}")
+def baseline_detail(entity_key: str) -> dict:
+    """Full baseline profile for one user. ``entity_key`` is the
+    standard ``tenant_id::user_id`` composite used elsewhere in the
+    UI; callers can also pass a bare user_id and we'll match on
+    ``user_id`` alone."""
+    if "::" in entity_key:
+        tenant_id, user_id = entity_key.split("::", 1)
+        row = db.fetch_one(
+            """
+            SELECT
+                user_id,
+                tenant_id,
+                computed_at,
+                login_hours,
+                login_countries,
+                login_asns,
+                known_devices,
+                known_ips,
+                avg_daily_events,
+                avg_daily_logins,
+                baseline_days
+            FROM vector_user_baselines
+            WHERE tenant_id = %s AND user_id = %s
+            """,
+            (tenant_id, user_id),
+        )
+    else:
+        row = db.fetch_one(
+            """
+            SELECT
+                user_id,
+                tenant_id,
+                computed_at,
+                login_hours,
+                login_countries,
+                login_asns,
+                known_devices,
+                known_ips,
+                avg_daily_events,
+                avg_daily_logins,
+                baseline_days
+            FROM vector_user_baselines
+            WHERE user_id = %s
+            ORDER BY computed_at DESC
+            LIMIT 1
+            """,
+            (entity_key,),
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="baseline not found")
+    return row
+
+
+# ============================================================================
 # watchlist (active INKY correlation pins)
 # ============================================================================
 

@@ -96,6 +96,13 @@ export const api = {
   updateIncidentStatus: (id, status) =>
                           put(`/api/incidents/${encodeURIComponent(id)}/status`, { status }),
 
+  // ----- baselines (Phase 2 scoring engine input) -----------------------
+  baselineStats:  () => get("/api/baseline/stats"),
+  baselineList:   ({ limit = 50, search } = {}) =>
+                    get(`/api/baseline/list${qs({ limit, search })}`),
+  baselineDetail: (entityKey) =>
+                    get(`/api/baseline/${path(entityKey)}`),
+
   // ----- unified feed + watchlist ---------------------------------------
   feedRecent:  (limit = 25) => get(`/api/feed/recent${qs({ limit })}`),
   dashboardFeed: ({ ual_limit = 50, inky_limit = 20, edr_limit = 20 } = {}) =>
