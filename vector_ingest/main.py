@@ -22,6 +22,7 @@ from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
 from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
+from vector_ingest.scoring_engine import BaselineEngine, ScoringEngine
 
 
 def configure_logging() -> None:
@@ -121,6 +122,15 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
     # scoping at this layer.
     logger.info("[ioc] building OpenCTI enricher")
     ingestors.append(IocEnricher(db=db))
+
+    # Baseline + scoring engines are also tenant-agnostic. BaselineEngine
+    # rebuilds per-user known-good state every 60 minutes; ScoringEngine
+    # runs every 5 minutes to promote fresh IOC / Defender hits to
+    # incidents and otherwise sum signal weights per user.
+    logger.info("[baseline] building baseline engine")
+    ingestors.append(BaselineEngine(db=db))
+    logger.info("[scoring] building scoring engine")
+    ingestors.append(ScoringEngine(db=db))
     return ingestors
 
 
