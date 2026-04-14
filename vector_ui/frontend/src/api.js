@@ -97,6 +97,14 @@ export const api = {
   govPrivilegedRoles:    () => get("/api/governance/privileged-roles"),
   govGuestUsers:         () => get("/api/governance/guest-users"),
   govEdrAlerts:          () => get("/api/governance/edr-alerts"),
+  govEdrAlertsEvents:    ({ hostname, username, threat_name, severity, limit = 10 } = {}) =>
+    get(`/api/governance/edr-alerts/events${qs({ hostname, username, threat_name, severity, limit })}`),
   govThreatLocker:       () => get("/api/governance/threatlocker"),
+  govThreatLockerEvents: ({ hostname, username, action, action_type, policy_name, limit = 10 } = {}) =>
+    get(`/api/governance/threatlocker/events${qs({ hostname, username, action, action_type, policy_name, limit })}`),
+  govEventsByIp:         ({ ip, event_type, limit = 10 } = {}) =>
+    get(`/api/governance/events/by-ip${qs({ ip, event_type, limit })}`),
+  govOauthAppsEvents:    (appId, limit = 10) =>
+    get(`/api/governance/oauth-apps/${encodeURIComponent(appId)}/events${qs({ limit })}`),
   govIocMatches:         () => get("/api/ioc/matches?limit=200"),
 };
