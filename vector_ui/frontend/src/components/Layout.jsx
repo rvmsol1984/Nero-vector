@@ -156,7 +156,7 @@ function SidebarBody({ onNavigate, showCloseButton, onClose }) {
       <div className="flex items-center justify-between px-5 py-5 border-b border-white/5">
         <div className="flex items-center gap-3 min-w-0">
           <Logo size={32} />
-          <div className="text-[10px] tracking-widest text-white/40 font-semibold">
+          <div className="text-[10px] text-white/40 font-semibold overflow-hidden">
             VECTOR
           </div>
         </div>
