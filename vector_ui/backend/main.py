@@ -2150,6 +2150,51 @@ def baseline_list(limit: int = Query(100, ge=1, le=500), search: str = Query("")
         FROM vector_user_baselines
         ORDER BY computed_at DESC LIMIT %s
     """, (limit,))
+
+@app.get("/api/incidents/stats")
+def incidents_stats():
+    return db.fetch_one("""
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'open') as open,
+            COUNT(*) FILTER (WHERE severity = 'critical' AND status = 'open') as critical,
+            COUNT(*) FILTER (WHERE severity = 'high' AND status = 'open') as high,
+            COUNT(*) FILTER (WHERE confirmed_at > NOW() - INTERVAL '24 hours') as confirmed_today
+        FROM vector_incidents
+    """) or {"open": 0, "critical": 0, "high": 0, "confirmed_today": 0}
+
+@app.get("/api/incidents/list")
+def incidents_list(limit: int = Query(50, ge=1, le=200), status: str = Query("")):
+    if status:
+        return db.fetch_all("""
+            SELECT id, incident_type, severity, title, summary, user_id,
+                client_name, tenant_id, status, confirmed_at,
+                dwell_time_minutes, patient_zero, raw_signals
+            FROM vector_incidents
+            WHERE status = %s
+            ORDER BY confirmed_at DESC LIMIT %s
+        """, (status, limit))
+    return db.fetch_all("""
+        SELECT id, incident_type, severity, title, summary, user_id,
+            client_name, tenant_id, status, confirmed_at,
+            dwell_time_minutes, patient_zero, raw_signals
+        FROM vector_incidents
+        ORDER BY confirmed_at DESC LIMIT %s
+    """, (limit,))
+
+@app.post("/api/incidents/{incident_id}/status")
+def incident_update_status(incident_id: str, body: dict = Body(...)):
+    status = body.get("status")
+    db.execute("""
+        UPDATE vector_incidents SET status = %s WHERE id = %s
+    """, (status, incident_id))
+    return {"ok": True}
+
+@app.get("/api/incidents/{incident_id}")
+def incident_detail(incident_id: str):
+    return db.fetch_one("""
+        SELECT * FROM vector_incidents WHERE id = %s
+    """, (incident_id,)) or {}
+
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa(full_path: str = "") -> FileResponse:
     """Catch-all that serves the React SPA shell.
