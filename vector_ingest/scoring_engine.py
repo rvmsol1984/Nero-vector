@@ -1,821 +1,609 @@
-"""BaselineEngine + ScoringEngine for NERO Vector.
+"""Phase 2 correlation scoring scaffold.
 
-Both run in the same poll loop as the rest of the ingestors via
-vector_ingest.main.build_ingestors. BaselineEngine refreshes
-per-user "known good" state every 60 minutes; ScoringEngine runs
-every 5 minutes, promotes high-confidence IOC / Defender hits to
-incidents immediately, and otherwise sums a set of signal weights
-per user to decide whether to escalate their watchlist pin or
-stand up a new incident.
+This module is the framework the named correlation rules hook into.
+It owns three things:
 
-Neither class bypasses the existing Database helpers — we just
-reuse ``db.fetch_all`` / ``db.fetch_one`` / ``db.conn`` for the
-write paths so the session timezone pinning and connection
-lifecycle are inherited from the UAL ingestor.
+    * ``RuleResult``        -- the dataclass each rule returns
+    * ``CorrelationRule``   -- the abstract base class rules subclass
+    * ``ScoringEngine``     -- the worker that loads active users,
+                               runs every registered rule against
+                               them, and writes a vector_incidents
+                               row when the aggregate score clears
+                               the configured threshold
+
+No concrete rules live in this file yet. Rules are added via
+``ScoringEngine.register_rule()`` from whichever module is driving
+the cycle (typically ``vector_ingest/main.py`` once rule modules
+are written). An engine with zero rules is a no-op per cycle and
+logs a single "no rules registered" line so operators can see that
+Phase 2 is wired but inert.
+
+Expected database schema (from ``migrations/009_incidents.sql``):
+
+    vector_user_baselines   -- input, read during each cycle
+    vector_events           -- input, read during each cycle
+    vector_incidents        -- output, one row per confirmed incident
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from vector_ingest.db import Database
 
 logger = logging.getLogger(__name__)
 
 
-BASELINE_POLL_INTERVAL = timedelta(minutes=60)
-SCORING_POLL_INTERVAL  = timedelta(minutes=5)
+# ---------------------------------------------------------------------------
+# tunables
+# ---------------------------------------------------------------------------
 
-# Lookback windows used by each engine.
-BASELINE_MIN_HISTORY = timedelta(days=3)
-BASELINE_WINDOW      = timedelta(days=14)
-SCORING_WINDOW       = timedelta(minutes=30)
-IMMEDIATE_WINDOW     = timedelta(minutes=5)
+# Sliding window each cycle evaluates. Rules only see events inside
+# this window. Matching the main ingest loop's 5-minute cadence with
+# a 30-minute window gives each event six chances to participate in
+# a correlation before it ages out.
+SCORING_WINDOW = timedelta(minutes=30)
 
-# ---- signal weights + labels -----------------------------------------------
+# Aggregate score at which a user's evaluation produces an incident.
+# Rules contribute positive integers via ``RuleResult.score_delta``;
+# the total across all fired rules is compared against this value.
+INCIDENT_THRESHOLD = 80
 
-SIGNAL_WEIGHTS = {
-    "unknown_ip":           15,
-    "unknown_country":      35,
-    "inbox_rule_change":    45,
-    "watchlist_active":     50,
-    "threatlocker_deny":    30,
-    "defender_medium_alert": 35,
-}
+# Two confirmed incidents of the same type for the same user within
+# this window collapse into one. Prevents a single ongoing anomaly
+# from producing a fresh incident every cycle while it's still
+# active.
+DEDUP_WINDOW = timedelta(hours=4)
 
-SIGNAL_LABELS = {
-    "unknown_ip":            "Sign-in from unknown IP",
-    "unknown_country":       "Sign-in from unknown country",
-    "inbox_rule_change":     "Inbox rule modified",
-    "watchlist_active":      "Active watchlist entry",
-    "threatlocker_deny":     "ThreatLocker policy deny",
-    "defender_medium_alert": "Defender medium alert",
-}
-
-SCORE_INCIDENT_THRESHOLD = 80
-SCORE_ESCALATE_THRESHOLD = 50
+# Incident type stamped on rows this engine writes. Each future
+# correlation rule can override by constructing a richer incident
+# shape, but the scaffold itself always uses this.
+DEFAULT_INCIDENT_TYPE = "score_based"
 
 
 # ---------------------------------------------------------------------------
-# helpers shared across the two engines
+# RuleResult
 # ---------------------------------------------------------------------------
 
-def _table_exists(db: Database, name: str) -> bool:
-    try:
-        row = db.fetch_one(
-            "SELECT to_regclass(%s) IS NOT NULL AS exists", (name,)
-        )
-        return bool(row and row.get("exists"))
-    except Exception:
-        return False
+@dataclass
+class RuleResult:
+    """The value a ``CorrelationRule.evaluate()`` call returns.
 
+    Rules must return a ``RuleResult`` on every call, including
+    calls where they didn't fire -- return ``fired=False`` +
+    ``score_delta=0`` for the "no signal" case. This makes cycle
+    logging and future multi-rule scoring explainable.
 
-def _column_type(db: Database, table: str, column: str) -> str:
-    try:
-        row = db.fetch_one(
-            """
-            SELECT data_type
-            FROM information_schema.columns
-            WHERE table_name = %s AND column_name = %s
-            """,
-            (table, column),
-        )
-        return (row.get("data_type") or "").lower() if row else ""
-    except Exception:
-        return ""
+    Attributes
+    ----------
+    rule_name
+        Stable identifier for the rule. ``CorrelationRule``
+        populates this automatically from its class name when the
+        engine calls ``evaluate``; subclasses can still set it
+        explicitly if they want a prettier label.
+    score_delta
+        Integer points this rule contributes to the user's
+        aggregate anomaly score when fired. Must be >= 0. Ignored
+        when ``fired`` is False.
+    fired
+        True if the rule detected an anomaly worth scoring.
+    evidence
+        Free-form JSON-serialisable dict describing *why* the rule
+        fired. Goes straight into the ``evidence`` JSONB column of
+        ``vector_incidents`` so the Incidents UI can render it on
+        the detail panel.
+    """
 
+    rule_name: str
+    score_delta: int
+    fired: bool
+    evidence: dict = field(default_factory=dict)
 
-def _parse_json_maybe(value: Any) -> Any:
-    """psycopg2 usually decodes JSONB for us, but raw rows fetched
-    through some drivers come back as strings. Coerce either shape to
-    a Python object."""
-    if value is None or isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _logged_on_upn(logged_on_users: Any) -> str | None:
-    """Pull the first accountName / userPrincipalName out of a
-    Defender logged_on_users array."""
-    parsed = _parse_json_maybe(logged_on_users) or []
-    if not isinstance(parsed, list) or not parsed:
-        return None
-    first = parsed[0]
-    if not isinstance(first, dict):
-        return None
-    return (
-        first.get("accountName")
-        or first.get("userPrincipalName")
-        or first.get("upn")
-    )
+    def as_signal(self) -> dict:
+        """Serialise to the ``evidence`` column row shape."""
+        return {
+            "rule":     self.rule_name,
+            "score":    int(self.score_delta or 0),
+            "fired":    bool(self.fired),
+            "evidence": dict(self.evidence or {}),
+        }
 
 
 # ---------------------------------------------------------------------------
-# BaselineEngine -- refreshes per-user known IPs / countries / devices
+# CorrelationRule
 # ---------------------------------------------------------------------------
 
-class BaselineEngine:
-    """Every 60 minutes, rebuild a row in vector_user_baselines for every
-    user that has at least 7 days of history. Each row captures the last
-    14 days of distinct client IPs, distinct UserLoggedIn Country values,
-    and distinct DeviceName values so ScoringEngine can tell what's
-    "known-good" for that user."""
+class CorrelationRule(ABC):
+    """Abstract base for Phase 2 correlation rules.
 
-    def __init__(self, db: Database) -> None:
-        self.db = db
-        self._last_poll: datetime = datetime.fromtimestamp(0, tz=timezone.utc)
-        # Cached column-kind for known_ips / login_countries /
-        # known_devices: "jsonb" => json.dumps(list), else Python list.
-        self._array_encoding: str | None = None
+    Subclass this and implement ``evaluate`` -- the engine gives
+    each rule the user's recent events plus their baseline profile
+    and expects a ``RuleResult`` back. Rules should be pure Python
+    (no DB access) so the cycle budget is predictable and rules
+    stay unit-testable.
+
+    Subclasses can override ``name`` as a class attribute if they
+    want a friendlier label than the class name.
+    """
+
+    #: Optional friendlier name. When ``None``, the class name is
+    #: used instead via the ``rule_name`` property.
+    name: str | None = None
 
     @property
-    def tenant_id(self) -> str:
-        return "(all)"
+    def rule_name(self) -> str:
+        return self.name or self.__class__.__name__
 
-    @property
-    def client_name(self) -> str:
-        return "baseline-engine"
-
-    # ------------------------------------------------------------------ cadence
-    def poll_once(self) -> None:
-        now = datetime.now(timezone.utc)
-        if now - self._last_poll < BASELINE_POLL_INTERVAL:
-            return
-        self._last_poll = now
-        try:
-            self.build_baselines()
-        except Exception:
-            logger.exception("[baseline] cycle crashed")
-
-    # ------------------------------------------------------------------ build
-    def build_baselines(self) -> None:
-        users = self.db.fetch_all(
-            """
-            SELECT
-                user_id,
-                MAX(tenant_id)   AS tenant_id,
-                MAX(client_name) AS client_name,
-                MIN(timestamp)   AS first_seen,
-                MAX(timestamp)   AS last_seen
-            FROM vector_events
-            WHERE user_id IS NOT NULL
-            GROUP BY user_id
-            HAVING MAX(timestamp) - MIN(timestamp) >= INTERVAL '2 days' OR COUNT(*) >= 50
-            LIMIT 5000
-            """
-        )
-        built = 0
-        for user in users or []:
-            user_id = user.get("user_id")
-            if not user_id:
-                continue
-            tenant_id = user.get("tenant_id")
-            client_name = user.get("client_name")
-
-            known_ips = self._distinct(
-                """
-                SELECT DISTINCT client_ip AS val
-                FROM vector_events
-                WHERE user_id = %s
-                  AND timestamp > now() - INTERVAL '14 days'
-                  AND client_ip IS NOT NULL
-                """,
-                (user_id,),
-            )
-            login_countries = self._distinct(
-                """
-                SELECT DISTINCT raw_json->>'Country' AS val
-                FROM vector_events
-                WHERE user_id = %s
-                  AND event_type = 'UserLoggedIn'
-                  AND timestamp > now() - INTERVAL '14 days'
-                  AND raw_json ? 'Country'
-                """,
-                (user_id,),
-            )
-            known_devices = self._distinct(
-                """
-                SELECT DISTINCT raw_json->>'DeviceName' AS val
-                FROM vector_events
-                WHERE user_id = %s
-                  AND timestamp > now() - INTERVAL '14 days'
-                  AND raw_json ? 'DeviceName'
-                """,
-                (user_id,),
-            )
-
-            self._upsert(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                client_name=client_name,
-                known_ips=known_ips,
-                login_countries=login_countries,
-                known_devices=known_devices,
-            )
-            built += 1
-
-        logger.info(
-            "[baseline] cycle complete candidates=%d built=%d",
-            len(users or []),
-            built,
-        )
-
-    def _distinct(self, sql: str, params: tuple) -> list[str]:
-        rows = self.db.fetch_all(sql, params) or []
-        return [str(r["val"]) for r in rows if r.get("val")]
-
-    # ------------------------------------------------------------------ encoding
-    def _encoding(self) -> str:
-        if self._array_encoding is not None:
-            return self._array_encoding
-        col_type = _column_type(self.db, "vector_user_baselines", "known_ips")
-        # jsonb -> json.dumps(list); everything else (text[], varchar[], ...)
-        # -> pass a Python list and let psycopg2 adapt it to PG arrays.
-        self._array_encoding = "jsonb" if "json" in col_type else "array"
-        logger.info(
-            "[baseline] known_ips column encoding=%s", self._array_encoding
-        )
-        return self._array_encoding
-
-    def _encode(self, values: list[str]) -> Any:
-        return json.dumps(values) if self._encoding() == "jsonb" else list(values)
-
-    # ------------------------------------------------------------------ upsert
-    def _upsert(
+    @abstractmethod
+    def evaluate(
         self,
-        user_id: str,
-        tenant_id: str | None,
-        client_name: str | None,
-        known_ips: list[str],
-        login_countries: list[str],
-        known_devices: list[str],
-    ) -> None:
-        params = (
-            user_id,
-            tenant_id,
-            client_name,
-            self._encode(known_ips),
-            self._encode(login_countries),
-            self._encode(known_devices),
-        )
-        try:
-            with self.db.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO vector_user_baselines (
-                        user_id, tenant_id, client_name,
-                        known_ips, login_countries, known_devices,
-                        updated_at
-                    ) VALUES (
-                        %s, %s, %s, %s, %s, %s, now()
-                    )
-                    ON CONFLICT (tenant_id, user_id) DO UPDATE SET
-                        tenant_id       = EXCLUDED.tenant_id,
-                        client_name     = EXCLUDED.client_name,
-                        known_ips       = EXCLUDED.known_ips,
-                        login_countries = EXCLUDED.login_countries,
-                        known_devices   = EXCLUDED.known_devices,
-                        updated_at      = now()
-                    """,
-                    params,
-                )
-            self.db.conn.commit()
-        except Exception:
-            logger.exception("[baseline] upsert failed for %s", user_id)
-            try:
-                self.db.conn.rollback()
-            except Exception:
-                pass
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        """Evaluate this rule against ``events`` + ``user_profile``.
+
+        Parameters
+        ----------
+        events
+            The user's events inside ``SCORING_WINDOW``, ordered
+            newest-first. Each is a dict with ``id``, ``tenant_id``,
+            ``client_name``, ``user_id``, ``entity_key``,
+            ``event_type``, ``workload``, ``result_status``,
+            ``client_ip``, ``timestamp`` and ``raw_json``.
+        user_profile
+            The user's baseline profile read from
+            ``vector_user_baselines`` -- ``login_hours``,
+            ``login_countries``, ``login_asns``, ``known_devices``,
+            ``known_ips``, ``avg_daily_events``, ``avg_daily_logins``,
+            ``baseline_days``. Empty dict when no baseline has
+            been computed yet.
+
+        Returns
+        -------
+        RuleResult
+            Must always be returned, even when the rule doesn't
+            fire. The engine tolerates rules that raise by logging
+            and continuing, but rules are expected to handle their
+            own errors internally.
+        """
 
 
 # ---------------------------------------------------------------------------
-# ScoringEngine -- correlates recent signals and writes incidents
+# ScoringEngine
 # ---------------------------------------------------------------------------
 
 class ScoringEngine:
-    """Every 5 minutes: promote high-confidence IOC + Defender hits to
-    incidents immediately, then walk every user that was active in the
-    last 30 minutes, sum their signal weights, and either stand up a
-    new incident (>= 80) or escalate their watchlist pin (>= 50)."""
+    """Phase 2 worker that turns correlated signals into incidents.
 
-    def __init__(self, db: Database) -> None:
-        self.db = db
-        self._last_poll: datetime = datetime.fromtimestamp(0, tz=timezone.utc)
-        # Detected once per process.
-        self._watchlist_flavor: str | None = None
-        self._has_threatlocker: bool | None = None
+    The engine is a standard vector-ingest poller: ``poll_once`` is
+    called by the main loop every cycle, it runs ``run_scoring_cycle``
+    once, and returns. All database I/O lives on this class so rule
+    classes stay pure.
+
+    Usage::
+
+        engine = ScoringEngine(db)
+        engine.register_rule(SomeRule())
+        engine.register_rule(AnotherRule())
+        engine.poll_once()          # main loop calls this repeatedly
+    """
+
+    # These two attributes are read by vector_ingest/main.py's
+    # structured logging so every worker in the ingestors list has
+    # consistent "tenant_id" / "client_name" fields on its log
+    # lines. The engine is tenant-global so we use sentinel values.
+    tenant_id = "*"
+    client_name = "global"
+
+    def __init__(
+        self,
+        db: Database,
+        rules: list[CorrelationRule] | None = None,
+    ) -> None:
+        self._db = db
+        self._rules: list[CorrelationRule] = []
+        if rules:
+            for r in rules:
+                self.register_rule(r)
+
+    # ----- rule registration ---------------------------------------------
+
+    def register_rule(self, rule: CorrelationRule) -> None:
+        """Append a rule to the evaluation list. Safe to call at
+        any time between constructor and first ``poll_once``."""
+        if not isinstance(rule, CorrelationRule):
+            raise TypeError(
+                "ScoringEngine.register_rule() expected a CorrelationRule "
+                f"instance, got {type(rule).__name__}"
+            )
+        self._rules.append(rule)
+        logger.info(
+            "[scoring] registered rule", extra={"rule": rule.rule_name},
+        )
 
     @property
-    def tenant_id(self) -> str:
-        return "(all)"
+    def rules(self) -> tuple[CorrelationRule, ...]:
+        """Read-only view of the registered rules."""
+        return tuple(self._rules)
 
-    @property
-    def client_name(self) -> str:
-        return "scoring-engine"
+    # ----- poll entrypoint -----------------------------------------------
 
-    # ------------------------------------------------------------------ cadence
     def poll_once(self) -> None:
-        now = datetime.now(timezone.utc)
-        if now - self._last_poll < SCORING_POLL_INTERVAL:
-            return
-        self._last_poll = now
+        """Main-loop entrypoint. Runs one full scoring cycle and
+        swallows any unexpected exception so a broken rule never
+        takes the ingest loop down."""
         try:
             self.run_scoring_cycle()
         except Exception:
             logger.exception("[scoring] cycle crashed")
 
-    # ------------------------------------------------------------------ lazy schema sniffers
-    def _get_watchlist_flavor(self) -> str:
-        if self._watchlist_flavor is not None:
-            return self._watchlist_flavor
-        try:
-            rows = self.db.fetch_all(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = 'vector_watchlist'
-                """
-            )
-            cols = {r["column_name"] for r in (rows or [])}
-        except Exception:
-            cols = set()
-        if "trigger_type" in cols and "user_email" in cols:
-            self._watchlist_flavor = "v2"
-        elif "recipient" in cols:
-            self._watchlist_flavor = "v1"
-        else:
-            self._watchlist_flavor = "none"
-        return self._watchlist_flavor
-
-    def _threatlocker_available(self) -> bool:
-        if self._has_threatlocker is None:
-            self._has_threatlocker = _table_exists(self.db, "vector_threatlocker_events")
-        return self._has_threatlocker
-
-    # ------------------------------------------------------------------ cycle
     def run_scoring_cycle(self) -> None:
-        immediate_count = self._run_immediate_incidents()
-        incident_count, escalated_count, scored_count = self._run_score_based()
-        logger.info(
-            "[scoring] cycle complete scored=%d immediate_incidents=%d "
-            "score_incidents=%d escalated=%d",
-            scored_count,
-            immediate_count,
-            incident_count,
-            escalated_count,
-        )
+        """Load every user active inside ``SCORING_WINDOW``, run
+        every registered rule, and emit a ``vector_incidents`` row
+        for anyone whose aggregate score clears
+        ``INCIDENT_THRESHOLD``."""
+        if not self._rules:
+            logger.info("[scoring] no rules registered, skipping cycle")
+            return
 
-    # ------------------------------------------------------------------ (1) immediate incidents
-    def _run_immediate_incidents(self) -> int:
-        created = 0
+        active = self._active_users()
+        if not active:
+            logger.info("[scoring] no active users in scoring window")
+            return
 
-        # IOC matches >= 75 in the last 5 min.
-        try:
-            ioc_rows = self.db.fetch_all(
-                """
-                SELECT
-                    m.id::text,
-                    m.tenant_id,
-                    m.client_name,
-                    m.ioc_type,
-                    m.ioc_value,
-                    m.opencti_id,
-                    m.indicator_name,
-                    m.confidence,
-                    m.matched_event_id::text,
-                    m.matched_at,
-                    ve.user_id
-                FROM vector_ioc_matches m
-                LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
-                WHERE m.confidence >= 75
-                  AND m.matched_at > now() - INTERVAL '5 minutes'
-                """
-            )
-        except Exception:
-            logger.exception("[scoring] ioc immediate query failed")
-            ioc_rows = []
+        evaluated = 0
+        fired_any = 0
+        incidents_created = 0
 
-        for r in ioc_rows or []:
-            user_id = r.get("user_id") or (
-                r.get("ioc_value") if r.get("ioc_type") == "email-addr" else None
-            )
-            if not user_id:
-                continue
-            confidence = int(r.get("confidence") or 0)
-            severity = "critical" if confidence >= 90 else "high"
-            label = (
-                r.get("indicator_name")
-                or r.get("ioc_value")
-                or "OpenCTI indicator"
-            )
-            signal = {
-                "name":  "ioc_match",
-                "label": f"IOC match: {label}",
-                "ioc_type":       r.get("ioc_type"),
-                "ioc_value":      r.get("ioc_value"),
-                "confidence":     confidence,
-                "opencti_id":     r.get("opencti_id"),
-                "indicator_name": r.get("indicator_name"),
-            }
-            if self.create_incident(
-                user_id=user_id,
-                tenant_id=r.get("tenant_id"),
-                client_name=r.get("client_name"),
-                score=min(100, 50 + confidence // 2),
-                signals=[signal],
-                severity=severity,
-            ):
-                created += 1
-
-        # Defender alerts with severity High or Critical in the last 5 min.
-        try:
-            defender_rows = self.db.fetch_all(
-                """
-                SELECT
-                    id,
-                    tenant_id,
-                    client_name,
-                    severity,
-                    title,
-                    threat_name,
-                    machine_id,
-                    computer_name,
-                    logged_on_users,
-                    alert_creation_time
-                FROM vector_defender_alerts
-                WHERE LOWER(severity) IN ('high', 'critical')
-                  AND alert_creation_time > now() - INTERVAL '5 minutes'
-                """
-            )
-        except Exception:
-            logger.exception("[scoring] defender immediate query failed")
-            defender_rows = []
-
-        for r in defender_rows or []:
-            user_id = _logged_on_upn(r.get("logged_on_users"))
-            if not user_id:
-                continue
-            sev = str(r.get("severity") or "").lower()
-            severity = "critical" if sev == "critical" else "high"
-            score = 95 if sev == "critical" else 85
-            label = r.get("title") or r.get("threat_name") or "Defender alert"
-            signal = {
-                "name":     "defender_alert",
-                "label":    f"Defender alert: {label}",
-                "severity": r.get("severity"),
-                "machine":  r.get("computer_name"),
-            }
-            if self.create_incident(
-                user_id=user_id,
-                tenant_id=r.get("tenant_id"),
-                client_name=r.get("client_name"),
-                score=score,
-                signals=[signal],
-                severity=severity,
-            ):
-                created += 1
-
-        return created
-
-    # ------------------------------------------------------------------ (2) score-based
-    def _run_score_based(self) -> tuple[int, int, int]:
-        try:
-            active_users = self.db.fetch_all(
-                """
-                SELECT DISTINCT
-                    user_id,
-                    MAX(tenant_id)   AS tenant_id,
-                    MAX(client_name) AS client_name
-                FROM vector_events
-                WHERE timestamp > now() - INTERVAL '30 minutes'
-                  AND user_id IS NOT NULL
-                GROUP BY user_id
-                LIMIT 2000
-                """
-            )
-        except Exception:
-            logger.exception("[scoring] active-users query failed")
-            return (0, 0, 0)
-
-        incidents = 0
-        escalated = 0
-        for user in active_users or []:
-            user_id = user.get("user_id")
-            if not user_id:
-                continue
-            tenant_id = user.get("tenant_id")
-            client_name = user.get("client_name")
-
-            score, signals = self.score_user(user_id)
-            if score >= SCORE_INCIDENT_THRESHOLD:
-                if self.create_incident(
-                    user_id=user_id,
-                    tenant_id=tenant_id,
-                    client_name=client_name,
-                    score=score,
-                    signals=signals,
-                    severity="high",
-                ):
-                    incidents += 1
-            elif score >= SCORE_ESCALATE_THRESHOLD:
-                if self._escalate_watchlist(user_id):
-                    escalated += 1
-
-        return incidents, escalated, len(active_users or [])
-
-    def score_user(self, user_id: str) -> tuple[int, list[dict]]:
-        score = 0
-        signals: list[dict] = []
-
-        # Load baseline.
-        baseline = self.db.fetch_one(
-            """
-            SELECT known_ips, login_countries, known_devices
-            FROM vector_user_baselines
-            WHERE user_id = %s
-            """,
-            (user_id,),
-        ) or {}
-        known_ips = set(baseline.get("known_ips") or [])
-        login_countries = set(baseline.get("login_countries") or [])
-
-        # Recent events.
-        try:
-            events = self.db.fetch_all(
-                """
-                SELECT event_type, client_ip, raw_json, timestamp
-                FROM vector_events
-                WHERE user_id = %s
-                  AND timestamp > now() - INTERVAL '30 minutes'
-                """,
-                (user_id,),
-            )
-        except Exception:
-            logger.exception("[scoring] score_user events query failed for %s", user_id)
-            events = []
-
-        seen_unknown_ip = False
-        seen_unknown_country = False
-        seen_inbox_rule = False
-
-        for e in events or []:
-            event_type = e.get("event_type")
-            raw = _parse_json_maybe(e.get("raw_json")) or {}
-
-            if event_type == "UserLoggedIn":
-                ip = (e.get("client_ip") or "").strip()
-                if ip and known_ips and ip not in known_ips and not seen_unknown_ip:
-                    score += SIGNAL_WEIGHTS["unknown_ip"]
-                    signals.append(
-                        {
-                            "name":  "unknown_ip",
-                            "label": SIGNAL_LABELS["unknown_ip"],
-                            "value": ip,
-                        }
-                    )
-                    seen_unknown_ip = True
-                country = raw.get("Country") if isinstance(raw, dict) else None
-                if (
-                    country
-                    and login_countries
-                    and country not in login_countries
-                    and not seen_unknown_country
-                ):
-                    score += SIGNAL_WEIGHTS["unknown_country"]
-                    signals.append(
-                        {
-                            "name":  "unknown_country",
-                            "label": SIGNAL_LABELS["unknown_country"],
-                            "value": country,
-                        }
-                    )
-                    seen_unknown_country = True
-
-            if event_type == "UpdateInboxRules" and not seen_inbox_rule:
-                score += SIGNAL_WEIGHTS["inbox_rule_change"]
-                signals.append(
-                    {
-                        "name":  "inbox_rule_change",
-                        "label": SIGNAL_LABELS["inbox_rule_change"],
-                    }
-                )
-                seen_inbox_rule = True
-
-        # Active watchlist pin.
-        if self._user_has_active_watchlist(user_id):
-            score += SIGNAL_WEIGHTS["watchlist_active"]
-            signals.append(
-                {
-                    "name":  "watchlist_active",
-                    "label": SIGNAL_LABELS["watchlist_active"],
-                }
-            )
-
-        # ThreatLocker Deny in the last 30 min.
-        if self._threatlocker_available():
+        for tenant_id, user_id in active:
             try:
-                tl = self.db.fetch_one(
-                    """
-                    SELECT id FROM vector_threatlocker_events
-                    WHERE username ILIKE %s
-                      AND action ILIKE 'deny%%'
-                      AND event_time > now() - INTERVAL '30 minutes'
-                    LIMIT 1
-                    """,
-                    (user_id,),
-                )
+                events = self._load_events(tenant_id, user_id)
+                profile = self._load_user_profile(tenant_id, user_id)
+                results, total_score = self._evaluate_user(events, profile)
             except Exception:
                 logger.exception(
-                    "[scoring] threatlocker query failed for %s", user_id
+                    "[scoring] failed to evaluate user",
+                    extra={"tenant_id": tenant_id, "user_id": user_id},
                 )
-                self.db.conn.rollback()
-                tl = None
-            if tl:
-                score += SIGNAL_WEIGHTS["threatlocker_deny"]
-                signals.append(
-                    {
-                        "name":  "threatlocker_deny",
-                        "label": SIGNAL_LABELS["threatlocker_deny"],
-                    }
+                continue
+
+            evaluated += 1
+            if any(r.fired for r in results):
+                fired_any += 1
+
+            if total_score >= INCIDENT_THRESHOLD:
+                created = self._create_incident(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    results=results,
+                    total_score=total_score,
+                    events=events,
                 )
+                if created:
+                    incidents_created += 1
 
-        # Defender Medium alert against this user's logged_on_users.
-        try:
-            defender = self.db.fetch_one(
-                """
-                SELECT id FROM vector_defender_alerts
-                WHERE LOWER(severity) = 'medium'
-                  AND alert_creation_time > now() - INTERVAL '30 minutes'
-                  AND logged_on_users::text ILIKE '%%' || %s || '%%'
-                LIMIT 1
-                """,
-                (user_id,),
-            )
-        except Exception:
-            logger.exception(
-                "[scoring] defender medium query failed for %s", user_id
-            )
-            defender = None
-        if defender:
-            score += SIGNAL_WEIGHTS["defender_medium_alert"]
-            signals.append(
-                {
-                    "name":  "defender_medium_alert",
-                    "label": SIGNAL_LABELS["defender_medium_alert"],
-                }
-            )
-
-        return min(score, 100), signals
-
-    # ------------------------------------------------------------------ watchlist
-    def _user_has_active_watchlist(self, user_id: str) -> bool:
-        flavor = self._get_watchlist_flavor()
-        if flavor == "none":
-            return False
-        try:
-            if flavor == "v2":
-                row = self.db.fetch_one(
-                    """
-                    SELECT id FROM vector_watchlist
-                    WHERE user_email = %s AND status = 'active'
-                    LIMIT 1
-                    """,
-                    (user_id,),
-                )
-            else:  # v1
-                row = self.db.fetch_one(
-                    """
-                    SELECT id FROM vector_watchlist
-                    WHERE recipient = %s
-                    LIMIT 1
-                    """,
-                    (user_id,),
-                )
-        except Exception:
-            logger.exception(
-                "[scoring] watchlist probe failed for %s", user_id
-            )
-            return False
-        return bool(row)
-
-    def _escalate_watchlist(self, user_id: str) -> bool:
-        flavor = self._get_watchlist_flavor()
-        if flavor == "none":
-            return False
-        try:
-            with self.db.conn.cursor() as cur:
-                if flavor == "v2":
-                    cur.execute(
-                        """
-                        UPDATE vector_watchlist
-                        SET status = 'escalated'
-                        WHERE user_email = %s
-                          AND status = 'active'
-                        """,
-                        (user_id,),
-                    )
-                else:
-                    # v1 schema has no "status" column so this is a no-op
-                    # from the escalate-path's perspective. We still
-                    # return False so the caller's counter stays honest.
-                    return False
-                updated = cur.rowcount
-            self.db.conn.commit()
-            if updated:
-                logger.info(
-                    "[scoring] escalated watchlist entries for %s count=%d",
-                    user_id,
-                    updated,
-                )
-            return updated > 0
-        except Exception:
-            logger.exception(
-                "[scoring] _escalate_watchlist failed for %s", user_id
-            )
-            try:
-                self.db.conn.rollback()
-            except Exception:
-                pass
-            return False
-
-    # ------------------------------------------------------------------ create_incident
-    def create_incident(
-        self,
-        user_id: str,
-        tenant_id: str | None,
-        client_name: str | None,
-        score: int,
-        signals: list[dict],
-        severity: str = "high",
-    ) -> bool:
-        entity_key = f"{tenant_id}::{user_id}" if tenant_id else user_id
-        top = signals[0] if signals else None
-        title = (
-            (top or {}).get("label")
-            or f"Risk score {score} for {user_id}"
+        logger.info(
+            "[scoring] cycle complete evaluated=%d fired_any=%d incidents=%d",
+            evaluated,
+            fired_any,
+            incidents_created,
         )
-        plural = "s" if len(signals) != 1 else ""
-        summary = f"Score {score} - {len(signals)} signal{plural} detected"
-        evidence = {
-            "score":   int(score),
-            "signals": signals,
+
+    # ----- per-user evaluation -------------------------------------------
+
+    def _evaluate_user(
+        self,
+        events: list[dict],
+        profile: dict,
+    ) -> tuple[list[RuleResult], int]:
+        """Run every registered rule against one user's window.
+
+        Returns ``(results, total_score)`` where ``results`` is the
+        list of ``RuleResult`` values from rules that returned
+        cleanly (a rule that raised is skipped and logged) and
+        ``total_score`` is the sum of ``score_delta`` over all
+        fired rules.
+        """
+        results: list[RuleResult] = []
+        total = 0
+
+        for rule in self._rules:
+            try:
+                result = rule.evaluate(events, profile)
+            except Exception:
+                logger.exception(
+                    "[scoring] rule raised",
+                    extra={"rule": rule.rule_name},
+                )
+                continue
+
+            if not isinstance(result, RuleResult):
+                logger.warning(
+                    "[scoring] rule returned non-RuleResult, ignoring",
+                    extra={
+                        "rule":    rule.rule_name,
+                        "got":     type(result).__name__,
+                    },
+                )
+                continue
+
+            # Force rule_name to match the class the engine actually
+            # called; the rule can still override via the ``name``
+            # class attribute but an unset rule_name is surfaced
+            # consistently here.
+            if not result.rule_name:
+                result.rule_name = rule.rule_name
+
+            results.append(result)
+            if result.fired:
+                total += max(0, int(result.score_delta or 0))
+
+        return results, total
+
+    # ----- data loading ---------------------------------------------------
+
+    def _active_users(self) -> list[tuple[str, str]]:
+        """Distinct (tenant_id, user_id) pairs with activity in the
+        last ``SCORING_WINDOW``."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT tenant_id, user_id
+                FROM vector_events
+                WHERE user_id IS NOT NULL
+                  AND timestamp > NOW() - %s
+                """,
+                (SCORING_WINDOW,),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+    def _load_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[dict]:
+        """Recent events for one user, ordered newest-first."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tenant_id, client_name, user_id, entity_key,
+                       event_type, workload, result_status, client_ip,
+                       timestamp, raw_json
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp DESC
+                """,
+                (tenant_id, user_id, SCORING_WINDOW),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def _load_user_profile(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict:
+        """Baseline profile for one user, or ``{}`` if none exists.
+
+        Missing baselines aren't fatal -- rules are expected to
+        handle an empty profile by either not firing or returning
+        a lower-confidence result. Returning an empty dict rather
+        than ``None`` keeps every rule's ``user_profile`` access
+        pattern uniform.
+        """
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT login_hours, login_countries, login_asns,
+                       known_devices, known_ips,
+                       avg_daily_events, avg_daily_logins, baseline_days
+                FROM vector_user_baselines
+                WHERE tenant_id = %s AND user_id = %s
+                """,
+                (tenant_id, user_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return {}
+        return {
+            "login_hours":      row[0] or {},
+            "login_countries":  row[1] or {},
+            "login_asns":       row[2] or {},
+            "known_devices":    row[3] or [],
+            "known_ips":        row[4] or [],
+            "avg_daily_events": float(row[5] or 0),
+            "avg_daily_logins": float(row[6] or 0),
+            "baseline_days":    int(row[7] or 0),
+        }
+
+    # ----- incident emission ---------------------------------------------
+
+    def _create_incident(
+        self,
+        tenant_id: str,
+        user_id: str,
+        results: list[RuleResult],
+        total_score: int,
+        events: list[dict],
+    ) -> bool:
+        """Insert a ``vector_incidents`` row for this evaluation.
+
+        Skips the insert (returns False) if an incident of type
+        ``DEFAULT_INCIDENT_TYPE`` already exists for this user
+        inside the ``DEDUP_WINDOW``.
+        """
+        if self._incident_exists(user_id, DEFAULT_INCIDENT_TYPE):
+            logger.info(
+                "[scoring] dedup skip",
+                extra={
+                    "user_id":       user_id,
+                    "incident_type": DEFAULT_INCIDENT_TYPE,
+                },
+            )
+            return False
+
+        fired = [r for r in results if r.fired]
+        severity = self._severity_for(total_score)
+        client_name = self._client_name_for(events, tenant_id)
+        entity_key = f"{tenant_id}::{user_id}"
+        first_seen, last_seen = self._timespan(events)
+        dwell_minutes = self._dwell_minutes(first_seen, last_seen)
+
+        title = self._title_for(user_id, fired, total_score)
+        summary = self._summary_for(fired, total_score)
+
+        evidence_payload = [r.as_signal() for r in fired]
+        raw_signals_payload = {
+            "rule_count":    len(self._rules),
+            "fired_count":   len(fired),
+            "total_score":   int(total_score),
+            "window_minutes": int(SCORING_WINDOW.total_seconds() // 60),
+            "threshold":     INCIDENT_THRESHOLD,
         }
 
         try:
-            with self.db.conn.cursor() as cur:
+            with self._db.conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO vector_incidents (
                         tenant_id, client_name, user_id, entity_key,
-                        severity, score, title, summary, evidence,
-                        confirmed_at
+                        incident_type, severity, status, score,
+                        title, summary, patient_zero, dwell_time_minutes,
+                        first_seen, last_seen, confirmed_at,
+                        evidence, raw_signals
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, now()
+                        %s, %s, %s, %s,
+                        %s, %s, 'open', %s,
+                        %s, %s, %s, %s,
+                        %s, %s, NOW(),
+                        %s::jsonb, %s::jsonb
                     )
-                    ON CONFLICT DO NOTHING
-                    RETURNING id
+                    RETURNING id::text
                     """,
                     (
-                        tenant_id,
-                        client_name,
-                        user_id,
-                        entity_key,
-                        severity,
-                        int(score),
-                        title,
-                        summary,
-                        json.dumps(evidence),
+                        tenant_id, client_name, user_id, entity_key,
+                        DEFAULT_INCIDENT_TYPE, severity, int(total_score),
+                        title, summary, user_id, dwell_minutes,
+                        first_seen, last_seen,
+                        json.dumps(evidence_payload),
+                        json.dumps(raw_signals_payload),
                     ),
                 )
-                row = cur.fetchone()
-            self.db.conn.commit()
-            if row:
-                logger.info(
-                    "[scoring] incident created user=%s score=%d severity=%s "
-                    "signals=%d",
-                    user_id,
-                    score,
-                    severity,
-                    len(signals),
-                )
-                return True
-            return False
+                new_id = cur.fetchone()[0]
+            self._db.conn.commit()
         except Exception:
             logger.exception(
-                "[scoring] create_incident failed for %s score=%s",
-                user_id,
-                score,
+                "[scoring] incident insert failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
             )
             try:
-                self.db.conn.rollback()
+                self._db.conn.rollback()
             except Exception:
                 pass
             return False
+
+        logger.info(
+            "[scoring] MATCH user=%s score=%d severity=%s incident=%s",
+            user_id,
+            total_score,
+            severity,
+            new_id,
+        )
+        return True
+
+    def _incident_exists(self, user_id: str, incident_type: str) -> bool:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM vector_incidents
+                WHERE user_id = %s
+                  AND incident_type = %s
+                  AND confirmed_at > NOW() - %s
+                LIMIT 1
+                """,
+                (user_id, incident_type, DEDUP_WINDOW),
+            )
+            return cur.fetchone() is not None
+
+    # ----- small helpers --------------------------------------------------
+
+    @staticmethod
+    def _severity_for(score: int) -> str:
+        if score >= 90:
+            return "critical"
+        if score >= 80:
+            return "high"
+        if score >= 60:
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _client_name_for(events: Iterable[dict], tenant_id: str) -> str | None:
+        for e in events or ():
+            cn = e.get("client_name")
+            if cn:
+                return cn
+        return None
+
+    @staticmethod
+    def _timespan(events: Iterable[dict]) -> tuple[datetime | None, datetime | None]:
+        first: datetime | None = None
+        last: datetime | None = None
+        for e in events or ():
+            ts = e.get("timestamp")
+            if not isinstance(ts, datetime):
+                continue
+            if first is None or ts < first:
+                first = ts
+            if last is None or ts > last:
+                last = ts
+        return (first, last)
+
+    @staticmethod
+    def _dwell_minutes(
+        first: datetime | None,
+        last: datetime | None,
+    ) -> int | None:
+        if first is None or last is None:
+            return None
+        delta = last - first
+        return int(max(0, delta.total_seconds() // 60))
+
+    @staticmethod
+    def _title_for(
+        user_id: str,
+        fired: list[RuleResult],
+        total_score: int,
+    ) -> str:
+        if not fired:
+            return f"Anomalous activity for {user_id} (score {total_score})"
+        names = ", ".join(r.rule_name for r in fired[:3])
+        if len(fired) > 3:
+            names = f"{names} +{len(fired) - 3} more"
+        return (
+            f"Anomalous activity for {user_id} — {names} (score {total_score})"
+        )
+
+    @staticmethod
+    def _summary_for(
+        fired: list[RuleResult],
+        total_score: int,
+    ) -> str:
+        if not fired:
+            return f"Aggregate anomaly score {total_score}."
+        parts = "; ".join(
+            f"{r.rule_name} +{int(r.score_delta or 0)}" for r in fired
+        )
+        noun = "rule" if len(fired) == 1 else "rules"
+        return (
+            f"Aggregate anomaly score {total_score} from {len(fired)} "
+            f"fired {noun}: {parts}."
+        )
