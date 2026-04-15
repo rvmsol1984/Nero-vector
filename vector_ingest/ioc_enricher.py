@@ -155,7 +155,25 @@ class OpenCTIClient:
         swallow the exception and log it so one bad query never
         blocks the rest of the enrichment cycle.
         """
-        payload = {"query": _GRAPHQL_QUERY, "variables": {"value": value}}
+        # Use inline value instead of variable to avoid OpenCTI
+        # String! vs Any! type validation error
+        inline_query = """
+{ stixCyberObservables(
+    filters: {mode: and, filters: [{key: "value", values: ["%s"]}], filterGroups: []}
+  ) { edges { node {
+    id entity_type
+    ... on IPv4Addr  { value }
+    ... on IPv6Addr  { value }
+    ... on DomainName { value }
+    ... on Url       { value }
+    ... on EmailAddr { value }
+    ... on StixFile  { hashes { algorithm hash } }
+    indicators { edges { node {
+      id name confidence description pattern valid_from valid_until
+    } } }
+  } } }
+}""" % value.replace('"', '\"')
+        payload = {"query": inline_query}
         resp = self._session.post(self._url, json=payload, timeout=self._timeout)
         resp.raise_for_status()
         body = resp.json()
