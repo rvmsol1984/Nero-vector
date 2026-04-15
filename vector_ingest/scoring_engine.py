@@ -123,9 +123,10 @@ class CorrelationRule(ABC):
 
     Subclass this and implement ``evaluate`` -- the engine gives
     each rule the user's recent events plus their baseline profile
-    and expects a ``RuleResult`` back. Rules should be pure Python
-    (no DB access) so the cycle budget is predictable and rules
-    stay unit-testable.
+    and expects a ``RuleResult`` back. Rules that need to reach
+    beyond the events list (e.g. to query vector_events with a
+    rule-specific lookback window) can use ``self._db`` which the
+    engine populates via ``bind_db`` when the rule is registered.
 
     Subclasses can override ``name`` as a class attribute if they
     want a friendlier label than the class name.
@@ -134,6 +135,18 @@ class CorrelationRule(ABC):
     #: Optional friendlier name. When ``None``, the class name is
     #: used instead via the ``rule_name`` property.
     name: str | None = None
+
+    def __init__(self) -> None:
+        # Populated by ScoringEngine.register_rule(). Rules that
+        # don't need DB access can leave this alone; rules that do
+        # should check for None before issuing queries so they
+        # degrade to fired=False when unbound (e.g. in unit tests).
+        self._db: Database | None = None
+
+    def bind_db(self, db: Database) -> None:
+        """Called by the engine during registration to wire the
+        shared DB handle into the rule. Idempotent."""
+        self._db = db
 
     @property
     def rule_name(self) -> str:
@@ -207,20 +220,29 @@ class ScoringEngine:
     ) -> None:
         self._db = db
         self._rules: list[CorrelationRule] = []
-        if rules:
-            for r in rules:
-                self.register_rule(r)
+        if rules is None:
+            # Default rule set. Future rules should be appended here
+            # so a plain ``ScoringEngine(db)`` from main.py picks up
+            # every Phase 2 detection automatically.
+            rules = [ImpossibleTravelRule()]
+        for r in rules:
+            self.register_rule(r)
 
     # ----- rule registration ---------------------------------------------
 
     def register_rule(self, rule: CorrelationRule) -> None:
         """Append a rule to the evaluation list. Safe to call at
-        any time between constructor and first ``poll_once``."""
+        any time between constructor and first ``poll_once``. The
+        engine's DB handle is wired into the rule at registration
+        time via ``bind_db`` so rules that need to issue their own
+        queries can reach Postgres without threading a connection
+        through ``evaluate``."""
         if not isinstance(rule, CorrelationRule):
             raise TypeError(
                 "ScoringEngine.register_rule() expected a CorrelationRule "
                 f"instance, got {type(rule).__name__}"
             )
+        rule.bind_db(self._db)
         self._rules.append(rule)
         logger.info(
             "[scoring] registered rule", extra={"rule": rule.rule_name},
@@ -607,3 +629,152 @@ class ScoringEngine:
             f"Aggregate anomaly score {total_score} from {len(fired)} "
             f"fired {noun}: {parts}."
         )
+
+
+# ---------------------------------------------------------------------------
+# rules
+# ---------------------------------------------------------------------------
+
+class ImpossibleTravelRule(CorrelationRule):
+    """Fires when a user authenticated from two distinct countries
+    within a 2-hour window -- physically impossible for a
+    legitimate session and a high-confidence indicator of
+    credential compromise or a hijacked access token.
+
+    Unlike most rules, ImpossibleTravel needs a wider lookback
+    window than the engine's default 30 minutes so it can still
+    catch "logged in from Chicago at 10:05, logged in from Lagos
+    at 11:50" cases where the two sign-ins straddle the window.
+    We issue our own SQL query against ``vector_events`` using
+    ``self._db`` populated by ``ScoringEngine.register_rule``.
+
+    Scoring: a single fired result is worth 40 points, well under
+    the 80-point incident threshold on its own so operators don't
+    get paged for every corporate VPN misroute. When it fires
+    alongside a second signal (new country, off-hours, anomalous
+    download volume, etc.) the combined score crosses threshold
+    and produces an incident.
+    """
+
+    name = "ImpossibleTravel"
+    SCORE_DELTA = 40
+    LOOKBACK = timedelta(hours=2)
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        # No events -> nothing to rule on. The engine only asks
+        # rules to evaluate users who had activity inside the
+        # scoring window so this branch is mostly belt-and-braces.
+        if not events:
+            return RuleResult(
+                rule_name=self.rule_name, score_delta=0, fired=False,
+            )
+
+        # All events in the list belong to the same user, so
+        # (tenant_id, user_id) can be read off any one of them.
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return RuleResult(
+                rule_name=self.rule_name, score_delta=0, fired=False,
+            )
+
+        # The engine wires its DB handle in during register_rule;
+        # an unbound rule (e.g. during unit tests) simply doesn't
+        # fire instead of crashing the cycle.
+        if self._db is None:
+            logger.debug(
+                "[impossible_travel] rule has no DB handle, skipping",
+            )
+            return RuleResult(
+                rule_name=self.rule_name, score_delta=0, fired=False,
+            )
+
+        try:
+            logins = self._fetch_logins(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[impossible_travel] login fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return RuleResult(
+                rule_name=self.rule_name, score_delta=0, fired=False,
+            )
+
+        # Collapse into {country: (first_seen_ip, first_seen_ts)}.
+        # Keeping only the first occurrence per country makes the
+        # time-delta we emit reflect "when did we first see country
+        # A vs country B", which is the operator-useful framing.
+        first_by_country: dict[str, tuple[str | None, datetime]] = {}
+        for country, client_ip, ts in logins:
+            if not country:
+                continue
+            if country not in first_by_country:
+                first_by_country[country] = (client_ip, ts)
+
+        if len(first_by_country) < 2:
+            return RuleResult(
+                rule_name=self.rule_name, score_delta=0, fired=False,
+            )
+
+        # Pick the two earliest country appearances so the
+        # time_delta_minutes evidence field is signed positive and
+        # the "from X at Ta to Y at Tb" narrative reads naturally
+        # for the Incidents UI.
+        ordered = sorted(
+            first_by_country.items(),
+            key=lambda kv: kv[1][1],
+        )
+        (country_a, (ip_a, t_a)), (country_b, (ip_b, t_b)) = ordered[:2]
+        delta_seconds = (t_b - t_a).total_seconds()
+        time_delta_minutes = int(max(0, delta_seconds // 60))
+
+        return RuleResult(
+            rule_name=self.rule_name,
+            score_delta=self.SCORE_DELTA,
+            fired=True,
+            evidence={
+                "user":               user_id,
+                "country_a":          country_a,
+                "country_b":          country_b,
+                "ip_a":               ip_a,
+                "ip_b":               ip_b,
+                "time_delta_minutes": time_delta_minutes,
+            },
+        )
+
+    # ----- internals -----------------------------------------------------
+
+    def _fetch_logins(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple[str | None, str | None, datetime]]:
+        """Return ``(geo_country, client_ip, timestamp)`` tuples for
+        every ``UserLoggedIn`` event for this user in the last
+        ``LOOKBACK`` window, ordered earliest-first. Rows with NULL
+        ``geo_country`` are filtered server-side so the caller can
+        rely on country being populated."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT geo_country, client_ip, timestamp
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND timestamp > NOW() - %s
+                  AND geo_country IS NOT NULL
+                ORDER BY timestamp ASC
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+            return [(row[0], row[1], row[2]) for row in cur.fetchall()]
