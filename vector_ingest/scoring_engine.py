@@ -27,12 +27,16 @@ Expected database schema (from ``migrations/009_incidents.sql``):
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
+
+import requests
 
 from vector_ingest.db import Database
 
@@ -224,7 +228,7 @@ class ScoringEngine:
             # Default rule set. Future rules should be appended here
             # so a plain ``ScoringEngine(db)`` from main.py picks up
             # every Phase 2 detection automatically.
-            rules = [ImpossibleTravelRule()]
+            rules = [NewCountryLoginRule()]
         for r in rules:
             self.register_rule(r)
 
@@ -635,146 +639,285 @@ class ScoringEngine:
 # rules
 # ---------------------------------------------------------------------------
 
-class ImpossibleTravelRule(CorrelationRule):
-    """Fires when a user authenticated from two distinct countries
-    within a 2-hour window -- physically impossible for a
-    legitimate session and a high-confidence indicator of
-    credential compromise or a hijacked access token.
+class NewCountryLoginRule(CorrelationRule):
+    """Fires when a user logged in from an IP whose country does
+    not appear in their baseline ``login_countries`` profile.
 
-    Unlike most rules, ImpossibleTravel needs a wider lookback
-    window than the engine's default 30 minutes so it can still
-    catch "logged in from Chicago at 10:05, logged in from Lagos
-    at 11:50" cases where the two sign-ins straddle the window.
-    We issue our own SQL query against ``vector_events`` using
-    ``self._db`` populated by ``ScoringEngine.register_rule``.
+    Flow per evaluation:
 
-    Scoring: a single fired result is worth 40 points, well under
-    the 80-point incident threshold on its own so operators don't
-    get paged for every corporate VPN misroute. When it fires
-    alongside a second signal (new country, off-hours, anomalous
-    download volume, etc.) the combined score crosses threshold
-    and produces an incident.
+    1.  Pull every distinct ``client_ip`` off this user's
+        ``UserLoggedIn`` events in the last 24 hours.
+    2.  Pull the user's ``login_countries`` from
+        ``vector_user_baselines`` (we handle both the object form
+        ``{"US": 42, "DE": 3}`` and a flat array form so future
+        schema tweaks don't break the rule).
+    3.  Resolve each non-private IP's country via
+        ``https://ipinfo.io/{ip}/json``. Results are cached on the
+        rule instance for 24 hours and the calls are rate-limited
+        to 1/sec so repeated cycles don't hammer ipinfo.
+    4.  Fire the first time a resolved country doesn't match the
+        baseline set.
+
+    Safety: when the user has no baseline yet (a brand new user,
+    or the BaselineEngine hasn't built one for them) the rule does
+    NOT fire -- otherwise every first-ever login would trip it.
+    Private / loopback / link-local / multicast addresses are
+    skipped via the stdlib ``ipaddress`` module before any network
+    call is made.
+
+    Score: 25 points on a single fire. Below the 80-point incident
+    threshold on its own so a benign travel day doesn't page
+    anyone, but combines with other rules (impossible travel,
+    IOC match, etc.) to confirm incidents.
     """
 
-    name = "ImpossibleTravel"
-    SCORE_DELTA = 40
-    LOOKBACK = timedelta(hours=2)
+    name = "NewCountryLogin"
+    SCORE_DELTA = 25
+    LOOKBACK = timedelta(hours=24)
+
+    # ipinfo plumbing
+    IPINFO_URL_TEMPLATE = "https://ipinfo.io/{ip}/json"
+    IPINFO_TIMEOUT = 5
+    IPINFO_RATE_LIMIT_SEC = 1.0
+    CACHE_TTL = timedelta(hours=24)
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Instance-level IP -> (expires_at, country_code | None)
+        # cache. Shared across ``evaluate`` calls on the same rule
+        # instance so a second user from the same egress IP in the
+        # same cycle is free. ``None`` is a cached negative result
+        # (ipinfo didn't know the IP / returned a blank country).
+        self._cache: dict[str, tuple[datetime, str | None]] = {}
+        self._last_call_at: float = 0.0
+        self._session: requests.Session | None = None
+
+    # ----- main entrypoint ----------------------------------------------
 
     def evaluate(
         self,
         events: list[dict],
         user_profile: dict,
     ) -> RuleResult:
-        # No events -> nothing to rule on. The engine only asks
-        # rules to evaluate users who had activity inside the
-        # scoring window so this branch is mostly belt-and-braces.
-        if not events:
-            return RuleResult(
-                rule_name=self.rule_name, score_delta=0, fired=False,
-            )
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
 
-        # All events in the list belong to the same user, so
-        # (tenant_id, user_id) can be read off any one of them.
+        # The engine only calls rules for users with recent
+        # activity so events should always be non-empty, but be
+        # defensive.
+        if not events:
+            return miss
+
         first = events[0]
         tenant_id = first.get("tenant_id")
         user_id = first.get("user_id")
         if not tenant_id or not user_id:
-            return RuleResult(
-                rule_name=self.rule_name, score_delta=0, fired=False,
-            )
+            return miss
 
-        # The engine wires its DB handle in during register_rule;
-        # an unbound rule (e.g. during unit tests) simply doesn't
-        # fire instead of crashing the cycle.
+        # Unbound rule (unit test / misconfigured caller) -- fail
+        # closed without raising so the cycle stays healthy.
         if self._db is None:
             logger.debug(
-                "[impossible_travel] rule has no DB handle, skipping",
+                "[new_country] rule has no DB handle, skipping",
             )
-            return RuleResult(
-                rule_name=self.rule_name, score_delta=0, fired=False,
-            )
+            return miss
 
+        # 1. unique login IPs in the last 24h
         try:
-            logins = self._fetch_logins(tenant_id, user_id)
+            login_ips = self._fetch_login_ips(tenant_id, user_id)
         except Exception:
             logger.exception(
-                "[impossible_travel] login fetch failed",
+                "[new_country] login IP fetch failed",
                 extra={"tenant_id": tenant_id, "user_id": user_id},
             )
-            try:
-                self._db.conn.rollback()
-            except Exception:
-                pass
-            return RuleResult(
-                rule_name=self.rule_name, score_delta=0, fired=False,
-            )
+            self._safe_rollback()
+            return miss
 
-        # Collapse into {country: (first_seen_ip, first_seen_ts)}.
-        # Keeping only the first occurrence per country makes the
-        # time-delta we emit reflect "when did we first see country
-        # A vs country B", which is the operator-useful framing.
-        first_by_country: dict[str, tuple[str | None, datetime]] = {}
-        for country, client_ip, ts in logins:
-            if not country:
+        if not login_ips:
+            return miss
+
+        # 2. baseline country set for this user
+        try:
+            baseline_countries = self._fetch_baseline_countries(
+                tenant_id, user_id,
+            )
+        except Exception:
+            logger.exception(
+                "[new_country] baseline fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            self._safe_rollback()
+            return miss
+
+        # No baseline -> don't fire. Otherwise a brand-new user's
+        # very first login would produce an incident.
+        if not baseline_countries:
+            return miss
+
+        # 3. resolve each IP via ipinfo, stop on the first miss
+        for ip in login_ips:
+            country = self._resolve_country(ip)
+            if country is None:
                 continue
-            if country not in first_by_country:
-                first_by_country[country] = (client_ip, ts)
-
-        if len(first_by_country) < 2:
+            if country in baseline_countries:
+                continue
             return RuleResult(
-                rule_name=self.rule_name, score_delta=0, fired=False,
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":               user_id,
+                    "new_country":        country,
+                    "ip":                 ip,
+                    "baseline_countries": sorted(baseline_countries),
+                },
             )
 
-        # Pick the two earliest country appearances so the
-        # time_delta_minutes evidence field is signed positive and
-        # the "from X at Ta to Y at Tb" narrative reads naturally
-        # for the Incidents UI.
-        ordered = sorted(
-            first_by_country.items(),
-            key=lambda kv: kv[1][1],
-        )
-        (country_a, (ip_a, t_a)), (country_b, (ip_b, t_b)) = ordered[:2]
-        delta_seconds = (t_b - t_a).total_seconds()
-        time_delta_minutes = int(max(0, delta_seconds // 60))
+        return miss
 
-        return RuleResult(
-            rule_name=self.rule_name,
-            score_delta=self.SCORE_DELTA,
-            fired=True,
-            evidence={
-                "user":               user_id,
-                "country_a":          country_a,
-                "country_b":          country_b,
-                "ip_a":               ip_a,
-                "ip_b":               ip_b,
-                "time_delta_minutes": time_delta_minutes,
-            },
-        )
+    # ----- database ------------------------------------------------------
 
-    # ----- internals -----------------------------------------------------
-
-    def _fetch_logins(
+    def _fetch_login_ips(
         self,
         tenant_id: str,
         user_id: str,
-    ) -> list[tuple[str | None, str | None, datetime]]:
-        """Return ``(geo_country, client_ip, timestamp)`` tuples for
-        every ``UserLoggedIn`` event for this user in the last
-        ``LOOKBACK`` window, ordered earliest-first. Rows with NULL
-        ``geo_country`` are filtered server-side so the caller can
-        rely on country being populated."""
+    ) -> list[str]:
+        """Return unique ``client_ip`` values from this user's
+        ``UserLoggedIn`` events over the lookback window."""
         with self._db.conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT geo_country, client_ip, timestamp
+                SELECT DISTINCT client_ip
                 FROM vector_events
                 WHERE tenant_id = %s
                   AND user_id = %s
                   AND event_type = 'UserLoggedIn'
+                  AND client_ip IS NOT NULL
                   AND timestamp > NOW() - %s
-                  AND geo_country IS NOT NULL
-                ORDER BY timestamp ASC
                 """,
                 (tenant_id, user_id, self.LOOKBACK),
             )
-            return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+            return [row[0] for row in cur.fetchall() if row[0]]
+
+    def _fetch_baseline_countries(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> set[str]:
+        """Return the set of country codes present on the user's
+        baseline profile. Tolerates both ``{"US": 42}`` and
+        ``["US", "DE"]`` shapes so a schema change doesn't break
+        the rule silently."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT login_countries
+                FROM vector_user_baselines
+                WHERE tenant_id = %s AND user_id = %s
+                """,
+                (tenant_id, user_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return set()
+        raw = row[0]
+        if isinstance(raw, dict):
+            return {k for k in raw.keys() if k}
+        if isinstance(raw, (list, tuple, set)):
+            return {str(v) for v in raw if v}
+        return set()
+
+    def _safe_rollback(self) -> None:
+        if self._db is None:
+            return
+        try:
+            self._db.conn.rollback()
+        except Exception:
+            pass
+
+    # ----- ipinfo resolver ----------------------------------------------
+
+    @staticmethod
+    def _is_skippable_ip(ip: str) -> bool:
+        """Return True for any address we shouldn't look up --
+        RFC1918, loopback, link-local, multicast, unspecified, or
+        anything we can't even parse."""
+        try:
+            addr = ipaddress.ip_address(str(ip).strip())
+        except (ValueError, TypeError):
+            return True
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.is_reserved
+        )
+
+    def _cache_get(self, ip: str) -> tuple[bool, str | None]:
+        entry = self._cache.get(ip)
+        if not entry:
+            return (False, None)
+        expires_at, country = entry
+        if datetime.now(timezone.utc) > expires_at:
+            self._cache.pop(ip, None)
+            return (False, None)
+        return (True, country)
+
+    def _cache_put(self, ip: str, country: str | None) -> None:
+        self._cache[ip] = (
+            datetime.now(timezone.utc) + self.CACHE_TTL,
+            country,
+        )
+
+    def _rate_limit(self) -> None:
+        elapsed = time.monotonic() - self._last_call_at
+        if elapsed < self.IPINFO_RATE_LIMIT_SEC:
+            time.sleep(self.IPINFO_RATE_LIMIT_SEC - elapsed)
+        self._last_call_at = time.monotonic()
+
+    def _resolve_country(self, ip: str) -> str | None:
+        """Return the ISO-3166 alpha-2 country code ipinfo.io
+        reports for ``ip``, or ``None`` when ipinfo is
+        unreachable, the IP is private, or the response carries
+        no country field. Fail-open semantics: a missing country
+        never flags a user."""
+        if self._is_skippable_ip(ip):
+            return None
+
+        hit, cached = self._cache_get(ip)
+        if hit:
+            return cached
+
+        self._rate_limit()
+        if self._session is None:
+            self._session = requests.Session()
+        url = self.IPINFO_URL_TEMPLATE.format(ip=ip)
+        try:
+            resp = self._session.get(url, timeout=self.IPINFO_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.debug("[new_country] ipinfo request failed ip=%s err=%s", ip, exc)
+            # Don't cache transport errors -- retry next cycle.
+            return None
+
+        if not resp.ok:
+            logger.debug(
+                "[new_country] ipinfo non-2xx ip=%s status=%s",
+                ip, resp.status_code,
+            )
+            # Negative-cache 4xx (non-429) so we stop retrying.
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                self._cache_put(ip, None)
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            self._cache_put(ip, None)
+            return None
+
+        country = (data.get("country") or "").strip() or None
+        self._cache_put(ip, country)
+        return country
