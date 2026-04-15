@@ -20,6 +20,7 @@ from typing import Any
 import requests
 
 from vector_ingest.db import Database
+from vector_ingest.normalizer import compute_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,16 @@ HUNTING_POLL_INTERVAL = timedelta(minutes=15)
 
 # KQL queries executed on each hunting cycle. Each one projects a
 # uniform set of columns so normalize_hunting can read them by name.
+#
+# Most queries land in ``vector_defender_hunting`` as-is. The one
+# exception is ``identity_logon`` which is routed into
+# ``vector_events`` with event_type='UserLoggedIn' so the scoring
+# engine's correlation rules (impossible travel, AiTM, BEC) can see
+# Defender Identity logons alongside UAL sign-ins. See
+# ``IDENTITY_LOGON_QUERY_NAME`` below and the special-cased branch
+# in ``_poll_hunting``.
+IDENTITY_LOGON_QUERY_NAME = "identity_logon"
+
 HUNTING_QUERIES: dict[str, str] = {
     "sensitive_file_read": (
         "DeviceEvents "
@@ -59,7 +70,23 @@ HUNTING_QUERIES: dict[str, str] = {
         "| project Timestamp, DeviceId, DeviceName, RemoteIP, RemotePort, "
         "RemoteIPType, InitiatingProcessFileName, InitiatingProcessAccountUpn"
     ),
+    IDENTITY_LOGON_QUERY_NAME: (
+        "IdentityLogonEvents "
+        "| where Timestamp > ago(1h) "
+        "| where ActionType == 'LogonSuccess' "
+        "| project Timestamp, AccountUpn, IPAddress, City, Country, ISP, "
+        "DeviceName, Application, Protocol, FailureReason "
+        "| limit 1000"
+    ),
 }
+
+# Checkpoint key used purely for observability on the identity_logon
+# query. The KQL ``ago(1h)`` clause already bounds the window and the
+# vector_events dedup fingerprint collapses any overlap, so advancing
+# this checkpoint has no effect on what gets polled -- it just lets
+# us track "last successful identity_logon sweep" in
+# vector_ingest_state for operators.
+IDENTITY_LOGON_CHECKPOINT = "IdentityLogon_v1"
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -296,21 +323,62 @@ class DefenderIngestor:
             results = body.get("Results") or body.get("results") or []
 
             written = 0
-            for r in results:
-                row = self._normalize_hunting(query_name, r)
-                if not row:
-                    continue
-                try:
-                    if self.db.insert_defender_hunting(row):
-                        written += 1
-                except Exception:
-                    logger.exception(
-                        "defender hunting insert failed",
-                        extra={
-                            "tenant_id": self.tenant_id,
-                            "query": query_name,
-                        },
-                    )
+            # The identity_logon query is special-cased: results are
+            # projected into vector_events as UserLoggedIn rows so the
+            # scoring engine's identity-centric correlation rules see
+            # Defender Identity logons. Everything else lands in
+            # vector_defender_hunting unchanged.
+            if query_name == IDENTITY_LOGON_QUERY_NAME:
+                rows: list[dict] = []
+                max_ts: datetime | None = None
+                for r in results:
+                    row = self._normalize_identity_logon(r)
+                    if not row:
+                        continue
+                    rows.append(row)
+                    ts = row.get("timestamp")
+                    if ts and (max_ts is None or ts > max_ts):
+                        max_ts = ts
+                if rows:
+                    try:
+                        written = self.db.insert_events(rows)
+                    except Exception:
+                        logger.exception(
+                            "defender identity_logon insert failed",
+                            extra={
+                                "tenant_id": self.tenant_id,
+                                "query": query_name,
+                            },
+                        )
+                if max_ts is not None:
+                    try:
+                        self.db.update_checkpoint(
+                            self.tenant_id,
+                            self.client_name,
+                            IDENTITY_LOGON_CHECKPOINT,
+                            max_ts,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[defender] identity_logon checkpoint update failed",
+                            exc_info=True,
+                        )
+            else:
+                for r in results:
+                    row = self._normalize_hunting(query_name, r)
+                    if not row:
+                        continue
+                    try:
+                        if self.db.insert_defender_hunting(row):
+                            written += 1
+                    except Exception:
+                        logger.exception(
+                            "defender hunting insert failed",
+                            extra={
+                                "tenant_id": self.tenant_id,
+                                "query": query_name,
+                            },
+                        )
 
             logger.info(
                 "defender hunting poll",
@@ -339,6 +407,52 @@ class DefenderIngestor:
             "action_type": r.get("ActionType") or query_name,
             "timestamp":   ts,
             "raw_json":    r,
+        }
+
+    def _normalize_identity_logon(self, r: dict) -> dict | None:
+        """Project an IdentityLogonEvents row into the vector_events
+        row shape used by db.insert_events().
+
+        Every result becomes a synthetic UserLoggedIn event keyed on
+        AccountUpn so the downstream scoring engine treats Defender
+        Identity logons identically to UAL logons. Rows with no
+        AccountUpn or an unparseable timestamp are dropped so we
+        never write an empty/anonymous login.
+        """
+        if not isinstance(r, dict):
+            return None
+        ts = _parse_iso(r.get("Timestamp") or r.get("timestamp"))
+        if ts is None:
+            return None
+        user_id = (r.get("AccountUpn") or "").strip()
+        if not user_id:
+            return None
+        entity_key = f"{self.tenant_id}::{user_id}"
+        event_type = "UserLoggedIn"
+        client_ip = (r.get("IPAddress") or "").strip() or None
+        raw_json = {
+            "Country":     (r.get("Country") or "").strip() or None,
+            "City":        (r.get("City")    or "").strip() or None,
+            "ASN":         (r.get("ISP")     or "").strip() or None,
+            "DeviceName":  (r.get("DeviceName")  or "").strip() or None,
+            "Application": (r.get("Application") or "").strip() or None,
+            "Protocol":    (r.get("Protocol")    or "").strip() or None,
+            "source":      "defender_identity",
+        }
+        return {
+            "tenant_id":         self.tenant_id,
+            "client_name":       self.client_name,
+            "user_id":           user_id,
+            "entity_key":        entity_key,
+            "event_type":        event_type,
+            "workload":          "AzureActiveDirectory",
+            "result_status":     "Success",
+            "client_ip":         client_ip,
+            "user_agent":        None,
+            "timestamp":         ts,
+            "source":            "defender_identity",
+            "dedup_fingerprint": compute_fingerprint(entity_key, event_type, ts),
+            "raw_json":          raw_json,
         }
 
     # ------------------------------------------------------------------ orchestration

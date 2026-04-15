@@ -22,6 +22,7 @@ from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
 from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
+from vector_ingest.signin_logs import SignInLogPoller
 from vector_ingest.threatlocker_ingest import ThreatLockerIngestor
 
 
@@ -99,6 +100,19 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                 client_secret=client_secret,
                 db=db,
                 license_tier=t.get("license_tier", "BizPremium"),
+            )
+        )
+        # Graph /auditLogs/signIns is available to every tenant that
+        # consents to AuditLog.Read.All, regardless of license tier.
+        # The poller self-disables on the first 403 so we don't have
+        # to gate construction here -- every tenant gets one.
+        ingestors.append(
+            SignInLogPoller(
+                tenant_id=t["tenant_id"],
+                client_name=t["name"],
+                client_id=client_id,
+                client_secret=client_secret,
+                db=db,
             )
         )
         if str(t.get("license_tier", "")).upper() == "E5":
