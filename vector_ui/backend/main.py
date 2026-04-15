@@ -2182,7 +2182,7 @@ def incidents_list(limit: int = Query(50, ge=1, le=200), status: str = Query("")
     """, (limit,))
 
 @app.post("/api/incidents/{incident_id}/status")
-def incident_update_status(incident_id: str, body: dict = Body(...)):
+def incident_update_status(incident_id: str, body: dict):
     status = body.get("status")
     db.execute("""
         UPDATE vector_incidents SET status = %s WHERE id = %s
