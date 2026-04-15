@@ -97,7 +97,7 @@ export default function Events() {
     return () => {
       cancel = true;
     };
-  }, [offset, tenant, eventType, workload, userQuery]);
+  }, [offset, tenant, eventType, workload, userQuery, ipQuery]);
 
   const activeCount = [tenant, eventType, workload, userQuery, ipQuery].filter(Boolean).length;
 
@@ -180,6 +180,7 @@ export default function Events() {
           </select>
 
           <input
+            className="flex-1 min-w-[160px] bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-blue-500"
             type="search"
             placeholder="search user email…"
             value={userQuery}
