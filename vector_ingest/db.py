@@ -453,3 +453,38 @@ class Database:
             written = cur.rowcount
         self.conn.commit()
         return written > 0
+
+    def upsert_events_geo(self, events) -> int:
+        """Insert events but on conflict update geo fields from sign-in logs."""
+        written = 0
+        for ev in events:
+            rj = ev.get("raw_json") or {}
+            country = rj.get("Country")
+            city = rj.get("City")
+            asn = rj.get("ASN")
+            try:
+                self.execute("""
+                    INSERT INTO vector_events
+                        (id, tenant_id, client_name, entity_key, user_id,
+                         event_type, workload, timestamp, client_ip,
+                         result_status, dedup_fingerprint, raw_json)
+                    VALUES
+                        (%(id)s, %(tenant_id)s, %(client_name)s, %(entity_key)s,
+                         %(user_id)s, %(event_type)s, %(workload)s, %(timestamp)s,
+                         %(client_ip)s, %(result_status)s, %(dedup_fingerprint)s,
+                         %(raw_json)s)
+                    ON CONFLICT (dedup_fingerprint) DO UPDATE SET
+                        raw_json = vector_events.raw_json ||
+                            jsonb_build_object(
+                                'Country', EXCLUDED.raw_json->>'Country',
+                                'City',    EXCLUDED.raw_json->>'City',
+                                'ASN',     EXCLUDED.raw_json->>'ASN',
+                                'source',  EXCLUDED.raw_json->>'source'
+                            )
+                        WHERE vector_events.raw_json->>'Country' IS NULL
+                """, ev)
+                written += 1
+            except Exception:
+                pass
+        return written
+

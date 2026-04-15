@@ -349,7 +349,7 @@ class SignInLogPoller:
         written = 0
         if rows:
             try:
-                written = self.db.insert_events(rows)
+                written = self.db.upsert_events_geo(rows)
             except Exception:
                 logger.exception(
                     "[signin] insert_events failed",
