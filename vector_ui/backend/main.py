@@ -2145,3 +2145,34 @@ async def spa(full_path: str = "") -> FileResponse:
     if index.is_file():
         return FileResponse(str(index))
     raise HTTPException(status_code=404)
+
+@app.get("/api/baseline/stats")
+def baseline_stats():
+    return db.fetch_one("""
+        SELECT COUNT(*) as total_baselines,
+            COUNT(*) FILTER (WHERE computed_at > NOW() - INTERVAL '1 hour') as fresh,
+            MAX(computed_at) as last_computed,
+            AVG(jsonb_array_length(known_ips)) as avg_known_ips
+        FROM vector_user_baselines
+    """) or {}
+
+@app.get("/api/baseline/list")
+def baseline_list(limit: int = Query(100, ge=1, le=500), search: str = Query("")):
+    if search:
+        return db.fetch_all("""
+            SELECT user_id, tenant_id, client_name, computed_at,
+                jsonb_array_length(known_ips) as ip_count,
+                jsonb_array_length(known_devices) as device_count,
+                known_ips, login_countries, known_devices
+            FROM vector_user_baselines
+            WHERE user_id ILIKE %s
+            ORDER BY computed_at DESC LIMIT %s
+        """, (f"%{search}%", limit))
+    return db.fetch_all("""
+        SELECT user_id, tenant_id, client_name, computed_at,
+            jsonb_array_length(known_ips) as ip_count,
+            jsonb_array_length(known_devices) as device_count,
+            known_ips, login_countries, known_devices
+        FROM vector_user_baselines
+        ORDER BY computed_at DESC LIMIT %s
+    """, (limit,))
