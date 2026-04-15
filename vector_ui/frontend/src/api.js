@@ -42,8 +42,8 @@ export const api = {
   // ----- global ---------------------------------------------------------
   stats:      () => get("/api/stats"),
   recent:     (limit = 50) => get(`/api/events/recent${qs({ limit })}`),
-  events:     ({ limit = 50, offset = 0, tenant, event_type, workload, user, source } = {}) =>
-                get(`/api/events/recent${qs({ limit, offset, tenant, event_type, workload, user, source })}`),
+  events:     ({ limit = 50, offset = 0, tenant, event_type, workload, user, ip, source } = {}) =>
+                get(`/api/events/recent${qs({ limit, offset, tenant, event_type, workload, user, ip, source })}`),
   eventById:  (id) => get(`/api/events/${encodeURIComponent(id)}`),
   byTenant:   () => get("/api/events/by-tenant"),
   byType:     (limit = 100) => get(`/api/events/by-type${qs({ limit })}`),

@@ -30,6 +30,7 @@ export default function Events() {
   const eventType = searchParams.get("event_type") || "";
   const workload  = searchParams.get("workload")   || "";
   const userQuery = searchParams.get("user")       || "";
+  const ipQuery   = searchParams.get("ip")         || "";
   const offset    = Number(searchParams.get("offset") || 0);
 
   const [userInput, setUserInput] = useState(userQuery);
@@ -82,6 +83,7 @@ export default function Events() {
         event_type: eventType || undefined,
         workload: workload || undefined,
         user: userQuery || undefined,
+        ip: ipQuery || undefined,
       })
       .then((r) => {
         if (!cancel) setRows(r);
@@ -97,7 +99,7 @@ export default function Events() {
     };
   }, [offset, tenant, eventType, workload, userQuery]);
 
-  const activeCount = [tenant, eventType, workload, userQuery].filter(Boolean).length;
+  const activeCount = [tenant, eventType, workload, userQuery, ipQuery].filter(Boolean).length;
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -180,9 +182,15 @@ export default function Events() {
           <input
             type="search"
             placeholder="search user email…"
-            value={userInput}
-            onChange={(e) => setUserInput(e.target.value)}
-            className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-primary-light w-64"
+            value={userQuery}
+            onChange={e => { const p = new URLSearchParams(searchParams); e.target.value ? p.set("user", e.target.value) : p.delete("user"); p.delete("offset"); setSearchParams(p); }}
+          />
+          <input
+            className="flex-1 min-w-[160px] bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-blue-500"
+            type="search"
+            placeholder="search IP address…"
+            value={ipQuery}
+            onChange={e => { const p = new URLSearchParams(searchParams); e.target.value ? p.set("ip", e.target.value) : p.delete("ip"); p.delete("offset"); setSearchParams(p); }}
           />
         </div>
       </div>

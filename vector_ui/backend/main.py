@@ -109,6 +109,7 @@ def events_recent(
     event_type: str | None = Query(None),
     workload: str | None = Query(None),
     user: str | None = Query(None, description="substring search over user_id"),
+    ip: str | None = Query(None, description="substring search over client_ip"),
     source: str | None = Query(
         None,
         description="'ual' (default) for vector_events, 'inky' to read from vector_inky_events",
@@ -170,10 +171,11 @@ def events_recent(
           AND (%s::text IS NULL OR event_type  = %s)
           AND (%s::text IS NULL OR workload    = %s)
           AND (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
+          AND (%s::text IS NULL OR client_ip ILIKE '%%' || %s || '%%')
         ORDER BY timestamp DESC
         LIMIT %s OFFSET %s
         """,
-        (tenant, tenant, event_type, event_type, workload, workload, user, user, limit, offset),
+        (tenant, tenant, event_type, event_type, workload, workload, user, user, ip, ip, limit, offset),
     )
 
 
