@@ -100,6 +100,13 @@ export const api = {
   govThreatLocker:       () => get("/api/governance/threatlocker"),
   govIocMatches:         () => get("/api/ioc/matches?limit=200"),
 
+  // ----- incidents -----------------------------------------------------
+  incidentStats:    () => get("/api/incidents/stats"),
+  incidentList:     ({ limit = 50, status = "" } = {}) =>
+                      get(`/api/incidents/list${qs({ limit, status })}`),
+  incidentDetail:   (id) => get(`/api/incidents/${id}`),
+  incidentUpdate:   (id, data) => post(`/api/incidents/${id}`, data),
+
   // ----- baseline ------------------------------------------------------
   baselineStats:    () => get("/api/baseline/stats"),
   baselineList:     ({ limit = 100, search = "" } = {}) =>
