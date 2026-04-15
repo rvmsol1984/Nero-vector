@@ -24,6 +24,7 @@ from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
 from vector_ingest.signin_logs import SignInLogPoller
 from vector_ingest.threatlocker_ingest import ThreatLockerIngestor
+from vector_ingest.scoring_engine import ScoringEngine, BaselineEngine
 
 
 def configure_logging() -> None:
@@ -159,6 +160,10 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
             "[threatlocker] token/org not set, skipping ingestor",
             extra={"has_token": bool(tl_token), "has_org_id": bool(tl_org_id)},
         )
+
+    # ScoringEngine and BaselineEngine
+    ingestors.append(BaselineEngine(db=db))
+    ingestors.append(ScoringEngine(db=db))
 
     # IocEnricher runs once per cycle and walks every tenant's recent
     # events looking for OpenCTI-backed indicator matches. It's last in
