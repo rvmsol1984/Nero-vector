@@ -22,7 +22,8 @@ from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
 from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
-from vector_ingest.scoring_engine import BaselineEngine, ScoringEngine
+from vector_ingest.signin_logs import SignInLogPoller
+from vector_ingest.threatlocker_ingest import ThreatLockerIngestor
 
 
 def configure_logging() -> None:
@@ -101,6 +102,19 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                 license_tier=t.get("license_tier", "BizPremium"),
             )
         )
+        # Graph /auditLogs/signIns is available to every tenant that
+        # consents to AuditLog.Read.All, regardless of license tier.
+        # The poller self-disables on the first 403 so we don't have
+        # to gate construction here -- every tenant gets one.
+        ingestors.append(
+            SignInLogPoller(
+                tenant_id=t["tenant_id"],
+                client_name=t["name"],
+                client_id=client_id,
+                client_secret=client_secret,
+                db=db,
+            )
+        )
         if str(t.get("license_tier", "")).upper() == "E5":
             logger.info(
                 "[defender] building ingestor for E5 tenant",
@@ -116,21 +130,41 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
                 )
             )
 
-    # One tenant-agnostic IOC enricher runs alongside the per-tenant
-    # pollers. It pulls candidates from the shared vector_events +
-    # vector_defender_hunting tables, so it doesn't need per-tenant
-    # scoping at this layer.
-    logger.info("[ioc] building OpenCTI enricher")
-    ingestors.append(IocEnricher(db=db))
+    # Global workers -- not per-tenant but share the same poll cadence.
+    # ThreatLocker is a separate SaaS outside Azure AD so it's wired
+    # off a dedicated env token rather than the tenants.json file.
+    # Skipping entirely (not even constructing the ingestor) keeps
+    # installs that don't have ThreatLocker from logging 401 warnings
+    # every 5 minutes.
+    tl_token = os.environ.get("THREATLOCKER_API_TOKEN", "").strip()
+    tl_org_id = os.environ.get("THREATLOCKER_ORG_ID", "").strip()
+    tl_client_name = os.environ.get(
+        "THREATLOCKER_CLIENT_NAME", "GameChange Solar"
+    ).strip() or "GameChange Solar"
+    if tl_token and tl_org_id:
+        logger.info(
+            "[threatlocker] building ingestor",
+            extra={"org_id": tl_org_id, "client_name": tl_client_name},
+        )
+        ingestors.append(
+            ThreatLockerIngestor(
+                tenant_id=tl_org_id,
+                client_name=tl_client_name,
+                api_token=tl_token,
+                db=db,
+            )
+        )
+    else:
+        logger.info(
+            "[threatlocker] token/org not set, skipping ingestor",
+            extra={"has_token": bool(tl_token), "has_org_id": bool(tl_org_id)},
+        )
 
-    # Baseline + scoring engines are also tenant-agnostic. BaselineEngine
-    # rebuilds per-user known-good state every 60 minutes; ScoringEngine
-    # runs every 5 minutes to promote fresh IOC / Defender hits to
-    # incidents and otherwise sum signal weights per user.
-    logger.info("[baseline] building baseline engine")
-    ingestors.append(BaselineEngine(db=db))
-    logger.info("[scoring] building scoring engine")
-    ingestors.append(ScoringEngine(db=db))
+    # IocEnricher runs once per cycle and walks every tenant's recent
+    # events looking for OpenCTI-backed indicator matches. It's last in
+    # the list so it runs after the other ingestors have committed any
+    # new rows this cycle.
+    ingestors.append(IocEnricher(db=db))
     return ingestors
 
 
