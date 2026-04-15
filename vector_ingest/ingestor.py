@@ -10,6 +10,7 @@ One TenantIngestor per tenant. Responsibilities:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import time
@@ -38,6 +39,177 @@ PUBLISHER_ID = "vector-ingest"
 MAX_WINDOW = timedelta(hours=24)
 DEFAULT_LOOKBACK = timedelta(hours=1)
 TOKEN_REFRESH_SKEW = timedelta(minutes=5)
+
+
+# ---------------------------------------------------------------------------
+# ipinfo.io geo-enrichment for UserLoggedIn events
+# ---------------------------------------------------------------------------
+#
+# Adds Country / City / ASN to each UserLoggedIn event's raw_json based
+# on the client_ip. Runs inside the ingest hot path so it's built to
+# fail open: any network / parse / rate-limit error is logged at
+# DEBUG and the event is left unchanged. Results are cached per-IP
+# with a 24h TTL so the second UserLoggedIn from the same IP doesn't
+# touch the network. Private and loopback addresses are skipped
+# entirely via the stdlib ``ipaddress`` module.
+#
+# A single module-level instance is shared across every
+# TenantIngestor so the cache is effective across tenants -- two
+# different tenants hitting the same shared egress IP both get one
+# lookup, not two.
+
+_GEO_POSITIVE_TTL = timedelta(hours=24)
+_GEO_NEGATIVE_TTL = timedelta(hours=1)
+_GEO_RATE_LIMIT_SEC = 1.0
+
+
+class GeoEnricher:
+    """Lazy ipinfo.io enrichment with a 24h in-memory cache."""
+
+    def __init__(self, token: str | None = None) -> None:
+        self._token = token or None
+        # ip -> (expires_at, geo_dict or None). ``None`` is a cached
+        # negative result so we don't hammer ipinfo for IPs it
+        # doesn't know about.
+        self._cache: dict[str, tuple[datetime, dict | None]] = {}
+        self._last_call_at: float = 0.0
+        self._session = requests.Session()
+
+    # ----- public api ----------------------------------------------------
+    def enrich_event(self, normalized: dict) -> None:
+        """Mutate ``normalized['raw_json']`` in place with Country /
+        City / ASN fields when the event is a UserLoggedIn with a
+        public client_ip. All errors are swallowed."""
+        if normalized.get("event_type") != "UserLoggedIn":
+            return
+        client_ip = normalized.get("client_ip")
+        if not client_ip:
+            return
+        raw = normalized.get("raw_json")
+        if not isinstance(raw, dict):
+            return
+        try:
+            geo = self._lookup(client_ip)
+        except Exception:
+            logger.debug(
+                "[geo] unexpected enrichment failure ip=%s", client_ip, exc_info=True,
+            )
+            return
+        if not geo:
+            return
+        # Only fill fields that aren't already present so a
+        # UAL-provided Country keeps precedence over the ipinfo hit.
+        for key, value in geo.items():
+            if value and not raw.get(key):
+                raw[key] = value
+
+    # ----- internals -----------------------------------------------------
+    @staticmethod
+    def _is_skippable(ip: str) -> bool:
+        """Return True for any address we should NOT look up --
+        private ranges, loopback, link-local, multicast, unspecified,
+        and anything we can't even parse."""
+        try:
+            addr = ipaddress.ip_address(str(ip).strip())
+        except (ValueError, TypeError):
+            return True
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.is_reserved
+        )
+
+    def _cache_get(self, ip: str) -> tuple[bool, dict | None]:
+        """Return (hit, value). hit=True means we can short-circuit."""
+        entry = self._cache.get(ip)
+        if not entry:
+            return (False, None)
+        expires_at, value = entry
+        if datetime.now(timezone.utc) > expires_at:
+            self._cache.pop(ip, None)
+            return (False, None)
+        return (True, value)
+
+    def _cache_put(self, ip: str, value: dict | None) -> None:
+        ttl = _GEO_POSITIVE_TTL if value else _GEO_NEGATIVE_TTL
+        self._cache[ip] = (datetime.now(timezone.utc) + ttl, value)
+
+    def _rate_limit(self) -> None:
+        """Block the calling thread until the next slot is available.
+        Ingest runs on a single thread per tenant cycle so this is a
+        simple monotonic sleep."""
+        elapsed = time.monotonic() - self._last_call_at
+        if elapsed < _GEO_RATE_LIMIT_SEC:
+            time.sleep(_GEO_RATE_LIMIT_SEC - elapsed)
+        self._last_call_at = time.monotonic()
+
+    def _lookup(self, ip: str) -> dict | None:
+        if self._is_skippable(ip):
+            return None
+
+        hit, value = self._cache_get(ip)
+        if hit:
+            return value
+
+        self._rate_limit()
+        url = f"https://ipinfo.io/{ip}/json"
+        params = {"token": self._token} if self._token else None
+        try:
+            resp = self._session.get(url, params=params, timeout=5)
+        except requests.RequestException as exc:
+            logger.debug("[geo] ipinfo request failed ip=%s err=%s", ip, exc)
+            # Don't cache transport errors -- retry on next cycle.
+            return None
+
+        if not resp.ok:
+            logger.debug(
+                "[geo] ipinfo non-2xx ip=%s status=%s body=%s",
+                ip, resp.status_code, resp.text[:120],
+            )
+            # 429 / 5xx: don't cache, we want to retry eventually.
+            # 4xx (other): negative-cache so we stop hammering it.
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                self._cache_put(ip, None)
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            self._cache_put(ip, None)
+            return None
+
+        country = str(data.get("country") or "").strip() or None
+        city    = str(data.get("city")    or "").strip() or None
+        org     = str(data.get("org")     or "").strip() or None
+        geo = {
+            "Country": country,
+            "City":    city,
+            "ASN":     org,
+        }
+        # If ipinfo returned an empty envelope (no usable fields) cache
+        # it as a negative so we don't keep retrying.
+        if not any(geo.values()):
+            self._cache_put(ip, None)
+            return None
+
+        self._cache_put(ip, geo)
+        return geo
+
+
+# Module-level singleton. Constructed on first access so
+# IPINFO_TOKEN can be picked up after process start (e.g. via an
+# .env file loaded between import and first poll).
+_GEO_ENRICHER: GeoEnricher | None = None
+
+
+def _get_geo_enricher() -> GeoEnricher:
+    global _GEO_ENRICHER
+    if _GEO_ENRICHER is None:
+        _GEO_ENRICHER = GeoEnricher(token=os.environ.get("IPINFO_TOKEN") or None)
+    return _GEO_ENRICHER
 
 
 class TenantIngestor:
@@ -263,6 +435,10 @@ class TenantIngestor:
                         },
                     )
                     continue
+                # Geo-enrich UserLoggedIn events in place before batching.
+                # Fail-open: any ipinfo error is swallowed inside enrich_event
+                # so a CTI outage never blocks UAL ingest.
+                _get_geo_enricher().enrich_event(normalized)
                 batch.append(normalized)
 
                 if len(batch) >= 500:
