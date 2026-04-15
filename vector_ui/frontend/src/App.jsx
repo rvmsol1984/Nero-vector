@@ -10,6 +10,7 @@ import UserDetail from "./pages/UserDetail.jsx";
 import Baseline from "./pages/Baseline.jsx";
 import Governance from "./pages/Governance.jsx";
 import Sources from "./pages/Sources.jsx";
+import Incidents from "./pages/Incidents.jsx";
 import Watchlist from "./pages/Watchlist.jsx";
 
 export default function App() {
@@ -21,7 +22,7 @@ export default function App() {
           <Route path="/dashboard"        element={<Dashboard />} />
           <Route
             path="/incidents"
-            element={<Placeholder message="Incident correlation engine — Phase 2" />}
+            element={<Incidents />}
           />
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/events"           element={<Events />} />
