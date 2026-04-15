@@ -2120,32 +2120,6 @@ if (_static_path / "assets").is_dir():
     )
 
 
-@app.get("/{full_path:path}", include_in_schema=False)
-async def spa(full_path: str = "") -> FileResponse:
-    """Catch-all that serves the React SPA shell.
-
-    Any /api/* path that didn't match an explicit route above returns 404
-    here (so clients see a real API error, not the HTML shell). /auth/* is
-    NOT served by FastAPI at all -- the React frontend calls the auth
-    sidecar directly. Everything else either serves a matching file from
-    the built Vite bundle or returns index.html so React Router can take
-    over client-side routing.
-    """
-    if full_path.startswith("api/") or full_path == "api":
-        raise HTTPException(status_code=404)
-    if full_path.startswith("auth/") or full_path == "auth":
-        raise HTTPException(status_code=404)
-    if not _static_path.is_dir():
-        raise HTTPException(status_code=503, detail="frontend bundle not built")
-    if full_path:
-        candidate = _static_path / full_path
-        if candidate.is_file():
-            return FileResponse(str(candidate))
-    index = _static_path / "index.html"
-    if index.is_file():
-        return FileResponse(str(index))
-    raise HTTPException(status_code=404)
-
 @app.get("/api/baseline/stats")
 def baseline_stats():
     return db.fetch_one("""
@@ -2176,3 +2150,29 @@ def baseline_list(limit: int = Query(100, ge=1, le=500), search: str = Query("")
         FROM vector_user_baselines
         ORDER BY computed_at DESC LIMIT %s
     """, (limit,))
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa(full_path: str = "") -> FileResponse:
+    """Catch-all that serves the React SPA shell.
+
+    Any /api/* path that didn't match an explicit route above returns 404
+    here (so clients see a real API error, not the HTML shell). /auth/* is
+    NOT served by FastAPI at all -- the React frontend calls the auth
+    sidecar directly. Everything else either serves a matching file from
+    the built Vite bundle or returns index.html so React Router can take
+    over client-side routing.
+    """
+    if full_path.startswith("api/") or full_path == "api":
+        raise HTTPException(status_code=404)
+    if full_path.startswith("auth/") or full_path == "auth":
+        raise HTTPException(status_code=404)
+    if not _static_path.is_dir():
+        raise HTTPException(status_code=503, detail="frontend bundle not built")
+    if full_path:
+        candidate = _static_path / full_path
+        if candidate.is_file():
+            return FileResponse(str(candidate))
+    index = _static_path / "index.html"
+    if index.is_file():
+        return FileResponse(str(index))
+    raise HTTPException(status_code=404)
+
