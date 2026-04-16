@@ -1,187 +1,242 @@
+"""BaselineEngine -- daily bulk behavioural baseline builder.
+
+One single SQL statement rolls up the last 30 days of
+``vector_events`` into every user's ``vector_user_baselines`` row
+in a single round-trip. The previous implementation iterated users
+in Python and issued 5-7 queries per user; on tenants with tens of
+thousands of active identities that pattern turned into a 20-minute
+stall once an hour. This replacement aggregates everything server-
+side and upserts with ``ON CONFLICT DO UPDATE`` so the whole build
+is a single prepared-plan execution.
+
+Schema touched (read and write):
+
+    vector_events           -- input, 30-day lookback
+    vector_user_baselines   -- output, bulk upsert
+
+Runs every 24 hours. ``poll_once()`` is called by the main ingest
+loop every cycle; the engine internally checks whether 24 hours
+have elapsed since the last successful build and short-circuits
+otherwise.
+
+The baselines produced:
+
+    login_hours       jsonb object  {"0": count, "1": count, ...}
+                                     built from UserLoggedIn events
+    login_countries   jsonb array   distinct Country values seen
+                                     on UserLoggedIn events
+    login_asns        jsonb array   distinct ASN values seen on
+                                     UserLoggedIn events
+    known_devices     jsonb array   distinct raw_json->>'DeviceName'
+    known_ips         jsonb array   distinct client_ip values
+    avg_daily_events  float         events / 30
+    avg_daily_logins  float         UserLoggedIn / 30
+    baseline_days     int           days between MIN(timestamp) and
+                                     now, clamped to >= 1
+
+Log anchors ``tenant_id = "*"`` and ``client_name = "global"`` keep
+structured-log fields consistent with the other global workers
+(ThreatIntelMonitor, ScoringEngine) so main.py's JSON-line output
+doesn't carry NULLs for this worker's lines.
+"""
+
 from __future__ import annotations
-import json
+
 import logging
+import time
 from datetime import datetime, timedelta, timezone
+
 from vector_ingest.db import Database
 
-BASELINE_POLL_INTERVAL = timedelta(minutes=60)
+logger = logging.getLogger(__name__)
+
+
+# Exact name specified by the main ingest loop -- do not rename.
+BASELINE_POLL_INTERVAL = timedelta(hours=24)
+
+# Event lookback window fed into the single SQL aggregation.
+_LOOKBACK_DAYS = 30
+
+
+# One big statement. CTEs:
+#
+#   events_30d   -- the raw 30-day window, filtered to rows that
+#                   are usable (user_id + tenant_id not null).
+#   hourly       -- per-(tenant, user) jsonb object of
+#                   hour -> login_count. Separate CTE because the
+#                   inner subquery groups by hour first and then
+#                   rolls up by user; you can't express that in a
+#                   single GROUP BY against the same row set.
+#   per_user     -- per-(tenant, user) aggregates for everything
+#                   else: country/asn/device/ip distinct sets plus
+#                   avg_daily counters and baseline_days.
+#
+# The final INSERT ... SELECT ... ON CONFLICT DO UPDATE upserts
+# one row per (tenant, user) with the joined CTE output.
+#
+# ``jsonb_agg(DISTINCT x) FILTER (WHERE ...)`` is the idiomatic
+# way to produce a JSONB array of unique non-null values in one
+# pass. FILTER runs before DISTINCT, so NULLs are dropped cleanly.
+#
+# ``INSERT ... ON CONFLICT DO UPDATE`` reports a rowcount equal to
+# inserts + updates combined, which is exactly what we want to
+# log as "users processed".
+_BULK_UPSERT_SQL = """
+WITH events_30d AS (
+    SELECT tenant_id, user_id, timestamp, client_ip, event_type, raw_json
+    FROM vector_events
+    WHERE timestamp > NOW() - INTERVAL '30 days'
+      AND user_id    IS NOT NULL
+      AND tenant_id  IS NOT NULL
+),
+hourly AS (
+    SELECT tenant_id, user_id,
+           jsonb_object_agg(hour_str, cnt) AS login_hours
+    FROM (
+        SELECT tenant_id, user_id,
+               EXTRACT(HOUR FROM timestamp)::int::text AS hour_str,
+               COUNT(*)::int                           AS cnt
+        FROM events_30d
+        WHERE event_type = 'UserLoggedIn'
+        GROUP BY tenant_id, user_id,
+                 EXTRACT(HOUR FROM timestamp)::int::text
+    ) h
+    GROUP BY tenant_id, user_id
+),
+per_user AS (
+    SELECT
+        tenant_id,
+        user_id,
+        COUNT(*)::double precision / 30.0
+            AS avg_daily_events,
+        COUNT(*) FILTER (WHERE event_type = 'UserLoggedIn')::double precision
+            / 30.0
+            AS avg_daily_logins,
+        GREATEST(
+            1,
+            CEIL(EXTRACT(EPOCH FROM (NOW() - MIN(timestamp))) / 86400.0)::int
+        ) AS baseline_days,
+        COALESCE(
+            jsonb_agg(DISTINCT raw_json->>'Country')
+                FILTER (WHERE event_type = 'UserLoggedIn'
+                          AND raw_json->>'Country' IS NOT NULL),
+            '[]'::jsonb
+        ) AS login_countries,
+        COALESCE(
+            jsonb_agg(DISTINCT raw_json->>'ASN')
+                FILTER (WHERE event_type = 'UserLoggedIn'
+                          AND raw_json->>'ASN' IS NOT NULL),
+            '[]'::jsonb
+        ) AS login_asns,
+        COALESCE(
+            jsonb_agg(DISTINCT client_ip)
+                FILTER (WHERE client_ip IS NOT NULL),
+            '[]'::jsonb
+        ) AS known_ips,
+        COALESCE(
+            jsonb_agg(DISTINCT raw_json->>'DeviceName')
+                FILTER (WHERE raw_json->>'DeviceName' IS NOT NULL),
+            '[]'::jsonb
+        ) AS known_devices
+    FROM events_30d
+    GROUP BY tenant_id, user_id
+)
+INSERT INTO vector_user_baselines (
+    tenant_id, user_id, computed_at,
+    login_hours, login_countries, login_asns,
+    known_devices, known_ips,
+    avg_daily_events, avg_daily_logins, baseline_days
+)
+SELECT
+    u.tenant_id,
+    u.user_id,
+    NOW(),
+    COALESCE(h.login_hours, '{}'::jsonb),
+    u.login_countries,
+    u.login_asns,
+    u.known_devices,
+    u.known_ips,
+    u.avg_daily_events,
+    u.avg_daily_logins,
+    u.baseline_days
+FROM per_user u
+LEFT JOIN hourly h
+    ON h.tenant_id = u.tenant_id
+   AND h.user_id   = u.user_id
+ON CONFLICT (tenant_id, user_id) DO UPDATE SET
+    computed_at      = EXCLUDED.computed_at,
+    login_hours      = EXCLUDED.login_hours,
+    login_countries  = EXCLUDED.login_countries,
+    login_asns       = EXCLUDED.login_asns,
+    known_devices    = EXCLUDED.known_devices,
+    known_ips        = EXCLUDED.known_ips,
+    avg_daily_events = EXCLUDED.avg_daily_events,
+    avg_daily_logins = EXCLUDED.avg_daily_logins,
+    baseline_days    = EXCLUDED.baseline_days
+"""
+
 
 class BaselineEngine:
-    """Every 60 minutes, rebuild a row in vector_user_baselines for every
-    user that has at least 7 days of history. Each row captures the last
-    14 days of distinct client IPs, distinct UserLoggedIn Country values,
-    and distinct DeviceName values so ScoringEngine can tell what's
-    "known-good" for that user."""
+    """Daily bulk baseline builder.
+
+    ``poll_once()`` is the main-loop entrypoint. It runs one full
+    bulk upsert when ``BASELINE_POLL_INTERVAL`` has elapsed since
+    the last successful build, otherwise returns immediately. Any
+    exception is logged, the DB transaction is rolled back, and
+    the ``_last_run`` clock is still advanced so a persistently
+    failing build doesn't spin us up on every 5-minute cycle.
+    """
+
+    # Structured-logging anchors for main.py's JSON log format so
+    # every worker emits consistent tenant_id / client_name fields
+    # on its log lines. The engine is tenant-global.
+    tenant_id = "*"
+    client_name = "global"
 
     def __init__(self, db: Database) -> None:
-        self.db = db
-        self._last_poll: datetime = datetime.fromtimestamp(0, tz=timezone.utc)
-        # Cached column-kind for known_ips / login_countries /
-        # known_devices: "jsonb" => json.dumps(list), else Python list.
-        self._array_encoding: str | None = None
+        self._db = db
+        self._last_run: datetime | None = None
 
-    @property
-    def tenant_id(self) -> str:
-        return "(all)"
-
-    @property
-    def client_name(self) -> str:
-        return "baseline-engine"
-
-    # ------------------------------------------------------------------ cadence
     def poll_once(self) -> None:
         now = datetime.now(timezone.utc)
-        if now - self._last_poll < BASELINE_POLL_INTERVAL:
+        if (
+            self._last_run is not None
+            and now - self._last_run < BASELINE_POLL_INTERVAL
+        ):
             return
-        self._last_poll = now
         try:
-            self.build_baselines()
+            self._run_bulk_upsert()
         except Exception:
-            logger.exception("[baseline] cycle crashed")
-
-    # ------------------------------------------------------------------ build
-    def build_baselines(self) -> None:
-        users = self.db.fetch_all(
-            """
-            SELECT
-                user_id,
-                MAX(tenant_id)   AS tenant_id,
-                MAX(client_name) AS client_name,
-                MIN(timestamp)   AS first_seen,
-                MAX(timestamp)   AS last_seen
-            FROM vector_events
-            WHERE user_id IS NOT NULL
-            GROUP BY user_id
-            HAVING MAX(timestamp) - MIN(timestamp) >= INTERVAL '2 days' OR COUNT(*) >= 50
-            LIMIT 5000
-            """
-        )
-        built = 0
-        for user in users or []:
-            user_id = user.get("user_id")
-            if not user_id:
-                continue
-            tenant_id = user.get("tenant_id")
-            client_name = user.get("client_name")
-
-            known_ips = self._distinct(
-                """
-                SELECT DISTINCT client_ip AS val
-                FROM vector_events
-                WHERE user_id = %s
-                  AND timestamp > now() - INTERVAL '14 days'
-                  AND client_ip IS NOT NULL
-                """,
-                (user_id,),
-            )
-            login_countries = self._distinct(
-                """
-                SELECT DISTINCT raw_json->>'Country' AS val
-                FROM vector_events
-                WHERE user_id = %s
-                  AND event_type = 'UserLoggedIn'
-                  AND timestamp > now() - INTERVAL '14 days'
-                  AND raw_json ? 'Country'
-                """,
-                (user_id,),
-            )
-            known_devices = self._distinct(
-                """
-                SELECT DISTINCT raw_json->>'DeviceName' AS val
-                FROM vector_events
-                WHERE user_id = %s
-                  AND timestamp > now() - INTERVAL '14 days'
-                  AND raw_json ? 'DeviceName'
-                """,
-                (user_id,),
-            )
-
-            self._upsert(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                client_name=client_name,
-                known_ips=known_ips,
-                login_countries=login_countries,
-                known_devices=known_devices,
-            )
-            built += 1
-
-        logger.info(
-            "[baseline] cycle complete candidates=%d built=%d",
-            len(users or []),
-            built,
-        )
-
-    def _distinct(self, sql: str, params: tuple) -> list[str]:
-        rows = self.db.fetch_all(sql, params) or []
-        return [str(r["val"]) for r in rows if r.get("val")]
-
-    # ------------------------------------------------------------------ encoding
-    def _encoding(self) -> str:
-        if self._array_encoding is not None:
-            return self._array_encoding
-        col_type = _column_type(self.db, "vector_user_baselines", "known_ips")
-        # jsonb -> json.dumps(list); everything else (text[], varchar[], ...)
-        # -> pass a Python list and let psycopg2 adapt it to PG arrays.
-        self._array_encoding = "jsonb" if "json" in col_type else "array"
-        logger.info(
-            "[baseline] known_ips column encoding=%s", self._array_encoding
-        )
-        return self._array_encoding
-
-    def _encode(self, values: list[str]) -> Any:
-        return json.dumps(values) if self._encoding() == "jsonb" else list(values)
-
-    # ------------------------------------------------------------------ upsert
-    def _upsert(
-        self,
-        user_id: str,
-        tenant_id: str | None,
-        client_name: str | None,
-        known_ips: list[str],
-        login_countries: list[str],
-        known_devices: list[str],
-    ) -> None:
-        params = (
-            user_id,
-            tenant_id,
-            client_name,
-            self._encode(known_ips),
-            self._encode(login_countries),
-            self._encode(known_devices),
-        )
-        try:
-            with self.db.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO vector_user_baselines (
-                        user_id, tenant_id, client_name,
-                        known_ips, login_countries, known_devices,
-                        updated_at
-                    ) VALUES (
-                        %s, %s, %s, %s, %s, %s, now()
-                    )
-                    ON CONFLICT (tenant_id, user_id) DO UPDATE SET
-                        tenant_id       = EXCLUDED.tenant_id,
-                        client_name     = EXCLUDED.client_name,
-                        known_ips       = EXCLUDED.known_ips,
-                        login_countries = EXCLUDED.login_countries,
-                        known_devices   = EXCLUDED.known_devices,
-                        updated_at      = now()
-                    """,
-                    params,
-                )
-            self.db.conn.commit()
-        except Exception:
-            logger.exception("[baseline] upsert failed for %s", user_id)
+            logger.exception("[baseline] bulk build crashed")
             try:
-                self.db.conn.rollback()
+                self._db.conn.rollback()
             except Exception:
                 pass
+        finally:
+            # Always advance the clock, even on failure, so a broken
+            # build doesn't re-trigger on every ingest cycle.
+            self._last_run = datetime.now(timezone.utc)
 
+    # ------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# ScoringEngine -- correlates recent signals and writes incidents
-# ---------------------------------------------------------------------------
+    def _run_bulk_upsert(self) -> None:
+        start = time.monotonic()
+        logger.info(
+            "[baseline] bulk build starting lookback_days=%d",
+            _LOOKBACK_DAYS,
+        )
 
+        with self._db.conn.cursor() as cur:
+            cur.execute(_BULK_UPSERT_SQL)
+            # Postgres' INSERT ... ON CONFLICT DO UPDATE reports a
+            # rowcount equal to inserts + updates combined, which
+            # is the right "users processed" number for this log.
+            rows_written = max(0, cur.rowcount)
+        self._db.conn.commit()
 
+        duration_sec = time.monotonic() - start
+        logger.info(
+            "[baseline] bulk build complete users=%d duration_sec=%.2f",
+            rows_written,
+            duration_sec,
+        )
