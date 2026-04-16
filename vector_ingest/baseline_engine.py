@@ -4,6 +4,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from vector_ingest.db import Database
 
+BASELINE_POLL_INTERVAL = timedelta(minutes=60)
+
 class BaselineEngine:
     """Every 60 minutes, rebuild a row in vector_user_baselines for every
     user that has at least 7 days of history. Each row captures the last
