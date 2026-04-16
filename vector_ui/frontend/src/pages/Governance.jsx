@@ -26,7 +26,6 @@ const TABS = [
   { id: "unmanagedDevices",  label: "Unmanaged Devices", endpoint: "govUnmanagedDevices",  severity: "review",   withTenant: false },
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
   { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
-  { id: "claudeConnector",   label: "Claude Connector",  endpoint: "govClaudeConnector",   severity: "critical", withTenant: false },
   { id: "edrAlerts",         label: "EDR Alerts",        endpoint: "govEdrAlerts",         severity: "critical", withTenant: false },
   { id: "threatLocker",      label: "ThreatLocker",      endpoint: "govThreatLocker",      severity: "critical", withTenant: false },
   { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
@@ -219,7 +218,8 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
   if (tabId === "aiActivity") {
     const copilot = Array.isArray(raw?.copilot) ? raw.copilot : [];
     const external = Array.isArray(raw?.external_ai) ? raw.external_ai : [];
-    if (copilot.length === 0 && external.length === 0 && !raw?.external_error) {
+    const claudeConnector = raw?.claude_connector || { admin_grants: [], shadow_it_attempts: [], total: 0 };
+    if (copilot.length === 0 && external.length === 0 && claudeConnector.total === 0 && !raw?.external_error) {
       return (
         <div className="card">
           <EmptyState message="No AI activity detected" />
@@ -231,6 +231,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
         copilot={copilot}
         external={external}
         externalError={raw?.external_error}
+        claudeConnector={claudeConnector}
       />
     );
   }
@@ -1038,11 +1039,13 @@ function aiToolDisplay(remoteUrl) {
   return { label: host, host };
 }
 
-function AiActivityTab({ copilot, external, externalError }) {
+function AiActivityTab({ copilot, external, externalError, claudeConnector = {} }) {
   const [subTab, setSubTab] = useState("copilot");
+  const claudeTotal = (claudeConnector?.admin_grants?.length || 0) + (claudeConnector?.shadow_it_attempts?.length || 0);
   const SUB_TABS = [
     { id: "copilot",  label: "Microsoft Copilot", count: copilot.length },
     { id: "external", label: "External AI Tools", count: external.length },
+    { id: "claude",   label: "Claude Connector",  count: claudeTotal },
   ];
   return (
     <div className="space-y-4">

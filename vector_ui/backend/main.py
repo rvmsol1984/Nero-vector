@@ -1831,10 +1831,41 @@ def governance_ai_activity() -> dict:
             "defender hunting failed for AI activity: %s", exc.detail
         )
 
+    # Claude M365 Connector detection
+    CLAUDE_APP_IDS = (
+        "08ad6f98-a4f8-4635-bb8d-f1a3044760f0",
+        "07c030f6-5743-41b7-ba00-0a6e85f37c17",
+    )
+    placeholders = ",".join(["%s"] * len(CLAUDE_APP_IDS))
+    claude_rows = db.fetch_all(
+        f"""
+        SELECT timestamp, user_id, tenant_id, client_name,
+               raw_json->>'ResultType' as result_type,
+               raw_json->>'AppDisplayName' as app_display_name,
+               client_ip
+        FROM vector_events
+        WHERE event_type = 'UserLoggedIn'
+        AND raw_json->>'ApplicationId' IN ({placeholders})
+        ORDER BY timestamp DESC
+        LIMIT 200
+        """,
+        CLAUDE_APP_IDS,
+    )
+    admin_grants   = [r for r in claude_rows if str(r.get("result_type")) == "0"]
+    shadow_it      = [r for r in claude_rows if str(r.get("result_type")) == "90095"]
+    claude_connector = {
+        "admin_grants":        admin_grants,
+        "shadow_it_attempts":  shadow_it,
+        "total":               len(claude_rows),
+        "admin_grant_count":   len(admin_grants),
+        "shadow_it_count":     len(shadow_it),
+    }
+
     return {
-        "copilot":        copilot,
-        "external_ai":    external_ai,
-        "external_error": external_error,
+        "copilot":          copilot,
+        "external_ai":      external_ai,
+        "external_error":   external_error,
+        "claude_connector": claude_connector,
     }
 
 
