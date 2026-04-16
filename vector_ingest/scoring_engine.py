@@ -228,7 +228,11 @@ class ScoringEngine:
             # Default rule set. Future rules should be appended here
             # so a plain ``ScoringEngine(db)`` from main.py picks up
             # every Phase 2 detection automatically.
-            rules = [NewCountryLoginRule()]
+            rules = [
+                NewCountryLoginRule(),
+                OffHoursLoginRule(),
+                HighVolumeFileAccessRule(),
+            ]
         for r in rules:
             self.register_rule(r)
 
@@ -921,3 +925,227 @@ class NewCountryLoginRule(CorrelationRule):
         country = (data.get("country") or "").strip() or None
         self._cache_put(ip, country)
         return country
+
+
+class OffHoursLoginRule(CorrelationRule):
+    """Fires when a user logged in during the overnight window
+    22:00-06:00 UTC inside the last 24 hours.
+
+    A single off-hours login rarely means compromise by itself --
+    night-shift admins, travelling execs, and scheduled service
+    accounts all trip this regularly -- so the rule is intentionally
+    low-weight. It exists to stack with other signals: a new-country
+    login *at 03:00 UTC* is a lot more suspicious than either signal
+    alone, and that's the shape the aggregate scoring model is
+    designed to catch.
+
+    Time handling: event timestamps on ``vector_events`` are stored
+    as TIMESTAMPTZ and Postgres sessions in vector-ingest are pinned
+    to UTC in db.py's ``connect()``, so ``EXTRACT(HOUR FROM timestamp)``
+    returns the UTC hour directly. We also double-check client-side
+    using the ``datetime`` object psycopg2 hands back, in case a
+    future migration changes the session tz.
+    """
+
+    name = "OffHoursLogin"
+    SCORE_DELTA = 15
+    LOOKBACK = timedelta(hours=24)
+
+    # Off-hours window: 22:00 (inclusive) through 06:00 (exclusive),
+    # UTC. The window wraps midnight, so membership is
+    # ``hour >= 22 or hour < 6``.
+    OFF_HOURS_START = 22  # 22:00 UTC
+    OFF_HOURS_END = 6     # 06:00 UTC
+
+    @classmethod
+    def _is_off_hours(cls, hour: int) -> bool:
+        return hour >= cls.OFF_HOURS_START or hour < cls.OFF_HOURS_END
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug(
+                "[off_hours] rule has no DB handle, skipping",
+            )
+            return miss
+
+        try:
+            logins = self._fetch_logins(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[off_hours] login fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        # First off-hours login wins. We take the earliest qualifying
+        # login so the evidence's ``login_time`` is deterministic and
+        # reproducible across repeated cycles.
+        for ts, client_ip in logins:
+            if not isinstance(ts, datetime):
+                continue
+            hour = int(ts.hour)
+            if not self._is_off_hours(hour):
+                continue
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":       user_id,
+                    "login_time": ts.isoformat(),
+                    "hour":       hour,
+                    "client_ip":  client_ip,
+                },
+            )
+
+        return miss
+
+    def _fetch_logins(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple[datetime, str | None]]:
+        """Return ``(timestamp, client_ip)`` tuples for this user's
+        ``UserLoggedIn`` events in the lookback window, ordered
+        earliest-first."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, client_ip
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp ASC
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+class HighVolumeFileAccessRule(CorrelationRule):
+    """Fires when a user touched more than 50 files in a 1-hour
+    window across SharePoint / OneDrive. Classic post-credential-
+    compromise behaviour (bulk enumeration of a compromised user's
+    drive) and also the first-stage signal for ransomware staging.
+
+    The matched events are UAL ``FileAccessed``, ``FileDownloaded``,
+    and ``FileModified`` rows on the ``SharePoint`` or ``OneDrive``
+    workloads. We also accept ``OneDriveForBusiness`` because that's
+    the actual workload string UAL emits for business OneDrive
+    activity; "OneDrive" at the spec level maps to both.
+
+    Score is 20 -- intentionally below the 80-point incident
+    threshold on its own so a legitimate bulk-sync session doesn't
+    page operators, but combines with anomaly signals (new country,
+    off-hours, impossible travel) to confirm a real incident.
+    """
+
+    name = "HighVolumeFileAccess"
+    SCORE_DELTA = 20
+    LOOKBACK = timedelta(minutes=60)
+    THRESHOLD = 50
+
+    MATCHED_EVENT_TYPES = ("FileAccessed", "FileDownloaded", "FileModified")
+    MATCHED_WORKLOADS = ("SharePoint", "OneDrive", "OneDriveForBusiness")
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug(
+                "[high_volume_file] rule has no DB handle, skipping",
+            )
+            return miss
+
+        try:
+            count = self._fetch_event_count(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[high_volume_file] count fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if count <= self.THRESHOLD:
+            return miss
+
+        return RuleResult(
+            rule_name=self.rule_name,
+            score_delta=self.SCORE_DELTA,
+            fired=True,
+            evidence={
+                "user":             user_id,
+                "file_event_count": int(count),
+                "threshold":        self.THRESHOLD,
+                "window_minutes":   60,
+            },
+        )
+
+    def _fetch_event_count(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> int:
+        """Return the count of matching file-access events for this
+        user in the lookback window."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)::bigint
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = ANY(%s)
+                  AND workload = ANY(%s)
+                  AND timestamp > NOW() - %s
+                """,
+                (
+                    tenant_id,
+                    user_id,
+                    list(self.MATCHED_EVENT_TYPES),
+                    list(self.MATCHED_WORKLOADS),
+                    self.LOOKBACK,
+                ),
+            )
+            row = cur.fetchone()
+        return int(row[0] or 0) if row else 0
