@@ -126,6 +126,36 @@ function StatCard({ label, value, color, loading }) {
   );
 }
 
+function ScoreBar({ score, size = "sm" }) {
+  const n = Number(score || 0);
+  const pct = Math.min(100, Math.max(0, n));
+  const color =
+    n >= 90 ? "#EF4444" : n >= 80 ? "#F97316" : n >= 60 ? "#EAB308" : "#3B82F6";
+  const isSm = size === "sm";
+  return (
+    <div className="flex items-center gap-2">
+      <div
+        className={`flex-1 bg-white/10 rounded-full overflow-hidden ${
+          isSm ? "h-1.5 min-w-[36px]" : "h-2 min-w-[48px]"
+        }`}
+      >
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${pct}%`, background: color }}
+        />
+      </div>
+      <span
+        className={`text-right tabular-nums font-bold whitespace-nowrap ${
+          isSm ? "text-[12px]" : "text-sm"
+        }`}
+        style={{ color }}
+      >
+        {score ?? "—"}
+      </span>
+    </div>
+  );
+}
+
 function Chevron({ open }) {
   return (
     <svg
@@ -375,8 +405,8 @@ function IncidentsTable({ rows, openId, setOpenId, onStatusChange }) {
                     >
                       {row.title || <span className="text-white/30">—</span>}
                     </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums font-bold">
-                      {row.score ?? "—"}
+                    <td className="px-4 py-2.5 min-w-[100px]">
+                      <ScoreBar score={row.score} size="sm" />
                     </td>
                     <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
                       {fmtRelative(row.first_seen || row.confirmed_at)}
@@ -486,13 +516,11 @@ function IncidentDetail({ incident, onStatusChange }) {
         </div>
 
         <div className="ml-auto flex items-center gap-4 text-[11px]">
-          <div className="text-right">
-            <div className="text-white/40 uppercase tracking-wider text-[9px]">
+          <div className="text-right min-w-[100px]">
+            <div className="text-white/40 uppercase tracking-wider text-[9px] mb-1">
               Score
             </div>
-            <div className="text-2xl font-bold tabular-nums" style={{ color: "#EF4444" }}>
-              {incident.score ?? "—"}
-            </div>
+            <ScoreBar score={incident.score} size="lg" />
           </div>
           <div className="text-right">
             <div className="text-white/40 uppercase tracking-wider text-[9px]">
