@@ -2198,6 +2198,50 @@ def incident_detail(incident_id: str):
         SELECT * FROM vector_incidents WHERE id = %s
     """, (incident_id,)) or {}
 
+
+@app.get("/api/governance/claude-connector")
+def governance_claude_connector():
+    """Detect M365 Connector for Claude activity.
+    ResultType=0: admin granted access (critical governance event)
+    ResultType=90095: user attempted without admin grant (shadow IT)
+    AppIds: Claude M365 Connector + related app.
+    """
+    CLAUDE_APP_IDS = (
+        "08ad6f98-a4f8-4635-bb8d-f1a3044760f0",
+        "07c030f6-5743-41b7-ba00-0a6e85f37c17",
+    )
+    placeholders = ",".join(["%s"] * len(CLAUDE_APP_IDS))
+    rows = db.fetch_all(
+        f"""
+        SELECT
+            timestamp,
+            user_id,
+            tenant_id,
+            client_name,
+            result_status,
+            client_ip,
+            raw_json->>'ResultType' as result_type,
+            raw_json->>'AppDisplayName' as app_display_name,
+            raw_json->>'ApplicationId' as application_id,
+            raw_json->>'UserAgent' as user_agent
+        FROM vector_events
+        WHERE event_type = 'UserLoggedIn'
+        AND raw_json->>'ApplicationId' IN ({placeholders})
+        ORDER BY timestamp DESC
+        LIMIT 200
+        """,
+        CLAUDE_APP_IDS,
+    )
+    admin_grants = [r for r in rows if str(r.get("result_type")) == "0"]
+    shadow_it    = [r for r in rows if str(r.get("result_type")) == "90095"]
+    return {
+        "admin_grants": admin_grants,
+        "shadow_it_attempts": shadow_it,
+        "total": len(rows),
+        "admin_grant_count": len(admin_grants),
+        "shadow_it_count": len(shadow_it),
+    }
+
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa(full_path: str = "") -> FileResponse:
     """Catch-all that serves the React SPA shell.
