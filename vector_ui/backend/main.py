@@ -485,6 +485,14 @@ def user_emails(
     entity_key: str,
     direction: str | None = Query(None),
     search: str | None = Query(None),
+    attachment: str | None = Query(
+        None,
+        description=(
+            "Case-insensitive substring match against any element of "
+            "attachment_names (populated by the MessageTraceIngestor's "
+            "post-insert Graph backfill)."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> list[dict]:
@@ -493,6 +501,13 @@ def user_emails(
     entity_key is the standard tenant_id::user_id composite; we pull the
     email out of the right-hand side and match it against both
     sender_address and recipient_address.
+
+    Filters:
+      * direction  -- exact match on direction (IN/OUT/ACTIVITY)
+      * search     -- ILIKE substring against subject
+      * attachment -- case-insensitive substring against any element
+                      of attachment_names (the MessageTraceIngestor
+                      backfills names post-insert via Graph)
     """
     user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
     return db.fetch_all(
@@ -506,11 +521,21 @@ def user_emails(
             received,
             status,
             size_bytes,
-            direction
+            direction,
+            has_attachments,
+            attachment_names
         FROM vector_message_trace
         WHERE (sender_address = %s OR recipient_address = %s)
           AND (%s::text IS NULL OR direction = %s)
           AND (%s::text IS NULL OR subject ILIKE '%%' || %s || '%%')
+          AND (
+              %s::text IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM unnest(attachment_names) AS n
+                  WHERE n ILIKE '%%' || %s || '%%'
+              )
+          )
         ORDER BY received DESC
         LIMIT %s OFFSET %s
         """,
@@ -518,6 +543,7 @@ def user_emails(
             user_email, user_email,
             direction, direction,
             search, search,
+            attachment, attachment,
             limit, offset,
         ),
     )

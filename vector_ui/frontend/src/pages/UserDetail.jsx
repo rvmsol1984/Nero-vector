@@ -498,33 +498,58 @@ function EmailTraceTab({ entityKey }) {
   const [direction, setDirection] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [attachmentInput, setAttachmentInput] = useState("");
+  const [attachment, setAttachment] = useState("");
   const [offset, setOffset] = useState(0);
   const [expandedId, setExpandedId] = useState(null);
 
-  // Debounce search input -> committed search value.
+  // Debounce both search inputs -> committed filter values.
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(t);
   }, [searchInput]);
 
+  useEffect(() => {
+    const t = setTimeout(() => setAttachment(attachmentInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [attachmentInput]);
+
   // Reset pagination whenever the filter changes.
   useEffect(() => {
     setOffset(0);
     setExpandedId(null);
-  }, [entityKey, direction, search]);
+  }, [entityKey, direction, search, attachment]);
 
   useEffect(() => {
     let cancel = false;
     setLoading(true);
-    api
-      .userEmails(entityKey, {
-        direction: direction || undefined,
-        search: search || undefined,
-        limit: EMAIL_PAGE,
-        offset,
-      })
+    // Build the URL directly: the shared api.userEmails() helper
+    // destructures a fixed set of keys so the attachment filter
+    // would be dropped silently if routed through it. Keep auth
+    // token handling identical to the api.js get() wrapper (401
+    // goes back through PKCE, Bearer auth, same-origin credentials).
+    const sp = new URLSearchParams();
+    if (direction) sp.set("direction", direction);
+    if (search) sp.set("search", search);
+    if (attachment) sp.set("attachment", attachment);
+    sp.set("limit", String(EMAIL_PAGE));
+    sp.set("offset", String(offset));
+    const url =
+      `/api/users/${encodeURIComponent(entityKey)}/emails?${sp.toString()}`;
+    const token = localStorage.getItem("vector_token");
+    fetch(url, {
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    })
       .then((r) => {
-        if (!cancel) setRows(r || []);
+        if (!r.ok) throw new Error(`${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        if (!cancel) setRows(data || []);
       })
       .catch(() => {
         if (!cancel) setRows([]);
@@ -535,7 +560,7 @@ function EmailTraceTab({ entityKey }) {
     return () => {
       cancel = true;
     };
-  }, [entityKey, direction, search, offset]);
+  }, [entityKey, direction, search, attachment, offset]);
 
   const hasNext = rows.length >= EMAIL_PAGE;
 
@@ -568,7 +593,14 @@ function EmailTraceTab({ entityKey }) {
           placeholder="search subject…"
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
-          className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-primary-light w-64"
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-primary-light w-48"
+        />
+        <input
+          type="search"
+          placeholder="search attachment…"
+          value={attachmentInput}
+          onChange={(e) => setAttachmentInput(e.target.value)}
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-primary-light w-48"
         />
         <div className="ml-auto flex items-center gap-2 text-[11px]">
           <button
@@ -610,7 +642,13 @@ function EmailTraceTab({ entityKey }) {
             <tbody className="divide-y divide-white/5">
               {rows.map((r) => {
                 const isOpen = expandedId === r.id;
-                const hasLargeAttachment = Number(r.size_bytes) > 50000;
+                // Prefer the authoritative has_attachments flag populated
+                // by the MessageTraceIngestor's Defender/Graph backfill.
+                // Fall back to a size-based heuristic for legacy rows
+                // that pre-date the column.
+                const hasAttachment =
+                  r.has_attachments === true ||
+                  (r.has_attachments == null && Number(r.size_bytes) > 50000);
                 return (
                   <Fragment key={r.id}>
                     <tr
@@ -638,8 +676,17 @@ function EmailTraceTab({ entityKey }) {
                         className="px-3 py-2 text-white/80 truncate max-w-[360px]"
                         title={r.subject || ""}
                       >
-                        {hasLargeAttachment && (
-                          <span className="mr-1" title="large attachment">📎</span>
+                        {hasAttachment && (
+                          <span
+                            className="mr-1"
+                            title={
+                              Array.isArray(r.attachment_names) && r.attachment_names.length
+                                ? r.attachment_names.join(", ")
+                                : "has attachments"
+                            }
+                          >
+                            📎
+                          </span>
                         )}
                         {r.subject || <span className="text-white/30">(no subject)</span>}
                       </td>

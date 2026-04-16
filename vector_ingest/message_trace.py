@@ -54,9 +54,17 @@ HUNTING_QUERY = (
     "EmailEvents "
     "| where Timestamp > ago(1h) "
     "| project Timestamp, SenderFromAddress, RecipientEmailAddress, "
-    "Subject, DeliveryAction, ThreatTypes, NetworkMessageId "
+    "Subject, DeliveryAction, ThreatTypes, NetworkMessageId, "
+    "InternetMessageId, AttachmentCount "
     "| limit 1000"
 )
+
+# Rate limit on post-insert attachment-name backfill per poll cycle.
+# Each name fetch is two Graph calls (message lookup + /attachments),
+# so cap to a safe budget that stays well under Graph's default
+# 60 req/sec per-tenant throttle while still providing useful
+# coverage for the handful of messages per cycle that have attachments.
+MAX_ATTACHMENT_FETCHES_PER_CYCLE = 5
 
 CHECKPOINT_KEY = "MessageTrace_v2"
 
@@ -239,10 +247,20 @@ class MessageTraceIngestor:
         results = body.get("results") or body.get("Results") or []
         written = 0
         max_received = None
+        # Collect rows that need a second-pass attachment-names fetch.
+        # We defer the Graph calls until after the primary insert so a
+        # slow /attachments endpoint never blocks the main ingest
+        # transaction, and so the cap per cycle is enforced globally
+        # rather than per-message.
+        attachment_jobs: list[dict] = []
         for r in results:
             row = self._normalize_hunting(r)
             if not row:
                 continue
+            # The InternetMessageId only matters for the backfill; pop
+            # it off so the insert helper sees a clean row that lines
+            # up with INSERT_MESSAGE_TRACE_SQL's parameter names.
+            internet_message_id = row.pop("_internet_message_id", None)
             try:
                 if self.db.insert_message_trace(row):
                     written += 1
@@ -254,11 +272,26 @@ class MessageTraceIngestor:
                     "[message_trace] hunting insert failed",
                     extra={"tenant_id": self.tenant_id},
                 )
+                continue
+
+            if row.get("has_attachments") and internet_message_id \
+                    and row.get("recipient_address"):
+                attachment_jobs.append({
+                    "message_id":          row["message_id"],
+                    "internet_message_id": internet_message_id,
+                    "recipient":           row["recipient_address"],
+                })
 
         if max_received is not None:
             self.db.update_checkpoint(
                 self.tenant_id, self.client_name, CHECKPOINT_KEY, max_received
             )
+
+        # Rate-limited attachment-names backfill. Only runs for messages
+        # Defender said have attachments, and caps at
+        # MAX_ATTACHMENT_FETCHES_PER_CYCLE to stay well under Graph's
+        # tenant-wide throttle.
+        att_fetched = self._backfill_attachment_names(attachment_jobs)
 
         logger.info(
             "[message_trace] hunting poll complete",
@@ -268,9 +301,151 @@ class MessageTraceIngestor:
                 "method": "graph_hunting",
                 "seen": len(results),
                 "written": written,
+                "attachment_jobs_queued":  len(attachment_jobs),
+                "attachment_jobs_fetched": att_fetched,
             },
         )
         return written
+
+    def _backfill_attachment_names(self, jobs: list[dict]) -> int:
+        """For each job, resolve the InternetMessageId to a Graph
+        message resource id and pull /attachments?$select=name. Update
+        vector_message_trace.attachment_names in place. Capped at
+        MAX_ATTACHMENT_FETCHES_PER_CYCLE per poll so a burst of
+        attachment-heavy mail doesn't exhaust the Graph throttle.
+        Fail-open: any error is logged and the row keeps its empty
+        default attachment_names array.
+        """
+        if not jobs:
+            return 0
+        processed = 0
+        for job in jobs[:MAX_ATTACHMENT_FETCHES_PER_CYCLE]:
+            try:
+                names = self._fetch_attachment_names(
+                    job["recipient"], job["internet_message_id"],
+                )
+            except Exception:
+                logger.debug(
+                    "[message_trace] attachment name fetch crashed",
+                    extra={
+                        "tenant_id": self.tenant_id,
+                        "message_id": job.get("message_id"),
+                    },
+                    exc_info=True,
+                )
+                continue
+            processed += 1
+            if not names:
+                continue
+            try:
+                self.db.update_message_trace_attachment_names(
+                    message_id=job["message_id"],
+                    names=names,
+                )
+            except Exception:
+                logger.debug(
+                    "[message_trace] attachment name UPDATE failed",
+                    extra={"message_id": job.get("message_id")},
+                    exc_info=True,
+                )
+        if len(jobs) > MAX_ATTACHMENT_FETCHES_PER_CYCLE:
+            logger.info(
+                "[message_trace] attachment backfill capped",
+                extra={
+                    "tenant_id": self.tenant_id,
+                    "queued":    len(jobs),
+                    "processed": processed,
+                    "skipped":   len(jobs) - processed,
+                },
+            )
+        return processed
+
+    def _fetch_attachment_names(
+        self,
+        recipient: str,
+        internet_message_id: str,
+    ) -> list[str]:
+        """Two Graph calls: /messages?$filter=internetMessageId to
+        resolve the resource id, then /messages/{id}/attachments to
+        read the names. Returns [] on any error so the caller just
+        moves on."""
+        recipient = (recipient or "").strip()
+        internet_message_id = (internet_message_id or "").strip()
+        if not recipient or not internet_message_id:
+            return []
+
+        # Graph's $filter literal requires angle brackets.
+        mid = internet_message_id
+        if not mid.startswith("<"):
+            mid = f"<{mid}"
+        if not mid.endswith(">"):
+            mid = f"{mid}>"
+
+        import urllib.parse as _urlparse
+        base = "https://graph.microsoft.com/v1.0"
+        filter_q = _urlparse.quote(f"internetMessageId eq '{mid}'", safe="")
+        search_url = (
+            f"{base}/users/{_urlparse.quote(recipient, safe='@')}"
+            f"/messages?$filter={filter_q}&$select=id,hasAttachments&$top=1"
+        )
+
+        try:
+            resp = self._session.get(
+                search_url,
+                headers={**self._auth_headers(), "Accept": "application/json"},
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            logger.debug(
+                "[message_trace] attachment search request failed ip=%s err=%s",
+                recipient, exc,
+            )
+            return []
+
+        if not resp.ok:
+            return []
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            return []
+
+        messages = data.get("value") or []
+        if not messages:
+            return []
+        msg = messages[0] if isinstance(messages[0], dict) else {}
+        if not msg.get("hasAttachments"):
+            return []
+        graph_id = msg.get("id")
+        if not graph_id:
+            return []
+
+        att_url = (
+            f"{base}/users/{_urlparse.quote(recipient, safe='@')}"
+            f"/messages/{_urlparse.quote(graph_id, safe='')}"
+            f"/attachments?$select=name"
+        )
+        try:
+            resp = self._session.get(
+                att_url,
+                headers={**self._auth_headers(), "Accept": "application/json"},
+                timeout=20,
+            )
+        except requests.RequestException:
+            return []
+        if not resp.ok:
+            return []
+        try:
+            att_data = resp.json() or {}
+        except ValueError:
+            return []
+
+        names: list[str] = []
+        for a in att_data.get("value") or []:
+            if isinstance(a, dict):
+                name = a.get("name")
+                if isinstance(name, str) and name.strip():
+                    names.append(name.strip())
+        return names
 
     def _normalize_hunting(self, r: dict) -> dict | None:
         if not isinstance(r, dict):
@@ -300,6 +475,18 @@ class MessageTraceIngestor:
             str(r.get("DeliveryAction") or threat_types or "").strip() or None
         )
 
+        attachment_count = _to_int(r.get("AttachmentCount")) or 0
+        has_attachments = attachment_count > 0
+
+        # Capture InternetMessageId separately -- it's what Graph's
+        # /messages $filter needs to resolve to a resource id during
+        # the attachment-names backfill. Strip angle brackets if the
+        # Defender projection included them so the backfill can
+        # re-add the canonical form itself.
+        internet_message_id = (r.get("InternetMessageId") or "").strip()
+        if internet_message_id.startswith("<") and internet_message_id.endswith(">"):
+            internet_message_id = internet_message_id[1:-1]
+
         return {
             "tenant_id":         self.tenant_id,
             "client_name":       self.client_name,
@@ -314,6 +501,13 @@ class MessageTraceIngestor:
             # hardcode the direction rather than trying to derive it.
             "direction":         "Inbound",
             "original_client_ip": None,
+            "has_attachments":   has_attachments,
+            # ``_internet_message_id`` is NOT persisted by the INSERT
+            # statement -- the db helper only reads keys named in
+            # INSERT_MESSAGE_TRACE_SQL. The poll loop pops this key
+            # off before calling insert_message_trace and uses it to
+            # drive the attachment-names backfill.
+            "_internet_message_id": internet_message_id or None,
         }
 
     # ------------------------------------------------------------------ activity report (fallback)
@@ -443,6 +637,9 @@ class MessageTraceIngestor:
             "size_bytes":        send + recv,
             "direction":         "ACTIVITY",
             "original_client_ip": None,
+            # Activity-report rows are synthetic rollups with no real
+            # message behind them, so they never have attachments.
+            "has_attachments":   False,
         }
 
     # ------------------------------------------------------------------ orchestration

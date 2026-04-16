@@ -82,11 +82,13 @@ ON CONFLICT (tenant_id, query_name, device_id, timestamp) DO NOTHING
 INSERT_MESSAGE_TRACE_SQL = """
 INSERT INTO vector_message_trace (
     tenant_id, client_name, message_id, sender_address, recipient_address,
-    subject, received, status, size_bytes, direction, original_client_ip
+    subject, received, status, size_bytes, direction, original_client_ip,
+    has_attachments
 ) VALUES (
     %(tenant_id)s, %(client_name)s, %(message_id)s, %(sender_address)s,
     %(recipient_address)s, %(subject)s, %(received)s, %(status)s,
-    %(size_bytes)s, %(direction)s, %(original_client_ip)s
+    %(size_bytes)s, %(direction)s, %(original_client_ip)s,
+    COALESCE(%(has_attachments)s, FALSE)
 )
 ON CONFLICT (message_id) DO NOTHING
 """
@@ -423,6 +425,32 @@ class Database:
         """Insert a single MessageTrace row, de-dup on message_id."""
         with self.conn.cursor() as cur:
             cur.execute(INSERT_MESSAGE_TRACE_SQL, row)
+            written = cur.rowcount
+        self.conn.commit()
+        return written > 0
+
+    def update_message_trace_attachment_names(
+        self,
+        message_id: str,
+        names: list[str],
+    ) -> bool:
+        """Patch an existing vector_message_trace row's attachment_names.
+
+        Called by MessageTraceIngestor as a second pass after the
+        primary INSERT, once Graph has returned the per-message
+        attachment list. A no-op is fine if the row was never
+        inserted (e.g. dedup) -- rowcount = 0 just means nothing to
+        update.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE vector_message_trace
+                SET attachment_names = %s
+                WHERE message_id = %s
+                """,
+                (list(names or []), message_id),
+            )
             written = cur.rowcount
         self.conn.commit()
         return written > 0
