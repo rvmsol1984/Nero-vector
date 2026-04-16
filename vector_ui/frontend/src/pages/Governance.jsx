@@ -8,7 +8,8 @@ import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
 import { filenameFromObjectId, fmtNumber, fmtRelative, fmtTime } from "../utils/format.js";
 
-const TENANT = "GameChange Solar";
+const DEFAULT_TENANT = "GameChange Solar";
+const DEFAULT_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6";
 
 // Each tab owns its own endpoint, its default severity pill, and an
 // intrinsic severity (what the empty-vs-finding story looks like).
@@ -33,7 +34,7 @@ const TABS = [
 
 // GCS tenant -- hardcoded here because the Governance board is GCS-only and
 // we need to synthesize entity_key for the Intune user detail link.
-const GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6";
+
 
 // ---------------------------------------------------------------------------
 
@@ -45,6 +46,14 @@ export default function Governance() {
   const [errors, setErrors] = useState({});
   const [loadingTabs, setLoadingTabs] = useState(() => new Set());
   const [activeTab, setActiveTab] = useState("dlp");
+  const [tenants, setTenants] = useState([]);
+  const [selectedTenant, setSelectedTenant] = useState(DEFAULT_TENANT);
+  const [selectedTenantId, setSelectedTenantId] = useState(DEFAULT_TENANT_ID);
+  useEffect(() => {
+    api.byTenant().then((rows) => {
+      setTenants(rows || []);
+    }).catch(() => {});
+  }, []);
 
   // Lazy-load the active tab on first visit only. Switching back to
   // a previously-viewed tab uses the cached rows and fires no new
@@ -66,7 +75,7 @@ export default function Governance() {
       return next;
     });
 
-    const promise = tab.withTenant ? fn(TENANT) : fn();
+    const promise = tab.withTenant ? fn(selectedTenant) : fn();
     promise
       .then((rows) => {
         if (cancel) return;
@@ -101,14 +110,33 @@ export default function Governance() {
     // in-effect `data[activeTab]` check reads the live snapshot and
     // bails early if the tab is already cached.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab]);
+  }, [activeTab, selectedTenant]);
 
   return (
     <div className="space-y-5 animate-fade-in">
       {/* ----- header ----- */}
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="text-2xl font-bold">Governance</h1>
-        <TenantBadge name={TENANT} />
+        {tenants.map((t) => (
+          <button
+            key={t.client_name}
+            type="button"
+            onClick={() => {
+              if (t.client_name !== selectedTenant) {
+                setSelectedTenant(t.client_name);
+                setSelectedTenantId(t.tenant_id || DEFAULT_TENANT_ID);
+                setData({});
+              }
+            }}
+            className={`px-3 py-1 rounded-xl text-xs font-medium transition-all active:scale-95 ${
+              selectedTenant === t.client_name
+                ? "bg-primary text-white"
+                : "bg-white/10 text-white/70 hover:bg-white/15"
+            }`}
+          >
+            {t.client_name}
+          </button>
+        ))}
       </div>
       <p className="text-white/50 text-sm -mt-3">
         UAL-derived policy findings and identity hygiene signals.
@@ -442,7 +470,7 @@ function Th({ children, align = "left" }) {
   );
 }
 
-function UserCell({ entityKey, userId, clientName = TENANT }) {
+function UserCell({ entityKey, userId, clientName = DEFAULT_TENANT }) {
   if (!entityKey) {
     return (
       <div className="flex items-center gap-2">
@@ -1126,7 +1154,7 @@ function AiCopilotSection({ rows }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row) => {
-                const entityKey = `${GCS_TENANT_ID}::${row.user_id}`;
+                const entityKey = `${selectedTenantId}::${row.user_id}`;
                 const types = Array.isArray(row.event_types) ? row.event_types : [];
                 return (
                   <tr key={row.user_id} className="hover:bg-white/[0.03]">
@@ -1222,7 +1250,7 @@ function AiExternalSection({ rows, error }) {
             <tbody className="divide-y divide-white/5">
               {rows.map((row, i) => {
                 const entityKey = row.user
-                  ? `${GCS_TENANT_ID}::${row.user}`
+                  ? `${selectedTenantId}::${row.user}`
                   : null;
                 const { label: toolLabel, host } = aiToolDisplay(row.tool);
                 const devices = Array.isArray(row.devices) ? row.devices : [];
@@ -1505,7 +1533,7 @@ function IntuneDevicesTable({ rows }) {
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
             const isOpen = expanded === row.user;
-            const entityKey = `${GCS_TENANT_ID}::${row.user}`;
+            const entityKey = `${selectedTenantId}::${row.user}`;
             return (
               <Fragment key={row.user}>
                 <tr
