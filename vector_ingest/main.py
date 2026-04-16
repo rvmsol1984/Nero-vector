@@ -26,7 +26,7 @@ from vector_ingest.message_trace import MessageTraceIngestor
 from vector_ingest.signin_logs import SignInLogPoller
 from vector_ingest.threatlocker_ingest import ThreatLockerIngestor
 from vector_ingest.baseline_engine import BaselineEngine
-from vector_ingest.scoring_engine import ScoringEngine, ThreatIntelMonitor
+from vector_ingest.scoring_engine import ScoringEngine
 
 
 def configure_logging() -> None:
@@ -166,7 +166,6 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
     # ScoringEngine and BaselineEngine
     ingestors.append(BaselineEngine(db=db))
     ingestors.append(ScoringEngine(db=db))
-    ingestors.append(ThreatIntelMonitor(db=db))
 
     # IocEnricher runs once per cycle and walks every tenant's recent
     # events looking for OpenCTI-backed indicator matches. It's last in
@@ -200,7 +199,7 @@ def main() -> int:
     db.run_migrations(migrations_dir)
 
     ingestors = build_ingestors(tenants, db)
-    global_types = (BaselineEngine, ScoringEngine, ThreatIntelMonitor, IocEnricher)
+    global_types = (BaselineEngine, ScoringEngine, IocEnricher)
     tenant_ingestors = [i for i in ingestors if not isinstance(i, global_types)]
     global_ingestors  = [i for i in ingestors if isinstance(i, global_types)]
 
