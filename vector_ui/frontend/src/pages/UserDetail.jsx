@@ -499,6 +499,7 @@ function EmailTraceTab({ entityKey }) {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
+  const [expandedId, setExpandedId] = useState(null);
 
   // Debounce search input -> committed search value.
   useEffect(() => {
@@ -509,6 +510,7 @@ function EmailTraceTab({ entityKey }) {
   // Reset pagination whenever the filter changes.
   useEffect(() => {
     setOffset(0);
+    setExpandedId(null);
   }, [entityKey, direction, search]);
 
   useEffect(() => {
@@ -544,7 +546,8 @@ function EmailTraceTab({ entityKey }) {
         <div className="flex items-center gap-1">
           {[
             { id: "",    label: "All" },
-
+            { id: "IN",  label: "Inbound" },
+            { id: "OUT", label: "Outbound" },
           ].map((d) => (
             <button
               key={d.id || "all"}
@@ -597,7 +600,6 @@ function EmailTraceTab({ entityKey }) {
             <thead>
               <tr>
                 <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
-                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Dir</th>
                 <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">From</th>
                 <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">To</th>
                 <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Subject</th>
@@ -606,43 +608,68 @@ function EmailTraceTab({ entityKey }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
-              {rows.map((r) => (
-                <tr key={r.id} className="hover:bg-white/[0.03]">
-                  <td className="px-3 py-2 text-white/50 whitespace-nowrap tabular-nums">
-                    {fmtTime(r.received)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <DirectionBadge direction={r.direction} />
-                  </td>
-                  <td
-                    className="px-3 py-2 truncate max-w-[220px]"
-                    title={r.sender_address || ""}
-                  >
-                    {r.sender_address || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-3 py-2 truncate max-w-[220px]"
-                    title={r.recipient_address || ""}
-                  >
-                    {r.recipient_address || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-white/80 truncate max-w-[360px]"
-                    title={r.subject || ""}
-                  >
-                    {r.subject || <span className="text-white/30">(no subject)</span>}
-                  </td>
-                  <td className="px-3 py-2 text-right text-white/50 tabular-nums whitespace-nowrap">
-                    {fmtBytes(r.size_bytes)}
-                  </td>
-                  <td className="px-3 py-2 text-white/60 whitespace-nowrap">
-                    {r.status || <span className="text-white/30">—</span>}
-                  </td>
-                </tr>
-              ))}
+              {rows.map((r) => {
+                const isOpen = expandedId === r.id;
+                const hasLargeAttachment = Number(r.size_bytes) > 50000;
+                return (
+                  <Fragment key={r.id}>
+                    <tr
+                      onClick={() =>
+                        setExpandedId(isOpen ? null : r.id)
+                      }
+                      className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
+                    >
+                      <td className="px-3 py-2 text-white/50 whitespace-nowrap tabular-nums">
+                        {fmtTime(r.received)}
+                      </td>
+                      <td
+                        className="px-3 py-2 truncate max-w-[220px]"
+                        title={r.sender_address || ""}
+                      >
+                        {r.sender_address || <span className="text-white/30">—</span>}
+                      </td>
+                      <td
+                        className="px-3 py-2 truncate max-w-[220px]"
+                        title={r.recipient_address || ""}
+                      >
+                        {r.recipient_address || <span className="text-white/30">—</span>}
+                      </td>
+                      <td
+                        className="px-3 py-2 text-white/80 truncate max-w-[360px]"
+                        title={r.subject || ""}
+                      >
+                        {hasLargeAttachment && (
+                          <span className="mr-1" title="large attachment">📎</span>
+                        )}
+                        {r.subject || <span className="text-white/30">(no subject)</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right text-white/50 tabular-nums whitespace-nowrap">
+                        {fmtBytes(r.size_bytes)}
+                      </td>
+                      <td className="px-3 py-2 text-white/60 whitespace-nowrap">
+                        {r.status || <span className="text-white/30">—</span>}
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr>
+                        <td
+                          colSpan={6}
+                          className="p-0 border-t border-white/5"
+                          style={{ backgroundColor: "#0D1428" }}
+                        >
+                          <EmailAttachmentPanel
+                            entityKey={entityKey}
+                            messageId={r.message_id}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-3 py-10 text-center text-white/40">
+                  <td colSpan={6} className="px-3 py-10 text-center text-white/40">
                     Email trace data populates within 15 minutes
                   </td>
                 </tr>
@@ -651,9 +678,102 @@ function EmailTraceTab({ entityKey }) {
           </table>
         </div>
         <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40">
-          Email metadata only. Content not stored.
+          Email metadata only. Content not stored. Click a row to load attachments.
         </div>
       </div>
+    </div>
+  );
+}
+
+function EmailAttachmentPanel({ entityKey, messageId }) {
+  const [attachments, setAttachments] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!entityKey || !messageId) {
+      setAttachments([]);
+      return;
+    }
+    let cancel = false;
+    const url =
+      `/api/users/${encodeURIComponent(entityKey)}/emails/` +
+      `${encodeURIComponent(messageId)}/attachments`;
+    fetch(url, {
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        ...(localStorage.getItem("vector_token")
+          ? { Authorization: `Bearer ${localStorage.getItem("vector_token")}` }
+          : {}),
+      },
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error(`${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        if (!cancel) setAttachments(data || []);
+      })
+      .catch((e) => {
+        if (!cancel) {
+          setAttachments([]);
+          setErr(String(e.message || e));
+        }
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [entityKey, messageId]);
+
+  return (
+    <div className="px-4 py-3 animate-fade-in">
+      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
+        Attachments
+      </div>
+      {attachments === null ? (
+        <div className="text-[11px] text-white/40 py-1">loading…</div>
+      ) : err ? (
+        <div className="text-[11px] text-white/40 py-1">
+          could not load attachments
+        </div>
+      ) : attachments.length === 0 ? (
+        <div className="text-[11px] text-white/40 py-1">
+          no attachments found
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-white/5">
+          <table className="min-w-full text-[10px]">
+            <thead>
+              <tr className="bg-white/[0.02]">
+                <th className="text-left px-2 py-1.5 text-[9px] uppercase tracking-wider text-white/40 font-semibold">
+                  Name
+                </th>
+                <th className="text-right px-2 py-1.5 text-[9px] uppercase tracking-wider text-white/40 font-semibold">
+                  Size
+                </th>
+                <th className="text-left px-2 py-1.5 text-[9px] uppercase tracking-wider text-white/40 font-semibold">
+                  Type
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {attachments.map((a, i) => (
+                <tr key={a.name || i} className="hover:bg-white/[0.02]">
+                  <td className="px-2 py-1.5 text-white/80 truncate max-w-[300px]">
+                    📎 {a.name || <span className="text-white/30">(unnamed)</span>}
+                  </td>
+                  <td className="px-2 py-1.5 text-right text-white/50 tabular-nums whitespace-nowrap">
+                    {fmtBytes(a.size_bytes)}
+                  </td>
+                  <td className="px-2 py-1.5 text-white/50 truncate max-w-[200px]">
+                    {a.content_type || <span className="text-white/30">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

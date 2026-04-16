@@ -18,7 +18,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -109,7 +109,6 @@ def events_recent(
     event_type: str | None = Query(None),
     workload: str | None = Query(None),
     user: str | None = Query(None, description="substring search over user_id"),
-    ip: str | None = Query(None, description="substring search over client_ip"),
     source: str | None = Query(
         None,
         description="'ual' (default) for vector_events, 'inky' to read from vector_inky_events",
@@ -171,11 +170,10 @@ def events_recent(
           AND (%s::text IS NULL OR event_type  = %s)
           AND (%s::text IS NULL OR workload    = %s)
           AND (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
-          AND (%s::text IS NULL OR client_ip ILIKE '%%' || %s || '%%')
         ORDER BY timestamp DESC
         LIMIT %s OFFSET %s
         """,
-        (tenant, tenant, event_type, event_type, workload, workload, user, user, ip, ip, limit, offset),
+        (tenant, tenant, event_type, event_type, workload, workload, user, user, limit, offset),
     )
 
 
@@ -511,7 +509,7 @@ def user_emails(
             direction
         FROM vector_message_trace
         WHERE (sender_address = %s OR recipient_address = %s)
-          AND (%s::text IS NULL OR direction ILIKE %s || '%%')
+          AND (%s::text IS NULL OR direction = %s)
           AND (%s::text IS NULL OR subject ILIKE '%%' || %s || '%%')
         ORDER BY received DESC
         LIMIT %s OFFSET %s
@@ -523,6 +521,82 @@ def user_emails(
             limit, offset,
         ),
     )
+
+
+@app.get("/api/users/{entity_key}/emails/{message_id}/attachments")
+def user_email_attachments(entity_key: str, message_id: str) -> list[dict]:
+    """Fetch attachment metadata for a single email via Microsoft Graph.
+
+    ``message_id`` is the RFC-2822 ``Message-ID`` header stored in
+    vector_message_trace (what Exchange calls ``InternetMessageId``).
+    Graph doesn't expose a direct lookup on that field, so we first
+    search for the matching message via ``/users/{email}/messages``
+    with a ``$filter``, then pull its ``/attachments`` list if
+    ``hasAttachments`` is true.
+
+    Returns ``[]`` on any error (Graph unavailable, message not
+    found, no attachments) so the frontend can degrade gracefully.
+    """
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    if not user_email or not message_id:
+        return []
+
+    # Graph's $filter on internetMessageId needs angle brackets.
+    mid = message_id.strip()
+    if not mid.startswith("<"):
+        mid = f"<{mid}>"
+    if not mid.endswith(">"):
+        mid = f"{mid}>"
+
+    try:
+        filter_str = urllib.parse.quote(
+            f"internetMessageId eq '{mid}'",
+            safe="",
+        )
+        search_path = (
+            f"/users/{urllib.parse.quote(user_email, safe='@')}"
+            f"/messages?$filter={filter_str}&$select=id,hasAttachments&$top=1"
+        )
+        data = _graph_get(search_path)
+    except HTTPException:
+        return []
+    except Exception:
+        logger.debug("email attachment search failed", exc_info=True)
+        return []
+
+    messages = data.get("value") or []
+    if not messages:
+        return []
+    msg = messages[0]
+    if not msg.get("hasAttachments"):
+        return []
+    graph_id = msg.get("id")
+    if not graph_id:
+        return []
+
+    try:
+        att_path = (
+            f"/users/{urllib.parse.quote(user_email, safe='@')}"
+            f"/messages/{urllib.parse.quote(graph_id, safe='')}"
+            f"/attachments?$select=name,size,contentType"
+        )
+        att_data = _graph_get(att_path)
+    except HTTPException:
+        return []
+    except Exception:
+        logger.debug("email attachment fetch failed", exc_info=True)
+        return []
+
+    attachments = att_data.get("value") or []
+    return [
+        {
+            "name":         a.get("name"),
+            "size_bytes":   a.get("size"),
+            "content_type": a.get("contentType"),
+        }
+        for a in attachments
+        if isinstance(a, dict)
+    ]
 
 
 # ============================================================================
@@ -797,6 +871,325 @@ def ioc_matches_for_value(ioc_value: str) -> list[dict]:
 
 
 # ============================================================================
+# incidents (Phase 2 scoring engine output)
+# ============================================================================
+
+_INCIDENT_STATUSES = {"open", "investigating", "contained", "closed"}
+
+
+@app.get("/api/incidents")
+def incidents_list(
+    status: str | None = Query(None),
+    severity: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+) -> list[dict]:
+    """Confirmed incidents produced by the Phase 2 scoring engine.
+
+    Ordered by newest-first so the Incidents page defaults to the
+    latest escalations. ``status`` and ``severity`` are optional
+    string filters.
+    """
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            user_id,
+            entity_key,
+            incident_type,
+            severity,
+            status,
+            score,
+            title,
+            summary,
+            patient_zero,
+            dwell_time_minutes,
+            first_seen,
+            last_seen,
+            confirmed_at,
+            contained_at,
+            evidence,
+            raw_signals,
+            created_at,
+            updated_at
+        FROM vector_incidents
+        WHERE (%s::text IS NULL OR status   = %s)
+          AND (%s::text IS NULL OR severity = %s)
+        ORDER BY confirmed_at DESC
+        LIMIT %s
+        """,
+        (status, status, severity, severity, limit),
+    )
+
+
+@app.get("/api/incidents/stats")
+def incidents_stats() -> dict:
+    """Aggregate counts for the Incidents page header cards."""
+    row = db.fetch_one(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'open')::bigint                                   AS open_count,
+            COUNT(*) FILTER (WHERE severity = 'critical' AND status = 'open')::bigint         AS critical,
+            COUNT(*) FILTER (WHERE severity = 'high'     AND status = 'open')::bigint         AS high,
+            COUNT(*) FILTER (WHERE confirmed_at > now() - INTERVAL '24 hours')::bigint        AS today,
+            COUNT(*)::bigint                                                                  AS total
+        FROM vector_incidents
+        """
+    ) or {}
+    return {
+        "open":     int(row.get("open_count") or 0),
+        "critical": int(row.get("critical")   or 0),
+        "high":     int(row.get("high")       or 0),
+        "today":    int(row.get("today")      or 0),
+        "total":    int(row.get("total")      or 0),
+    }
+
+
+@app.get("/api/incidents/{incident_id}")
+def incidents_detail(incident_id: str) -> dict:
+    """Full detail for one incident including its evidence blob and
+    any linked vector_incident_events rows the scoring engine
+    attached via create_incident()."""
+    row = db.fetch_one(
+        """
+        SELECT
+            id::text,
+            tenant_id,
+            client_name,
+            user_id,
+            entity_key,
+            incident_type,
+            severity,
+            status,
+            score,
+            title,
+            summary,
+            patient_zero,
+            dwell_time_minutes,
+            first_seen,
+            last_seen,
+            confirmed_at,
+            contained_at,
+            evidence,
+            raw_signals,
+            created_at,
+            updated_at
+        FROM vector_incidents
+        WHERE id = %s
+        """,
+        (incident_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="incident not found")
+    row["events"] = db.fetch_all(
+        """
+        SELECT
+            id::text,
+            incident_id::text,
+            event_source,
+            event_id::text,
+            event_type,
+            timestamp,
+            significance,
+            raw_json,
+            added_at
+        FROM vector_incident_events
+        WHERE incident_id = %s
+        ORDER BY timestamp DESC
+        """,
+        (incident_id,),
+    )
+    return row
+
+
+@app.put("/api/incidents/{incident_id}/status")
+def incidents_update_status(
+    incident_id: str,
+    payload: dict = Body(...),
+) -> dict:
+    """Flip an incident's lifecycle status. Accepted values:
+    ``open``, ``investigating``, ``contained``, ``closed``. The
+    contained_at timestamp is auto-stamped on the first transition
+    to ``contained``."""
+    new_status = str((payload or {}).get("status") or "").strip().lower()
+    if new_status not in _INCIDENT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {sorted(_INCIDENT_STATUSES)}",
+        )
+    row = db.execute_returning(
+        """
+        UPDATE vector_incidents
+        SET
+            status       = %s,
+            updated_at   = now(),
+            contained_at = CASE
+                WHEN %s = 'contained' AND contained_at IS NULL THEN now()
+                ELSE contained_at
+            END
+        WHERE id = %s
+        RETURNING id::text, status, updated_at, contained_at
+        """,
+        (new_status, new_status, incident_id),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="incident not found")
+    return row
+
+
+# ============================================================================
+# baseline profiles (Phase 2 scoring engine input)
+# ============================================================================
+
+@app.get("/api/baseline/stats")
+def baseline_stats() -> dict:
+    """Aggregate header card counts for the Baseline page.
+
+    ``login_countries`` is stored as a JSONB object
+    (``{"US": 42, ...}``) by the scoring engine's BaselineEngine, so
+    we count its keys instead of its array length. ``known_ips`` is
+    a flat JSONB array.
+    """
+    row = db.fetch_one(
+        """
+        SELECT
+            COUNT(*)::bigint                                                 AS total_baselines,
+            COUNT(*) FILTER (WHERE computed_at > now() - INTERVAL '1 hour')::bigint AS fresh,
+            MAX(computed_at)                                                 AS last_computed,
+            AVG(
+                CASE
+                    WHEN jsonb_typeof(known_ips) = 'array'
+                    THEN jsonb_array_length(known_ips)
+                    ELSE 0
+                END
+            )::float                                                         AS avg_known_ips,
+            AVG(
+                CASE
+                    WHEN jsonb_typeof(login_countries) = 'object'
+                    THEN (SELECT COUNT(*) FROM jsonb_object_keys(login_countries))
+                    WHEN jsonb_typeof(login_countries) = 'array'
+                    THEN jsonb_array_length(login_countries)
+                    ELSE 0
+                END
+            )::float                                                         AS avg_countries
+        FROM vector_user_baselines
+        """
+    ) or {}
+    return {
+        "total_baselines": int(row.get("total_baselines") or 0),
+        "fresh":           int(row.get("fresh")           or 0),
+        "last_computed":   row.get("last_computed"),
+        "avg_known_ips":   float(row.get("avg_known_ips")  or 0),
+        "avg_countries":   float(row.get("avg_countries")  or 0),
+    }
+
+
+@app.get("/api/baseline/list")
+def baseline_list(
+    limit: int = Query(50, ge=1, le=500),
+    search: str | None = Query(None),
+) -> list[dict]:
+    """Baseline rows for the Baseline page table. ``search`` is a
+    substring match against ``user_id``; empty/missing returns every
+    row. Returns the full JSONB blobs for ``known_ips``,
+    ``login_countries`` and ``known_devices`` so the expand panel
+    can render them without a second round-trip.
+    """
+    s = (search or "").strip() or None
+    return db.fetch_all(
+        """
+        SELECT
+            user_id,
+            tenant_id,
+            computed_at,
+            CASE
+                WHEN jsonb_typeof(known_ips) = 'array'
+                THEN jsonb_array_length(known_ips)
+                ELSE 0
+            END                                                              AS ip_count,
+            CASE
+                WHEN jsonb_typeof(login_countries) = 'object'
+                THEN (SELECT COUNT(*)::int FROM jsonb_object_keys(login_countries))
+                WHEN jsonb_typeof(login_countries) = 'array'
+                THEN jsonb_array_length(login_countries)
+                ELSE 0
+            END                                                              AS country_count,
+            CASE
+                WHEN jsonb_typeof(known_devices) = 'array'
+                THEN jsonb_array_length(known_devices)
+                ELSE 0
+            END                                                              AS device_count,
+            login_countries,
+            known_ips,
+            known_devices,
+            avg_daily_events,
+            avg_daily_logins,
+            baseline_days
+        FROM vector_user_baselines
+        WHERE (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
+        ORDER BY computed_at DESC
+        LIMIT %s
+        """,
+        (s, s, limit),
+    )
+
+
+@app.get("/api/baseline/{entity_key}")
+def baseline_detail(entity_key: str) -> dict:
+    """Full baseline profile for one user. ``entity_key`` is the
+    standard ``tenant_id::user_id`` composite used elsewhere in the
+    UI; callers can also pass a bare user_id and we'll match on
+    ``user_id`` alone."""
+    if "::" in entity_key:
+        tenant_id, user_id = entity_key.split("::", 1)
+        row = db.fetch_one(
+            """
+            SELECT
+                user_id,
+                tenant_id,
+                computed_at,
+                login_hours,
+                login_countries,
+                login_asns,
+                known_devices,
+                known_ips,
+                avg_daily_events,
+                avg_daily_logins,
+                baseline_days
+            FROM vector_user_baselines
+            WHERE tenant_id = %s AND user_id = %s
+            """,
+            (tenant_id, user_id),
+        )
+    else:
+        row = db.fetch_one(
+            """
+            SELECT
+                user_id,
+                tenant_id,
+                computed_at,
+                login_hours,
+                login_countries,
+                login_asns,
+                known_devices,
+                known_ips,
+                avg_daily_events,
+                avg_daily_logins,
+                baseline_days
+            FROM vector_user_baselines
+            WHERE user_id = %s
+            ORDER BY computed_at DESC
+            LIMIT 1
+            """,
+            (entity_key,),
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="baseline not found")
+    return row
+
+
+# ============================================================================
 # watchlist (active INKY correlation pins)
 # ============================================================================
 
@@ -966,6 +1359,55 @@ def governance_threatlocker() -> list[dict]:
     )
 
 
+@app.get("/api/governance/threatlocker/events")
+def governance_threatlocker_events(
+    hostname: str | None = Query(None),
+    username: str | None = Query(None),
+    action: str | None = Query(None),
+    action_type: str | None = Query(None),
+    policy_name: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Raw ThreatLocker ActionLog rows filtered to one governance
+    aggregation cell. Used by the Governance ThreatLocker tab's
+    in-place row expand."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            event_time,
+            hostname,
+            username,
+            full_path,
+            process_path,
+            action_type,
+            action,
+            action_id,
+            policy_name,
+            hash,
+            raw_json
+        FROM vector_threatlocker_events
+        WHERE client_name = %s
+          AND (%s::text IS NULL OR hostname    = %s)
+          AND (%s::text IS NULL OR username    = %s)
+          AND (%s::text IS NULL OR action      = %s)
+          AND (%s::text IS NULL OR action_type = %s)
+          AND (%s::text IS NULL OR policy_name = %s)
+        ORDER BY event_time DESC
+        LIMIT %s
+        """,
+        (
+            _GCS,
+            hostname, hostname,
+            username, username,
+            action, action,
+            action_type, action_type,
+            policy_name, policy_name,
+            limit,
+        ),
+    )
+
+
 @app.get("/api/governance/edr-alerts")
 def governance_edr_alerts() -> list[dict]:
     """Datto EDR alerts aggregated by (host, user, threat, severity)."""
@@ -990,6 +1432,116 @@ def governance_edr_alerts() -> list[dict]:
         LIMIT 200
         """,
         (_GCS,),
+    )
+
+
+@app.get("/api/governance/edr-alerts/events")
+def governance_edr_alerts_events(
+    hostname: str | None = Query(None),
+    username: str | None = Query(None),
+    threat_name: str | None = Query(None),
+    severity: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Raw EDR events filtered to one governance aggregation cell.
+    Used by the Governance EDR Alerts tab's in-place row expand."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            timestamp,
+            event_type,
+            severity,
+            host_name,
+            host_ip,
+            user_account,
+            process_name,
+            process_path,
+            threat_name,
+            threat_score,
+            action_taken,
+            raw_json
+        FROM vector_edr_events
+        WHERE client_name = %s
+          AND (%s::text IS NULL OR host_name    = %s)
+          AND (%s::text IS NULL OR user_account = %s)
+          AND (%s::text IS NULL OR threat_name  = %s)
+          AND (%s::text IS NULL OR severity     = %s)
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (
+            _GCS,
+            hostname, hostname,
+            username, username,
+            threat_name, threat_name,
+            severity, severity,
+            limit,
+        ),
+    )
+
+
+@app.get("/api/governance/events/by-ip")
+def governance_events_by_ip(
+    ip: str = Query(..., description="client_ip to filter on"),
+    event_type: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Recent UAL rows by source IP. Backs the Password Spray row
+    expand so an operator can see which users the source IP actually
+    hit without leaving the governance tab."""
+    return db.fetch_all(
+        """
+        SELECT id::text,
+               timestamp,
+               client_name,
+               tenant_id,
+               user_id,
+               entity_key,
+               event_type,
+               workload,
+               result_status,
+               client_ip
+        FROM vector_events
+        WHERE client_ip = %s
+          AND (%s::text IS NULL OR event_type = %s)
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (ip, event_type, event_type, limit),
+    )
+
+
+@app.get("/api/governance/oauth-apps/{app_id}/events")
+def governance_oauth_apps_events(
+    app_id: str,
+    limit: int = Query(10, ge=1, le=100),
+) -> list[dict]:
+    """Recent 'Consent to application.' rows for a single OAuth app.
+    Matches the `ObjectId` value used by the governance aggregate so
+    expanding a row on the OAuth Apps tab renders the actual consent
+    audit log for that specific application."""
+    return db.fetch_all(
+        """
+        SELECT id::text,
+               timestamp,
+               client_name,
+               tenant_id,
+               user_id,
+               entity_key,
+               event_type,
+               workload,
+               result_status,
+               client_ip,
+               raw_json
+        FROM vector_events
+        WHERE event_type = 'Consent to application.'
+          AND client_name = %s
+          AND COALESCE(raw_json->>'ObjectId', '') = %s
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (_GCS, app_id, limit),
     )
 
 
@@ -1831,41 +2383,10 @@ def governance_ai_activity() -> dict:
             "defender hunting failed for AI activity: %s", exc.detail
         )
 
-    # Claude M365 Connector detection
-    CLAUDE_APP_IDS = (
-        "08ad6f98-a4f8-4635-bb8d-f1a3044760f0",
-        "07c030f6-5743-41b7-ba00-0a6e85f37c17",
-    )
-    placeholders = ",".join(["%s"] * len(CLAUDE_APP_IDS))
-    claude_rows = db.fetch_all(
-        f"""
-        SELECT timestamp, user_id, tenant_id, client_name,
-               raw_json->>'ResultType' as result_type,
-               raw_json->>'AppDisplayName' as app_display_name,
-               client_ip
-        FROM vector_events
-        WHERE event_type = 'UserLoggedIn'
-        AND raw_json->>'ApplicationId' IN ({placeholders})
-        ORDER BY timestamp DESC
-        LIMIT 200
-        """,
-        CLAUDE_APP_IDS,
-    )
-    admin_grants   = [r for r in claude_rows if str(r.get("result_type")) == "0"]
-    shadow_it      = [r for r in claude_rows if str(r.get("result_type")) == "90095"]
-    claude_connector = {
-        "admin_grants":        admin_grants,
-        "shadow_it_attempts":  shadow_it,
-        "total":               len(claude_rows),
-        "admin_grant_count":   len(admin_grants),
-        "shadow_it_count":     len(shadow_it),
-    }
-
     return {
-        "copilot":          copilot,
-        "external_ai":      external_ai,
-        "external_error":   external_error,
-        "claude_connector": claude_connector,
+        "copilot":        copilot,
+        "external_ai":    external_ai,
+        "external_error": external_error,
     }
 
 
@@ -2153,126 +2674,6 @@ if (_static_path / "assets").is_dir():
     )
 
 
-@app.get("/api/baseline/stats")
-def baseline_stats():
-    return db.fetch_one("""
-        SELECT COUNT(*) as total_baselines,
-            COUNT(*) FILTER (WHERE computed_at > NOW() - INTERVAL '1 hour') as fresh,
-            MAX(computed_at) as last_computed,
-            AVG(jsonb_array_length(known_ips)) as avg_known_ips
-        FROM vector_user_baselines
-    """) or {}
-
-@app.get("/api/baseline/list")
-def baseline_list(limit: int = Query(100, ge=1, le=500), search: str = Query("")):
-    if search:
-        return db.fetch_all("""
-            SELECT user_id, tenant_id, client_name, computed_at,
-                jsonb_array_length(known_ips) as ip_count,
-                jsonb_array_length(known_devices) as device_count,
-                known_ips, login_countries, known_devices
-            FROM vector_user_baselines
-            WHERE user_id ILIKE %s
-            ORDER BY computed_at DESC LIMIT %s
-        """, (f"%{search}%", limit))
-    return db.fetch_all("""
-        SELECT user_id, tenant_id, client_name, computed_at,
-            jsonb_array_length(known_ips) as ip_count,
-            jsonb_array_length(known_devices) as device_count,
-            known_ips, login_countries, known_devices
-        FROM vector_user_baselines
-        ORDER BY computed_at DESC LIMIT %s
-    """, (limit,))
-
-@app.get("/api/incidents/stats")
-def incidents_stats():
-    return db.fetch_one("""
-        SELECT
-            COUNT(*) FILTER (WHERE status = 'open') as open,
-            COUNT(*) FILTER (WHERE severity = 'critical' AND status = 'open') as critical,
-            COUNT(*) FILTER (WHERE severity = 'high' AND status = 'open') as high,
-            COUNT(*) FILTER (WHERE confirmed_at > NOW() - INTERVAL '24 hours') as confirmed_today
-        FROM vector_incidents
-    """) or {"open": 0, "critical": 0, "high": 0, "confirmed_today": 0}
-
-@app.get("/api/incidents/list")
-def incidents_list(limit: int = Query(50, ge=1, le=200), status: str = Query("")):
-    if status:
-        return db.fetch_all("""
-            SELECT id, incident_type, severity, title, summary, user_id,
-                client_name, tenant_id, status, confirmed_at,
-                dwell_time_minutes, patient_zero, raw_signals
-            FROM vector_incidents
-            WHERE status = %s
-            ORDER BY confirmed_at DESC LIMIT %s
-        """, (status, limit))
-    return db.fetch_all("""
-        SELECT id, incident_type, severity, title, summary, user_id,
-            client_name, tenant_id, status, confirmed_at,
-            dwell_time_minutes, patient_zero, raw_signals
-        FROM vector_incidents
-        ORDER BY confirmed_at DESC LIMIT %s
-    """, (limit,))
-
-@app.post("/api/incidents/{incident_id}/status")
-def incident_update_status(incident_id: str, body: dict):
-    status = body.get("status")
-    row = db.fetch_one("""
-        UPDATE vector_incidents SET status = %s WHERE id = %s
-        RETURNING id, status, contained_at, confirmed_at
-    """, (status, incident_id))
-    return row or {"ok": True}
-
-@app.get("/api/incidents/{incident_id}")
-def incident_detail(incident_id: str):
-    return db.fetch_one("""
-        SELECT * FROM vector_incidents WHERE id = %s
-    """, (incident_id,)) or {}
-
-
-@app.get("/api/governance/claude-connector")
-def governance_claude_connector():
-    """Detect M365 Connector for Claude activity.
-    ResultType=0: admin granted access (critical governance event)
-    ResultType=90095: user attempted without admin grant (shadow IT)
-    AppIds: Claude M365 Connector + related app.
-    """
-    CLAUDE_APP_IDS = (
-        "08ad6f98-a4f8-4635-bb8d-f1a3044760f0",
-        "07c030f6-5743-41b7-ba00-0a6e85f37c17",
-    )
-    placeholders = ",".join(["%s"] * len(CLAUDE_APP_IDS))
-    rows = db.fetch_all(
-        f"""
-        SELECT
-            timestamp,
-            user_id,
-            tenant_id,
-            client_name,
-            result_status,
-            client_ip,
-            raw_json->>'ResultType' as result_type,
-            raw_json->>'AppDisplayName' as app_display_name,
-            raw_json->>'ApplicationId' as application_id,
-            raw_json->>'UserAgent' as user_agent
-        FROM vector_events
-        WHERE event_type = 'UserLoggedIn'
-        AND raw_json->>'ApplicationId' IN ({placeholders})
-        ORDER BY timestamp DESC
-        LIMIT 200
-        """,
-        CLAUDE_APP_IDS,
-    )
-    admin_grants = [r for r in rows if str(r.get("result_type")) == "0"]
-    shadow_it    = [r for r in rows if str(r.get("result_type")) == "90095"]
-    return {
-        "admin_grants": admin_grants,
-        "shadow_it_attempts": shadow_it,
-        "total": len(rows),
-        "admin_grant_count": len(admin_grants),
-        "shadow_it_count": len(shadow_it),
-    }
-
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa(full_path: str = "") -> FileResponse:
     """Catch-all that serves the React SPA shell.
@@ -2298,4 +2699,3 @@ async def spa(full_path: str = "") -> FileResponse:
     if index.is_file():
         return FileResponse(str(index))
     raise HTTPException(status_code=404)
-
