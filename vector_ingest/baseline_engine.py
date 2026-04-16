@@ -1,3 +1,9 @@
+from __future__ import annotations
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from vector_ingest.db import Database
+
 class BaselineEngine:
     """Every 60 minutes, rebuild a row in vector_user_baselines for every
     user that has at least 7 days of history. Each row captures the last
