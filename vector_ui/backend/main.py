@@ -511,7 +511,7 @@ def user_emails(
             direction
         FROM vector_message_trace
         WHERE (sender_address = %s OR recipient_address = %s)
-          AND (%s::text IS NULL OR direction = %s)
+          AND (%s::text IS NULL OR direction ILIKE %s || '%%')
           AND (%s::text IS NULL OR subject ILIKE '%%' || %s || '%%')
         ORDER BY received DESC
         LIMIT %s OFFSET %s
