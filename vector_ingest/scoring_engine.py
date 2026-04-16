@@ -232,6 +232,8 @@ class ScoringEngine:
                 NewCountryLoginRule(),
                 OffHoursLoginRule(),
                 HighVolumeFileAccessRule(),
+                SuspiciousMailboxRule(),
+                MalwareDetectedRule(),
             ]
         for r in rules:
             self.register_rule(r)
@@ -1149,3 +1151,263 @@ class HighVolumeFileAccessRule(CorrelationRule):
             )
             row = cur.fetchone()
         return int(row[0] or 0) if row else 0
+
+
+class SuspiciousMailboxRule(CorrelationRule):
+    """Fires when a user triggered mailbox-recon + mailbox-mutation
+    events in the same 2-hour window.
+
+    The shape we're looking for:
+
+    * ``FolderBind`` -- UAL record of a mailbox folder being opened
+      by a non-owner or a service identity. Normal users don't
+      usually generate ``FolderBind`` for their own mailbox; when
+      they do, it shows up alongside other mailbox reads. When we
+      see a ``FolderBind`` paired with a mailbox mutation event
+      inside a small window it's almost always either a legitimate
+      admin doing a mailbox audit or an attacker enumerating
+      folders before setting up forwarding / an inbox rule. The
+      enumeration -> action pair is the tell.
+
+    * ``MessageForward`` or ``New-InboxRule`` (``NewInboxRule``) --
+      the mutation side: the attacker adjusts the mailbox to
+      exfiltrate messages or hide sent email from the victim.
+      Either one on its own is noisy; paired with a preceding
+      folder enumeration it's a strong BEC precursor.
+
+    Score: 30 points. High on its own because the combination is
+    genuinely rare for legitimate users; still below the 80-point
+    incident threshold so a second signal (new-country login,
+    off-hours, high-volume downloads, etc.) is needed to confirm.
+    """
+
+    name = "SuspiciousMailbox"
+    SCORE_DELTA = 30
+    LOOKBACK = timedelta(hours=2)
+
+    FOLDER_BIND_TYPE = "FolderBind"
+    MUTATION_TYPES = ("MessageForward", "NewInboxRule", "New-InboxRule")
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug(
+                "[suspicious_mailbox] rule has no DB handle, skipping",
+            )
+            return miss
+
+        try:
+            counts = self._fetch_event_counts(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[suspicious_mailbox] event count fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        folder_bind_count = int(counts.get("folder_bind") or 0)
+        mutation_count = int(counts.get("mutation") or 0)
+
+        if folder_bind_count <= 0 or mutation_count <= 0:
+            return miss
+
+        return RuleResult(
+            rule_name=self.rule_name,
+            score_delta=self.SCORE_DELTA,
+            fired=True,
+            evidence={
+                "user":           user_id,
+                "events_found":   {
+                    "FolderBind":               folder_bind_count,
+                    "MessageForward/NewInboxRule": mutation_count,
+                },
+                "window_minutes": 120,
+            },
+        )
+
+    def _fetch_event_counts(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict:
+        """Return ``{folder_bind, mutation}`` counts for this user
+        inside the lookback window.
+
+        A single COUNT(*) FILTER query keeps the whole check to one
+        round-trip and never materialises the row list -- the rule
+        only needs "does at least one of each exist" so this is
+        strictly faster than pulling event metadata.
+        """
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE event_type = %s)::bigint AS folder_bind,
+                    COUNT(*) FILTER (WHERE event_type = ANY(%s))::bigint AS mutation
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type IN (%s, %s, %s, %s)
+                  AND timestamp > NOW() - %s
+                """,
+                (
+                    self.FOLDER_BIND_TYPE,
+                    list(self.MUTATION_TYPES),
+                    tenant_id,
+                    user_id,
+                    self.FOLDER_BIND_TYPE,
+                    self.MUTATION_TYPES[0],
+                    self.MUTATION_TYPES[1],
+                    self.MUTATION_TYPES[2],
+                    self.LOOKBACK,
+                ),
+            )
+            row = cur.fetchone()
+        if not row:
+            return {"folder_bind": 0, "mutation": 0}
+        return {
+            "folder_bind": int(row[0] or 0),
+            "mutation":    int(row[1] or 0),
+        }
+
+
+class MalwareDetectedRule(CorrelationRule):
+    """Fires when ``vector_defender_alerts`` contains any alert
+    for this user in the last 24 hours.
+
+    Auto-fires regardless of other signals: a Defender ATP alert
+    is already a vetted detection from Microsoft's security stack,
+    so the scoring engine's role here is just to lift the detection
+    into a Phase 2 incident with proper dedup + ownership + UI
+    surface. The 60-point weight is intentionally high so a single
+    fire plus even one low-weight signal (off-hours login, +15)
+    pushes the aggregate over the 80-point incident threshold.
+
+    Matching: Defender alerts identify users via the
+    ``logged_on_users`` JSONB array (each element is
+    ``{accountName, domainName}``) and various paths in
+    ``raw_json``. We do the pragmatic thing and substring-match
+    both against the user's UPN and against the UPN's local part
+    -- false positives are inherently scoped to one tenant and
+    the severity of a real hit justifies the looser match.
+    """
+
+    name = "MalwareDetected"
+    SCORE_DELTA = 60
+    LOOKBACK = timedelta(hours=24)
+    MAX_ALERTS = 100  # hard cap on inspected rows per cycle
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug(
+                "[malware] rule has no DB handle, skipping",
+            )
+            return miss
+
+        try:
+            alerts = self._fetch_alerts(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[malware] alert fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if not alerts:
+            return miss
+
+        # Rows come back ordered newest-first, so index 0 is the
+        # latest. We surface its title + severity in the evidence
+        # so the Incidents UI's evidence timeline has something
+        # operator-useful to show without clicking through.
+        latest = alerts[0]
+        return RuleResult(
+            rule_name=self.rule_name,
+            score_delta=self.SCORE_DELTA,
+            fired=True,
+            evidence={
+                "user":                  user_id,
+                "alert_count":           len(alerts),
+                "latest_alert_title":    latest.get("title"),
+                "latest_alert_severity": latest.get("severity"),
+            },
+        )
+
+    def _fetch_alerts(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[dict]:
+        """Return matching Defender alerts for this user inside
+        the lookback window, newest-first.
+
+        ``logged_on_users`` is cast to text and substring-matched
+        against the local part of the UPN (that's what Defender
+        carries in accountName). ``raw_json`` is substring-matched
+        against the full UPN for the cases where the alert payload
+        embeds the email somewhere in its nested structure.
+        """
+        local_part = user_id.split("@", 1)[0] if "@" in user_id else user_id
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, severity, title, alert_creation_time
+                FROM vector_defender_alerts
+                WHERE tenant_id = %s
+                  AND alert_creation_time > NOW() - %s
+                  AND (
+                        logged_on_users::text ILIKE '%%' || %s || '%%'
+                     OR raw_json::text        ILIKE '%%' || %s || '%%'
+                  )
+                ORDER BY alert_creation_time DESC
+                LIMIT %s
+                """,
+                (
+                    tenant_id,
+                    self.LOOKBACK,
+                    local_part,
+                    user_id,
+                    self.MAX_ALERTS,
+                ),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
