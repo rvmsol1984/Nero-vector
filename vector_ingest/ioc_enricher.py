@@ -683,6 +683,20 @@ class IocEnricher:
 
         # Break out IPs for progress logging so the log line cadence
         # matches the IP_BATCH_SIZE batching requirement in the spec.
+        import ipaddress
+        def _is_public_ip(ip: str) -> bool:
+            try:
+                addr = ipaddress.ip_address(ip)
+                return not (addr.is_private or addr.is_loopback or
+                            addr.is_link_local or addr.is_multicast or
+                            addr.is_unspecified)
+            except ValueError:
+                return False
+
+        # Filter private/loopback IPs before sending to OpenCTI
+        iocs = {(t, v): ctx for (t, v), ctx in iocs.items()
+                if t not in ("ipv4", "ipv6") or _is_public_ip(v)}
+
         ip_values = [v for (t, v) in iocs.keys() if t in ("ipv4", "ipv6")]
         other_count = len(iocs) - len(ip_values)
         logger.info(
