@@ -24,7 +24,8 @@ from vector_ingest.ioc_enricher import IocEnricher
 from vector_ingest.message_trace import MessageTraceIngestor
 from vector_ingest.signin_logs import SignInLogPoller
 from vector_ingest.threatlocker_ingest import ThreatLockerIngestor
-from vector_ingest.scoring_engine import ScoringEngine, BaselineEngine
+from vector_ingest.scoring_engine import ScoringEngine
+from vector_ingest.baseline_engine import BaselineEngine
 
 
 def configure_logging() -> None:
