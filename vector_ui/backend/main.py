@@ -2186,10 +2186,11 @@ def incidents_list(limit: int = Query(50, ge=1, le=200), status: str = Query("")
 @app.post("/api/incidents/{incident_id}/status")
 def incident_update_status(incident_id: str, body: dict):
     status = body.get("status")
-    db.execute("""
+    row = db.fetch_one("""
         UPDATE vector_incidents SET status = %s WHERE id = %s
+        RETURNING id, status, contained_at, confirmed_at
     """, (status, incident_id))
-    return {"ok": True}
+    return row or {"ok": True}
 
 @app.get("/api/incidents/{incident_id}")
 def incident_detail(incident_id: str):
