@@ -523,6 +523,82 @@ def user_emails(
     )
 
 
+@app.get("/api/users/{entity_key}/emails/{message_id}/attachments")
+def user_email_attachments(entity_key: str, message_id: str) -> list[dict]:
+    """Fetch attachment metadata for a single email via Microsoft Graph.
+
+    ``message_id`` is the RFC-2822 ``Message-ID`` header stored in
+    vector_message_trace (what Exchange calls ``InternetMessageId``).
+    Graph doesn't expose a direct lookup on that field, so we first
+    search for the matching message via ``/users/{email}/messages``
+    with a ``$filter``, then pull its ``/attachments`` list if
+    ``hasAttachments`` is true.
+
+    Returns ``[]`` on any error (Graph unavailable, message not
+    found, no attachments) so the frontend can degrade gracefully.
+    """
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    if not user_email or not message_id:
+        return []
+
+    # Graph's $filter on internetMessageId needs angle brackets.
+    mid = message_id.strip()
+    if not mid.startswith("<"):
+        mid = f"<{mid}>"
+    if not mid.endswith(">"):
+        mid = f"{mid}>"
+
+    try:
+        filter_str = urllib.parse.quote(
+            f"internetMessageId eq '{mid}'",
+            safe="",
+        )
+        search_path = (
+            f"/users/{urllib.parse.quote(user_email, safe='@')}"
+            f"/messages?$filter={filter_str}&$select=id,hasAttachments&$top=1"
+        )
+        data = _graph_get(search_path)
+    except HTTPException:
+        return []
+    except Exception:
+        logger.debug("email attachment search failed", exc_info=True)
+        return []
+
+    messages = data.get("value") or []
+    if not messages:
+        return []
+    msg = messages[0]
+    if not msg.get("hasAttachments"):
+        return []
+    graph_id = msg.get("id")
+    if not graph_id:
+        return []
+
+    try:
+        att_path = (
+            f"/users/{urllib.parse.quote(user_email, safe='@')}"
+            f"/messages/{urllib.parse.quote(graph_id, safe='')}"
+            f"/attachments?$select=name,size,contentType"
+        )
+        att_data = _graph_get(att_path)
+    except HTTPException:
+        return []
+    except Exception:
+        logger.debug("email attachment fetch failed", exc_info=True)
+        return []
+
+    attachments = att_data.get("value") or []
+    return [
+        {
+            "name":         a.get("name"),
+            "size_bytes":   a.get("size"),
+            "content_type": a.get("contentType"),
+        }
+        for a in attachments
+        if isinstance(a, dict)
+    ]
+
+
 # ============================================================================
 # unified feed (UAL + INKY together, sorted by timestamp)
 # ============================================================================
