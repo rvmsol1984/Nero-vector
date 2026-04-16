@@ -7,6 +7,7 @@ until the process receives SIGINT/SIGTERM.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -168,6 +169,71 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
     return ingestors
 
 
+def _poll_one(ingestor) -> None:
+    """Log-and-run wrapper for a single ingestor's ``poll_once``.
+
+    Keeps the structured log shape identical to the legacy sequential
+    loop so operator dashboards that key on these fields continue to
+    work. Exceptions are caught and logged; the caller's
+    ``asyncio.gather`` still gets return_exceptions=True as a second
+    line of defence.
+    """
+    kind = type(ingestor).__name__
+    logger.info(
+        "polling ingestor",
+        extra={
+            "kind": kind,
+            "tenant_id": ingestor.tenant_id,
+            "client_name": ingestor.client_name,
+        },
+    )
+    try:
+        ingestor.poll_once()
+    except Exception as exc:
+        logger.exception(
+            "ingestor poll crashed",
+            extra={
+                "kind": kind,
+                "tenant_id": ingestor.tenant_id,
+                "client_name": ingestor.client_name,
+                "error": str(exc),
+            },
+        )
+
+
+async def _run_tenant_ingestors_concurrent(tenant_ingestors: list) -> None:
+    """Fan out every tenant-scoped ingestor onto its own task so GCS,
+    NERO, London Fischer, etc. poll simultaneously instead of in
+    series. Each ingestor's ``poll_once`` is synchronous and blocks on
+    HTTP, so we bounce through ``asyncio.to_thread`` to get real
+    parallelism out of the async scheduler.
+
+    ``return_exceptions=True`` is belt-and-braces -- ``_poll_one``
+    already swallows and logs inside the task -- but it guarantees
+    the gather itself never re-raises and takes down the cycle.
+    """
+    if not tenant_ingestors:
+        return
+    tasks = [
+        asyncio.to_thread(_poll_one, ingestor) for ingestor in tenant_ingestors
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _run_global_ingestors_sequential(global_ingestors: list) -> None:
+    """Global workers (IocEnricher, ScoringEngine, BaselineEngine,
+    ThreatIntelMonitor, ...) run after every tenant ingest has
+    committed its rows. These workers read vector_events looking for
+    cross-tenant or cross-source correlations, so running them before
+    tenant ingest would miss this cycle's fresh data. Sequential
+    ordering also avoids piling concurrent writes onto
+    vector_incidents / vector_ioc_matches."""
+    for ingestor in global_ingestors:
+        if _SHUTDOWN:
+            break
+        _poll_one(ingestor)
+
+
 def main() -> int:
     configure_logging()
 
@@ -193,33 +259,37 @@ def main() -> int:
 
     ingestors = build_ingestors(tenants, db)
 
+    # Partition the ingestor list into the two groups the parallel
+    # poll loop needs. Global workers use ``tenant_id == "*"`` as
+    # their structured-log anchor (IocEnricher does today;
+    # ScoringEngine / BaselineEngine / ThreatIntelMonitor follow the
+    # same convention when they're wired in). Everything else is
+    # per-tenant and gets fanned out.
+    tenant_ingestors = [i for i in ingestors if i.tenant_id != "*"]
+    global_ingestors = [i for i in ingestors if i.tenant_id == "*"]
+    logger.info(
+        "ingestor groups built",
+        extra={
+            "tenant_ingestors": len(tenant_ingestors),
+            "global_ingestors": len(global_ingestors),
+        },
+    )
+
     try:
         while not _SHUTDOWN:
             cycle_start = time.monotonic()
-            for ingestor in ingestors:
-                if _SHUTDOWN:
-                    break
-                kind = type(ingestor).__name__
-                logger.info(
-                    "polling ingestor",
-                    extra={
-                        "kind": kind,
-                        "tenant_id": ingestor.tenant_id,
-                        "client_name": ingestor.client_name,
-                    },
-                )
-                try:
-                    ingestor.poll_once()
-                except Exception as exc:
-                    logger.exception(
-                        "ingestor poll crashed",
-                        extra={
-                            "kind": kind,
-                            "tenant_id": ingestor.tenant_id,
-                            "client_name": ingestor.client_name,
-                            "error": str(exc),
-                        },
-                    )
+
+            # Phase 1: fan out all tenant-scoped ingestors in parallel
+            # so GCS, NERO, and London Fischer poll concurrently
+            # instead of serially. Each cycle gets its own event loop
+            # via asyncio.run so we don't hold a loop across sleeps.
+            asyncio.run(_run_tenant_ingestors_concurrent(tenant_ingestors))
+
+            # Phase 2: global correlators run AFTER every tenant
+            # ingest has committed this cycle's rows, so they see the
+            # full cross-tenant picture before scoring / enriching.
+            if not _SHUTDOWN:
+                _run_global_ingestors_sequential(global_ingestors)
 
             elapsed = time.monotonic() - cycle_start
             sleep_for = max(5, poll_interval - int(elapsed))
