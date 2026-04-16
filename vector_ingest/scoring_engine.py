@@ -973,12 +973,8 @@ class OffHoursLoginRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        if not events:
-            return miss
-
-        first = events[0]
-        tenant_id = first.get("tenant_id")
-        user_id = first.get("user_id")
+        tenant_id = user_profile.get("tenant_id")
+        user_id = user_profile.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1082,12 +1078,8 @@ class HighVolumeFileAccessRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        if not events:
-            return miss
-
-        first = events[0]
-        tenant_id = first.get("tenant_id")
-        user_id = first.get("user_id")
+        tenant_id = user_profile.get("tenant_id")
+        user_id = user_profile.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1198,12 +1190,8 @@ class SuspiciousMailboxRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        if not events:
-            return miss
-
-        first = events[0]
-        tenant_id = first.get("tenant_id")
-        user_id = first.get("user_id")
+        tenant_id = user_profile.get("tenant_id")
+        user_id = user_profile.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1326,12 +1314,8 @@ class MalwareDetectedRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        if not events:
-            return miss
-
-        first = events[0]
-        tenant_id = first.get("tenant_id")
-        user_id = first.get("user_id")
+        tenant_id = user_profile.get("tenant_id")
+        user_id = user_profile.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1457,12 +1441,8 @@ class IOCMatchRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        if not events:
-            return miss
-
-        first = events[0]
-        tenant_id = first.get("tenant_id")
-        user_id = first.get("user_id")
+        tenant_id = user_profile.get("tenant_id")
+        user_id = user_profile.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
