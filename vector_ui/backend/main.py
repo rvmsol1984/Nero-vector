@@ -524,7 +524,7 @@ def user_emails(
 
 
 @app.get("/api/users/{entity_key}/emails/{message_id}/attachments")
-def user_email_attachments(entity_key: str, message_id: str) -> list[dict]:
+def user_email_attachments(entity_key: str, message_id: str, subject: str | None = Query(None)) -> list[dict]:
     """Fetch attachment metadata for a single email via Microsoft Graph.
 
     ``message_id`` is the RFC-2822 ``Message-ID`` header stored in
@@ -541,21 +541,21 @@ def user_email_attachments(entity_key: str, message_id: str) -> list[dict]:
     if not user_email or not message_id:
         return []
 
-    # Graph's $filter on internetMessageId needs angle brackets.
-    mid = message_id.strip()
-    if not mid.startswith("<"):
-        mid = f"<{mid}>"
-    if not mid.endswith(">"):
-        mid = f"{mid}>"
-
+    # Search by subject (NetworkMessageId UUIDs don't match internetMessageId filter)
     try:
-        filter_str = urllib.parse.quote(
-            f"internetMessageId eq '{mid}'",
-            safe="",
-        )
+        if subject:
+            safe_subj = subject.replace("'", "''")
+            filt = urllib.parse.quote(f"subject eq '{safe_subj}'", safe="")
+        else:
+            mid = message_id.strip()
+            if not mid.startswith("<"):
+                mid = f"<{mid}>"
+            if not mid.endswith(">"):
+                mid = f"{mid}>"
+            filt = urllib.parse.quote(f"internetMessageId eq '{mid}'", safe="")
         search_path = (
             f"/users/{urllib.parse.quote(user_email, safe='@')}"
-            f"/messages?$filter={filter_str}&$select=id,hasAttachments&$top=1"
+            f"/messages?$filter={filt}&$select=id,hasAttachments&$top=1"
         )
         data = _graph_get(search_path)
     except HTTPException:

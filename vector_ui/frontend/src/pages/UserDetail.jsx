@@ -659,6 +659,7 @@ function EmailTraceTab({ entityKey }) {
                           <EmailAttachmentPanel
                             entityKey={entityKey}
                             messageId={r.message_id}
+                            subject={r.subject}
                           />
                         </td>
                       </tr>
@@ -684,7 +685,7 @@ function EmailTraceTab({ entityKey }) {
   );
 }
 
-function EmailAttachmentPanel({ entityKey, messageId }) {
+function EmailAttachmentPanel({ entityKey, messageId, subject }) {
   const [attachments, setAttachments] = useState(null);
   const [err, setErr] = useState(null);
 
@@ -696,7 +697,7 @@ function EmailAttachmentPanel({ entityKey, messageId }) {
     let cancel = false;
     const url =
       `/api/users/${encodeURIComponent(entityKey)}/emails/` +
-      `${encodeURIComponent(messageId)}/attachments`;
+      `${encodeURIComponent(messageId)}/attachments${subject ? `?subject=${encodeURIComponent(subject)}` : ""}`;
     fetch(url, {
       credentials: "same-origin",
       headers: {
