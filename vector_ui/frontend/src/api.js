@@ -25,6 +25,28 @@ async function get(path) {
   return res.json();
 }
 
+async function post(path, body) {
+  const token = getToken();
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    clearToken();
+    redirectToLogin();
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) {
+    throw new Error(`${path} -> ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
 function qs(params) {
   const sp = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
