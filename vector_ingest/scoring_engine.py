@@ -30,6 +30,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -234,6 +235,7 @@ class ScoringEngine:
                 HighVolumeFileAccessRule(),
                 SuspiciousMailboxRule(),
                 MalwareDetectedRule(),
+                IOCMatchRule(),
             ]
         for r in rules:
             self.register_rule(r)
@@ -1411,3 +1413,477 @@ class MalwareDetectedRule(CorrelationRule):
             )
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+class IOCMatchRule(CorrelationRule):
+    """Fires when any of the user's recent activity IPs shows up in
+    ``vector_ioc_matches`` with confidence >= 50.
+
+    ``vector_ioc_matches`` is populated by two independent workers:
+
+    * ``IocEnricher`` (vector_ingest/ioc_enricher.py) -- live
+      enrichment on freshly-ingested events, running every 5
+      minutes alongside the rest of the ingest loop.
+    * ``ThreatIntelMonitor`` (below) -- daily retroactive sweep
+      that catches IPs which became indicators AFTER they were
+      first ingested. This is the "indicator published yesterday,
+      we saw the traffic three days ago" case.
+
+    This rule is the consumer that lifts matches from either source
+    into Phase 2 incident scoring. Score is 50 -- high enough that
+    even a single low-weight co-signal (off-hours login +15) pushes
+    the aggregate past the 80-point incident threshold, but below
+    threshold on its own so a noisy upstream feed never pages
+    operators all by itself.
+
+    The join goes via ``vector_ioc_matches.ioc_value = vector_events
+    .client_ip`` because the only IOC type currently populated for
+    IPv4 observables is the flat IP string. If/when the schema grows
+    a dedicated ``ioc_type = 'ipv4'`` filter, this query can add a
+    ``WHERE m.ioc_type = 'ipv4'`` clause to keep the index usage
+    tight; today there's nothing to exclude.
+    """
+
+    name = "IOCMatch"
+    SCORE_DELTA = 50
+    LOOKBACK = timedelta(hours=24)
+    MIN_CONFIDENCE = 50
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug(
+                "[ioc_match] rule has no DB handle, skipping",
+            )
+            return miss
+
+        try:
+            match = self._fetch_match(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[ioc_match] query failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if match is None:
+            return miss
+
+        # ``threat_type`` is the operator-facing label shown on the
+        # Incidents UI's evidence timeline. Prefer the concrete
+        # ``ioc_type`` field when it's set (e.g. "ipv4") because
+        # that's what downstream UI code already knows how to render;
+        # fall back to the human-readable indicator_name and finally
+        # to a literal string when both are missing.
+        threat_type = (
+            (match.get("ioc_type") or "").strip()
+            or (match.get("indicator_name") or "").strip()
+            or "unknown"
+        )
+
+        return RuleResult(
+            rule_name=self.rule_name,
+            score_delta=self.SCORE_DELTA,
+            fired=True,
+            evidence={
+                "user":        user_id,
+                "matched_ip":  match.get("matched_ip"),
+                "ioc_value":   match.get("ioc_value"),
+                "confidence":  int(match.get("confidence") or 0),
+                "threat_type": threat_type,
+            },
+        )
+
+    def _fetch_match(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict | None:
+        """Find the single highest-confidence IOC match for any IP
+        this user used in the lookback window. Returns a dict or
+        ``None`` if no match exists.
+
+        We use LIMIT 1 because the rule only needs to know "does at
+        least one IOC match exist" -- the evidence dict reports a
+        single representative hit to keep the Incidents UI readable.
+        """
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    e.client_ip     AS matched_ip,
+                    m.ioc_value     AS ioc_value,
+                    m.confidence    AS confidence,
+                    m.ioc_type      AS ioc_type,
+                    m.indicator_name AS indicator_name
+                FROM vector_events e
+                JOIN vector_ioc_matches m ON m.ioc_value = e.client_ip
+                WHERE e.tenant_id = %s
+                  AND e.user_id = %s
+                  AND e.client_ip IS NOT NULL
+                  AND e.timestamp > NOW() - %s
+                  AND m.confidence >= %s
+                ORDER BY m.confidence DESC
+                LIMIT 1
+                """,
+                (tenant_id, user_id, self.LOOKBACK, self.MIN_CONFIDENCE),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "matched_ip":     row[0],
+            "ioc_value":      row[1],
+            "confidence":     row[2],
+            "ioc_type":       row[3],
+            "indicator_name": row[4],
+        }
+
+
+class ThreatIntelMonitor:
+    """Daily proactive IOC sweep against the local OpenCTI instance.
+
+    Unlike ``IocEnricher`` (which runs every 5 minutes and checks
+    only freshly-ingested events), this worker walks the last 7 days
+    of ``vector_events`` once per day at 02:00 UTC, extracts every
+    unique public ``client_ip``, and re-queries OpenCTI for each
+    one. Any new hit is written into ``vector_ioc_matches`` where
+    ``IOCMatchRule`` picks it up on the next scoring cycle.
+
+    This catches the "retroactive IOC" case: an IP was ingested
+    cleanly on day 1, OpenCTI added it to a threat-actor indicator
+    on day 3, and without this sweep the historical match would
+    never surface. The 7-day lookback is a deliberate compromise
+    between catching slow threat-feed updates and keeping the
+    per-cycle workload bounded -- most OpenCTI feeds publish within
+    72 hours of observation.
+
+    ``ThreatIntelMonitor`` is NOT a ``CorrelationRule`` -- it's a
+    stand-alone worker that fits the vector-ingest main-loop
+    ``poll_once()`` contract. The main loop calls ``poll_once()``
+    every cycle; the worker internally checks the clock and only
+    runs a real sweep when it's past 02:00 UTC and it hasn't
+    already run today.
+    """
+
+    # Structured-logging anchors so main.py's log format stays
+    # consistent with the other global workers.
+    tenant_id = "*"
+    client_name = "global"
+
+    OPENCTI_URL = "http://localhost:8080/graphql"
+    LOOKBACK = timedelta(days=7)
+    RATE_LIMIT_SEC = 1.0
+    REQUEST_TIMEOUT = 10
+    DAILY_RUN_HOUR_UTC = 2  # 02:00 UTC
+    MIN_CONFIDENCE = 50
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+        # Last successful ``poll_once`` that actually performed a
+        # sweep. Used to gate "already ran today" so the worker
+        # runs exactly once per day even though the main loop
+        # calls it every cycle.
+        self._last_run: datetime | None = None
+        self._last_call_at: float = 0.0
+        self._session: requests.Session | None = None
+
+    # ----- main-loop entrypoint ------------------------------------------
+
+    def poll_once(self) -> None:
+        """Main-loop entrypoint. Runs one daily sweep when we're
+        past 02:00 UTC and haven't already run today; otherwise
+        returns immediately. Unexpected exceptions are swallowed
+        so a misconfigured OpenCTI never takes the ingest loop
+        down."""
+        now = datetime.now(timezone.utc)
+        today_target = now.replace(
+            hour=self.DAILY_RUN_HOUR_UTC,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        # Too early -- haven't hit the daily window yet.
+        if now < today_target:
+            return
+        # Already ran today.
+        if self._last_run is not None and self._last_run >= today_target:
+            return
+
+        try:
+            self._run_sweep()
+        except Exception:
+            logger.exception("[threat_intel] daily sweep crashed")
+        finally:
+            # Always advance the last-run clock so a persistent
+            # failure doesn't spin us up on every cycle.
+            self._last_run = datetime.now(timezone.utc)
+
+    # ----- sweep orchestration -------------------------------------------
+
+    def _run_sweep(self) -> None:
+        logger.info("[threat_intel] starting daily sweep")
+        candidates = self._fetch_unique_ips()
+        logger.info(
+            "[threat_intel] pulled %d candidate IP records", len(candidates),
+        )
+
+        checked = 0
+        hit = 0
+        inserted = 0
+        skipped_private = 0
+
+        for tenant_id, client_name, ip, event_id in candidates:
+            if self._is_skippable_ip(ip):
+                skipped_private += 1
+                continue
+            checked += 1
+            try:
+                indicators = self._query_opencti(ip)
+            except Exception:
+                logger.exception(
+                    "[threat_intel] opencti query failed ip=%s", ip,
+                )
+                continue
+            if not indicators:
+                continue
+            hit += 1
+            for indicator in indicators:
+                if int(indicator.get("confidence") or 0) < self.MIN_CONFIDENCE:
+                    continue
+                if self._insert_match(
+                    tenant_id=tenant_id,
+                    client_name=client_name,
+                    ip=ip,
+                    event_id=event_id,
+                    indicator=indicator,
+                ):
+                    inserted += 1
+
+        logger.info(
+            "[threat_intel] sweep complete checked=%d hit=%d inserted=%d "
+            "skipped_private=%d",
+            checked, hit, inserted, skipped_private,
+        )
+
+    # ----- database helpers ----------------------------------------------
+
+    def _fetch_unique_ips(
+        self,
+    ) -> list[tuple[str | None, str | None, str, Any]]:
+        """Return one ``(tenant_id, client_name, client_ip, event_id)``
+        tuple per unique ``client_ip`` seen in the lookback window.
+
+        Uses ``DISTINCT ON (client_ip)`` with ``ORDER BY client_ip,
+        timestamp DESC`` so each IP is keyed to its most recent
+        vector_events row. That row's id becomes the
+        ``matched_event_id`` on any match we insert, which lets the
+        ``UNIQUE (ioc_value, matched_event_id)`` constraint dedupe
+        re-runs of the same IP against the same representative
+        event.
+        """
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (client_ip)
+                    tenant_id, client_name, client_ip, id
+                FROM vector_events
+                WHERE client_ip IS NOT NULL
+                  AND timestamp > NOW() - %s
+                ORDER BY client_ip, timestamp DESC
+                """,
+                (self.LOOKBACK,),
+            )
+            return [
+                (row[0], row[1], row[2], row[3])
+                for row in cur.fetchall()
+            ]
+
+    def _insert_match(
+        self,
+        tenant_id: str | None,
+        client_name: str | None,
+        ip: str,
+        event_id: Any,
+        indicator: dict,
+    ) -> bool:
+        """Insert a single match row. Returns True when a new row
+        was written, False when the ``UNIQUE (ioc_value,
+        matched_event_id)`` constraint caused the insert to be a
+        no-op (i.e. we already knew about this match)."""
+        try:
+            with self._db.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO vector_ioc_matches (
+                        tenant_id, client_name, ioc_type, ioc_value,
+                        opencti_id, indicator_name, confidence,
+                        matched_event_id, raw_json
+                    ) VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s::jsonb
+                    )
+                    ON CONFLICT (ioc_value, matched_event_id) DO NOTHING
+                    RETURNING id::text
+                    """,
+                    (
+                        tenant_id,
+                        client_name,
+                        "ipv4",
+                        ip,
+                        indicator.get("opencti_id"),
+                        indicator.get("indicator_name"),
+                        int(indicator.get("confidence") or 0),
+                        event_id,
+                        json.dumps({
+                            "indicator": indicator,
+                            "source":    "threat_intel_monitor",
+                            "proactive": True,
+                        }),
+                    ),
+                )
+                row = cur.fetchone()
+            self._db.conn.commit()
+            return row is not None
+        except Exception:
+            logger.exception(
+                "[threat_intel] insert_match failed ip=%s", ip,
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return False
+
+    # ----- OpenCTI HTTP --------------------------------------------------
+
+    @staticmethod
+    def _is_skippable_ip(ip: str) -> bool:
+        """True for any address we shouldn't query OpenCTI for --
+        RFC1918, loopback, link-local, multicast, unspecified, or
+        anything unparseable."""
+        try:
+            addr = ipaddress.ip_address(str(ip).strip())
+        except (ValueError, TypeError):
+            return True
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.is_reserved
+        )
+
+    def _rate_limit(self) -> None:
+        elapsed = time.monotonic() - self._last_call_at
+        if elapsed < self.RATE_LIMIT_SEC:
+            time.sleep(self.RATE_LIMIT_SEC - elapsed)
+        self._last_call_at = time.monotonic()
+
+    def _query_opencti(self, ip: str) -> list[dict]:
+        """POST an inline GraphQL query for one IP. Returns a list
+        of normalised ``{opencti_id, indicator_name, confidence,
+        description}`` dicts, or ``[]`` on any error / empty
+        response.
+
+        The query is inlined as a literal string because OpenCTI's
+        GraphQL parser has historically rejected some parameterised
+        filter shapes we care about. The IP is embedded after a
+        quick ``_is_skippable_ip`` check above, which already
+        ensures we're only ever interpolating well-formed numeric
+        addresses -- no user-controlled input ever reaches this
+        path.
+        """
+        self._rate_limit()
+        if self._session is None:
+            self._session = requests.Session()
+
+        query = (
+            "{ stixCyberObservables("
+            "  filters: {mode: and,"
+            f"  filters: [{{key: \"value\", values: [\"{ip}\"]}}],"
+            "   filterGroups: []}"
+            ") { edges { node {"
+            "  id entity_type"
+            "  ... on IPv4Addr { value }"
+            "  indicators { edges { node {"
+            "    id name confidence description"
+            "  } } }"
+            "} } } }"
+        )
+
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        token = os.environ.get("OPENCTI_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        try:
+            resp = self._session.post(
+                self.OPENCTI_URL,
+                json={"query": query},
+                headers=headers,
+                timeout=self.REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.debug("[threat_intel] opencti request failed ip=%s err=%s", ip, exc)
+            return []
+
+        if not resp.ok:
+            logger.debug(
+                "[threat_intel] opencti non-2xx ip=%s status=%s",
+                ip, resp.status_code,
+            )
+            return []
+
+        try:
+            data = resp.json()
+        except ValueError:
+            return []
+
+        indicators: list[dict] = []
+        edges = (
+            (data.get("data") or {})
+            .get("stixCyberObservables", {})
+            .get("edges", [])
+            or []
+        )
+        for edge in edges:
+            node = (edge or {}).get("node") or {}
+            observable_id = node.get("id")
+            inner_edges = (
+                (node.get("indicators") or {}).get("edges") or []
+            )
+            for inner in inner_edges:
+                ind = (inner or {}).get("node") or {}
+                try:
+                    confidence = int(ind.get("confidence") or 0)
+                except (TypeError, ValueError):
+                    confidence = 0
+                indicators.append({
+                    "opencti_id":     ind.get("id") or observable_id,
+                    "indicator_name": ind.get("name"),
+                    "confidence":     confidence,
+                    "description":    ind.get("description"),
+                })
+        return indicators
