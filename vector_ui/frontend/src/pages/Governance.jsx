@@ -1,4 +1,4 @@
-import { Fragment, createContext, useContext, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import Avatar from "../components/Avatar.jsx";
@@ -7,6 +7,8 @@ import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
 import { filenameFromObjectId, fmtNumber, fmtRelative, fmtTime } from "../utils/format.js";
+
+const TENANT = "GameChange Solar";
 
 // Each tab owns its own endpoint, its default severity pill, and an
 // intrinsic severity (what the empty-vs-finding story looks like).
@@ -29,39 +31,9 @@ const TABS = [
   { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
 ];
 
-// Shared context so the deeply-nested table components that synthesize
-// entity_keys or render Avatars don't need a fresh prop threaded
-// through every layer. Any descendant reads the currently-selected
-// tenant via ``useContext(TenantContext)``; the value is populated by
-// the top-level <Governance> provider whenever the tenant pill
-// selector changes.
-//
-// Shape:
-//   { clientName: string, tenantId: string }
-//
-// Before the first api.byTenant() response returns both fields are
-// empty strings; consumers must handle empty-string defensively.
-const TenantContext = createContext({ clientName: "", tenantId: "" });
-
-// Tenant pill selector -- same visual language as the Events page's
-// Pill component so the two filter strips read consistently. Kept
-// local to Governance.jsx since we aren't allowed to touch
-// App.jsx / api.js this change and don't want to churn imports.
-function TenantPill({ active, onClick, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all duration-200 active:scale-95 ${
-        active
-          ? "bg-primary text-white"
-          : "bg-white/10 text-white/70 hover:bg-white/15"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
+// GCS tenant -- hardcoded here because the Governance board is GCS-only and
+// we need to synthesize entity_key for the Intune user detail link.
+const GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6";
 
 // ---------------------------------------------------------------------------
 
@@ -74,84 +46,6 @@ export default function Governance() {
   const [loadingTabs, setLoadingTabs] = useState(() => new Set());
   const [activeTab, setActiveTab] = useState("dlp");
 
-  // ----- tenant selector state ---------------------------------------
-  //
-  // ``tenants`` is the full list of available tenants (from
-  // api.byTenant()); ``selectedTenantName`` is the client_name the
-  // user has picked; ``tenantId`` is the resolved UUID that the
-  // deeply-nested table components need for entity_key synthesis.
-  //
-  // api.byTenant() only returns (client_name, count) -- no
-  // tenant_id -- so after the selection changes we kick a second
-  // query (api.events with a 1-row limit) to pull tenant_id off a
-  // real event row. The extra call fires at most once per tenant
-  // switch, not per tab.
-  const [tenants, setTenants] = useState([]);
-  const [selectedTenantName, setSelectedTenantName] = useState("");
-  const [tenantId, setTenantId] = useState("");
-
-  // Fetch the list of tenants once on mount. First tenant wins the
-  // initial selection so the page has something to show before the
-  // user interacts.
-  useEffect(() => {
-    let cancel = false;
-    api
-      .byTenant()
-      .then((rows) => {
-        if (cancel) return;
-        const list = Array.isArray(rows) ? rows : [];
-        setTenants(list);
-        if (list.length && !selectedTenantName) {
-          setSelectedTenantName(list[0].client_name || "");
-        }
-      })
-      .catch(() => {
-        if (!cancel) setTenants([]);
-      });
-    return () => {
-      cancel = true;
-    };
-    // One-shot on mount. Don't depend on selectedTenantName so
-    // switching the pill doesn't re-fetch the tenant list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Resolve tenant_id for the currently-selected tenant name via a
-  // one-row event fetch. Runs every time the selection changes and
-  // clears the id while the lookup is in flight so consumers don't
-  // briefly see a stale mismatch.
-  useEffect(() => {
-    if (!selectedTenantName) {
-      setTenantId("");
-      return;
-    }
-    let cancel = false;
-    setTenantId("");
-    api
-      .events({ tenant: selectedTenantName, limit: 1 })
-      .then((rows) => {
-        if (cancel) return;
-        const first = Array.isArray(rows) && rows.length ? rows[0] : null;
-        if (first && first.tenant_id) setTenantId(first.tenant_id);
-      })
-      .catch(() => {
-        /* keep tenantId empty; entity_key links simply render without */
-      });
-    return () => {
-      cancel = true;
-    };
-  }, [selectedTenantName]);
-
-  // When the selected tenant changes, drop every cached tab result
-  // so the next visit re-fetches against the new tenant. We keep
-  // activeTab itself -- the operator's focus shouldn't jump when
-  // they switch tenants.
-  useEffect(() => {
-    setData({});
-    setErrors({});
-    setLoadingTabs(new Set());
-  }, [selectedTenantName]);
-
   // Lazy-load the active tab on first visit only. Switching back to
   // a previously-viewed tab uses the cached rows and fires no new
   // request, which keeps the Postgres pool from getting hammered by
@@ -159,8 +53,6 @@ export default function Governance() {
   useEffect(() => {
     // Already cached? nothing to do.
     if (data[activeTab] !== undefined) return;
-    // Don't fire until we know which tenant to query for.
-    if (!selectedTenantName) return;
 
     const tab = TABS.find((t) => t.id === activeTab);
     if (!tab) return;
@@ -174,7 +66,7 @@ export default function Governance() {
       return next;
     });
 
-    const promise = tab.withTenant ? fn(selectedTenantName) : fn();
+    const promise = tab.withTenant ? fn(TENANT) : fn();
     promise
       .then((rows) => {
         if (cancel) return;
@@ -205,46 +97,22 @@ export default function Governance() {
     return () => {
       cancel = true;
     };
-    // The effect intentionally only re-runs on activeTab or
-    // selectedTenantName change; the in-effect ``data[activeTab]``
-    // check reads the live snapshot and bails early if cached.
+    // The effect intentionally only re-runs on activeTab change; the
+    // in-effect `data[activeTab]` check reads the live snapshot and
+    // bails early if the tab is already cached.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, selectedTenantName]);
-
-  const tenantCtx = useMemo(
-    () => ({ clientName: selectedTenantName, tenantId }),
-    [selectedTenantName, tenantId],
-  );
+  }, [activeTab]);
 
   return (
-    <TenantContext.Provider value={tenantCtx}>
     <div className="space-y-5 animate-fade-in">
       {/* ----- header ----- */}
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="text-2xl font-bold">Governance</h1>
-        {selectedTenantName && <TenantBadge name={selectedTenantName} />}
+        <TenantBadge name={TENANT} />
       </div>
       <p className="text-white/50 text-sm -mt-3">
         UAL-derived policy findings and identity hygiene signals.
       </p>
-
-      {/* ----- tenant selector ----- */}
-      {tenants.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold mr-1">
-            tenant
-          </span>
-          {tenants.map((t) => (
-            <TenantPill
-              key={t.client_name}
-              active={selectedTenantName === t.client_name}
-              onClick={() => setSelectedTenantName(t.client_name)}
-            >
-              {t.client_name}
-            </TenantPill>
-          ))}
-        </div>
-      )}
 
       {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
       <div
@@ -312,7 +180,6 @@ export default function Governance() {
         error={errors[activeTab]}
       />
     </div>
-    </TenantContext.Provider>
   );
 }
 
@@ -351,7 +218,8 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
   if (tabId === "aiActivity") {
     const copilot = Array.isArray(raw?.copilot) ? raw.copilot : [];
     const external = Array.isArray(raw?.external_ai) ? raw.external_ai : [];
-    if (copilot.length === 0 && external.length === 0 && !raw?.external_error) {
+    const claudeConnector = raw?.claude_connector || { admin_grants: [], shadow_it_attempts: [], total: 0 };
+    if (copilot.length === 0 && external.length === 0 && claudeConnector.total === 0 && !raw?.external_error) {
       return (
         <div className="card">
           <EmptyState message="No AI activity detected" />
@@ -363,6 +231,7 @@ function TabPanel({ tabId, rows: raw, loading, error }) {
         copilot={copilot}
         external={external}
         externalError={raw?.external_error}
+        claudeConnector={claudeConnector}
       />
     );
   }
@@ -573,16 +442,11 @@ function Th({ children, align = "left" }) {
   );
 }
 
-function UserCell({ entityKey, userId, clientName }) {
-  // Fall back to the currently-selected tenant when the row didn't
-  // carry its own client_name (most API responses do include one --
-  // Intune / Graph-derived rows don't).
-  const ctx = useContext(TenantContext);
-  const effectiveClientName = clientName || ctx.clientName || "";
+function UserCell({ entityKey, userId, clientName = TENANT }) {
   if (!entityKey) {
     return (
       <div className="flex items-center gap-2">
-        <Avatar email={userId} tenant={effectiveClientName} size={28} />
+        <Avatar email={userId} tenant={clientName} size={28} />
         <span className="truncate max-w-[260px]">{userId || "—"}</span>
       </div>
     );
@@ -594,7 +458,7 @@ function UserCell({ entityKey, userId, clientName }) {
       className="flex items-center gap-2 hover:text-primary-light"
       title={userId || entityKey}
     >
-      <Avatar email={userId} tenant={effectiveClientName} size={28} />
+      <Avatar email={userId} tenant={clientName} size={28} />
       <span className="truncate max-w-[260px]">{userId || entityKey}</span>
     </Link>
   );
@@ -604,35 +468,7 @@ function UserCell({ entityKey, userId, clientName }) {
 // tables — existing 3 (moved into tabs)
 // ---------------------------------------------------------------------------
 
-const DLP_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  {
-    key: "file",
-    label: "File",
-    render: (r) => (
-      <span
-        className="truncate max-w-[280px] inline-block align-middle"
-        title={r.raw_json?.ObjectId || ""}
-      >
-        {_fileCell(r)}
-      </span>
-    ),
-  },
-  {
-    key: "device",
-    label: "Device",
-    render: (r) => {
-      const obj = r.raw_json?.ObjectId || "";
-      const drive = obj.match(/^([A-Z]):\\/i);
-      if (drive) return <span className="font-mono">{drive[1]}:\\</span>;
-      return <span className="text-white/30">—</span>;
-    },
-  },
-  UAL_COL_IP,
-];
-
 function DlpTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -643,53 +479,28 @@ function DlpTable({ rows }) {
             <Th>Last Seen</Th>
             <Th>Files Copied</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const isOpen = openId === row.entity_key;
-            return (
-              <Fragment key={row.entity_key}>
-                <tr
-                  onClick={() =>
-                    setOpenId(isOpen ? null : row.entity_key)
-                  }
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.event_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/60 truncate max-w-[340px]">
-                    <FilenameList ids={row.files || row.object_ids} />
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="review" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={6}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      eventTypes="FileCreatedOnRemovableMedia"
-                      columns={DLP_EXPAND_COLUMNS}
-                      eventsParams={{
-                        user: row.user_id,
-                        event_type: "FileCreatedOnRemovableMedia",
-                      }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
-            );
-          })}
+          {rows.map((row) => (
+            <tr key={row.entity_key} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5 text-right tabular-nums">
+                {fmtNumber(row.event_count)}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {fmtRelative(row.last_seen)}
+              </td>
+              <td className="px-4 py-2.5 text-white/60 truncate max-w-[340px]">
+                <FilenameList ids={row.files || row.object_ids} />
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="review" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
@@ -708,30 +519,7 @@ function FilenameList({ ids }) {
   );
 }
 
-const SHARING_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  {
-    key: "file",
-    label: "File / URL",
-    render: (r) => {
-      const fn = filenameFromObjectId(r.raw_json?.ObjectId);
-      const display = fn || r.raw_json?.ObjectId || "—";
-      return (
-        <span
-          className="truncate max-w-[300px] inline-block align-middle"
-          title={r.raw_json?.ObjectId || ""}
-        >
-          {display}
-        </span>
-      );
-    },
-  },
-  UAL_COL_EVENT_TYPE,
-  UAL_COL_IP,
-];
-
 function SharingTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -742,77 +530,35 @@ function SharingTable({ rows }) {
             <Th>Event Type</Th>
             <Th>Last Seen</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const rowKey = `${row.entity_key}-${row.event_type}`;
-            const isOpen = openId === rowKey;
-            return (
-              <Fragment key={rowKey}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : rowKey)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.event_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/60" title={row.event_type}>
-                    {getEventLabel(row.event_type)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="monitor" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={6}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      eventTypes={row.event_type}
-                      columns={SHARING_EXPAND_COLUMNS}
-                      eventsParams={{
-                        user: row.user_id,
-                        event_type: row.event_type,
-                      }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
-            );
-          })}
+          {rows.map((row) => (
+            <tr key={`${row.entity_key}-${row.event_type}`} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5 text-right tabular-nums">
+                {fmtNumber(row.event_count)}
+              </td>
+              <td className="px-4 py-2.5 text-white/60" title={row.event_type}>
+                {getEventLabel(row.event_type)}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {fmtRelative(row.last_seen)}
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="monitor" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
   );
 }
 
-const DOWNLOADS_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  {
-    key: "file",
-    label: "File",
-    render: (r) => (
-      <span
-        className="truncate max-w-[300px] inline-block align-middle"
-        title={r.raw_json?.ObjectId || ""}
-      >
-        {_fileCell(r)}
-      </span>
-    ),
-  },
-  UAL_COL_IP,
-];
-
 function DownloadsTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -822,48 +568,25 @@ function DownloadsTable({ rows }) {
             <Th align="right">Downloads</Th>
             <Th>Last Seen</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const isOpen = openId === row.entity_key;
-            return (
-              <Fragment key={row.entity_key}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : row.entity_key)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.download_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="monitor" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={5}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      eventTypes="FileDownloadedFromBrowser"
-                      columns={DOWNLOADS_EXPAND_COLUMNS}
-                      eventsParams={{
-                        user: row.user_id,
-                        event_type: "FileDownloadedFromBrowser",
-                      }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
-            );
-          })}
+          {rows.map((row) => (
+            <tr key={row.entity_key} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5 text-right tabular-nums">
+                {fmtNumber(row.download_count)}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {fmtRelative(row.last_seen)}
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="monitor" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
@@ -874,41 +597,7 @@ function DownloadsTable({ rows }) {
 // tables — new 8
 // ---------------------------------------------------------------------------
 
-const BROKEN_INHERITANCE_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  {
-    key: "file",
-    label: "File",
-    render: (r) => (
-      <span
-        className="truncate max-w-[260px] inline-block align-middle"
-        title={r.raw_json?.ObjectId || ""}
-      >
-        {_fileCell(r)}
-      </span>
-    ),
-  },
-  {
-    key: "site",
-    label: "Site",
-    render: (r) => {
-      const site = r.raw_json?.SiteUrl || r.raw_json?.Site || r.raw_json?.SourceRelativeUrl;
-      if (!site) return <span className="text-white/30">—</span>;
-      return (
-        <span
-          className="truncate max-w-[220px] inline-block align-middle"
-          title={site}
-        >
-          {site}
-        </span>
-      );
-    },
-  },
-  UAL_COL_IP,
-];
-
 function BrokenInheritanceTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -919,62 +608,33 @@ function BrokenInheritanceTable({ rows }) {
             <Th>Last Seen</Th>
             <Th>Files</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const isOpen = openId === row.entity_key;
-            return (
-              <Fragment key={row.entity_key}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : row.entity_key)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.event_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/60 truncate max-w-[340px]">
-                    <FilenameList ids={row.files} />
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="review" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={6}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      eventTypes="SharingInheritanceBroken"
-                      columns={BROKEN_INHERITANCE_EXPAND_COLUMNS}
-                      eventsParams={{
-                        user: row.user_id,
-                        event_type: "SharingInheritanceBroken",
-                      }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
-            );
-          })}
+          {rows.map((row) => (
+            <tr key={row.entity_key} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5 text-right tabular-nums">
+                {fmtNumber(row.event_count)}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {fmtRelative(row.last_seen)}
+              </td>
+              <td className="px-4 py-2.5 text-white/60 truncate max-w-[340px]">
+                <FilenameList ids={row.files} />
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="review" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
   );
 }
-
-const OAUTH_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  UAL_COL_USER,
-  UAL_COL_IP,
-];
 
 function OauthAppsTable({ rows }) {
   const [open, setOpen] = useState(null);
@@ -987,7 +647,6 @@ function OauthAppsTable({ rows }) {
             <Th align="right">Users</Th>
             <Th>Last Consent</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
@@ -1023,42 +682,30 @@ function OauthAppsTable({ rows }) {
                   <td className="px-4 py-2.5">
                     <SeverityPill severity="review" />
                   </td>
-                  <ChevronCell open={isOpen} />
                 </tr>
                 {isOpen && (
-                  <ExpandedPanel colSpan={5}>
-                    <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-                      Users who consented
-                    </div>
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      {(row.users || []).map((u) => (
-                        <span
-                          key={u}
-                          className="text-[11px] px-2 py-1 rounded-md bg-white/5 border border-white/10 text-white/80"
-                        >
-                          {u}
-                        </span>
-                      ))}
-                      {(!row.users || row.users.length === 0) && (
-                        <span className="text-white/30 text-[11px]">
-                          no users recorded
-                        </span>
-                      )}
-                    </div>
-                    <AsyncEventsExpand
-                      fetcher={() =>
-                        appId
-                          ? api.govOauthAppsEvents(appId, 10)
-                          : Promise.resolve([])
-                      }
-                      depKey={key}
-                      columns={OAUTH_EXPAND_COLUMNS}
-                      title="Consent events"
-                      eventsParams={{
-                        event_type: "Consent to application.",
-                      }}
-                    />
-                  </ExpandedPanel>
+                  <tr className="bg-black/30">
+                    <td colSpan={4} className="px-4 py-3 border-t border-white/5">
+                      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
+                        Users who consented
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(row.users || []).map((u) => (
+                          <span
+                            key={u}
+                            className="text-[11px] px-2 py-1 rounded-md bg-white/5 border border-white/10 text-white/80"
+                          >
+                            {u}
+                          </span>
+                        ))}
+                        {(!row.users || row.users.length === 0) && (
+                          <span className="text-white/30 text-[11px]">
+                            no users recorded
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
                 )}
               </Fragment>
             );
@@ -1068,32 +715,6 @@ function OauthAppsTable({ rows }) {
     </TableCard>
   );
 }
-
-const PASSWORD_SPRAY_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  {
-    key: "user_id",
-    label: "Targeted User",
-    render: (r) => (
-      <span
-        className="truncate max-w-[240px] inline-block align-middle"
-        title={r.user_id}
-      >
-        {r.user_id || <span className="text-white/30">—</span>}
-      </span>
-    ),
-  },
-  UAL_COL_IP,
-  {
-    key: "result_status",
-    label: "Result",
-    render: (r) => (
-      <span className="text-white/70">
-        {r.result_status || <span className="text-white/30">—</span>}
-      </span>
-    ),
-  },
-];
 
 function PasswordSprayTable({ rows }) {
   const [open, setOpen] = useState(null);
@@ -1108,7 +729,6 @@ function PasswordSprayTable({ rows }) {
             <Th>First Seen</Th>
             <Th>Last Seen</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
@@ -1139,49 +759,30 @@ function PasswordSprayTable({ rows }) {
                   <td className="px-4 py-2.5">
                     <SeverityPill severity="critical" />
                   </td>
-                  <ChevronCell open={isOpen} />
                 </tr>
                 {isOpen && (
-                  <ExpandedPanel colSpan={7}>
-                    <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-                      Targeted users ({(row.targets || []).length})
-                    </div>
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      {(row.targets || []).slice(0, 12).map((u) => (
-                        <span
-                          key={u}
-                          className="text-[11px] px-2 py-1 rounded-md bg-white/5 border border-white/10 text-white/80"
-                        >
-                          {u}
-                        </span>
-                      ))}
-                      {(row.targets || []).length > 12 && (
-                        <span className="text-[11px] text-white/40">
-                          +{row.targets.length - 12}
-                        </span>
-                      )}
-                      {(!row.targets || row.targets.length === 0) && (
-                        <span className="text-white/30 text-[11px]">
-                          no targets recorded
-                        </span>
-                      )}
-                    </div>
-                    <AsyncEventsExpand
-                      fetcher={() =>
-                        row.client_ip
-                          ? api.govEventsByIp({
-                              ip: row.client_ip,
-                              event_type: "UserLoginFailed",
-                              limit: 10,
-                            })
-                          : Promise.resolve([])
-                      }
-                      depKey={key}
-                      columns={PASSWORD_SPRAY_EXPAND_COLUMNS}
-                      title="Recent UserLoginFailed events from this IP"
-                      eventsParams={{ event_type: "UserLoginFailed" }}
-                    />
-                  </ExpandedPanel>
+                  <tr className="bg-black/30">
+                    <td colSpan={6} className="px-4 py-3 border-t border-white/5">
+                      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
+                        Targeted users
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(row.targets || []).map((u) => (
+                          <span
+                            key={u}
+                            className="text-[11px] px-2 py-1 rounded-md bg-white/5 border border-white/10 text-white/80"
+                          >
+                            {u}
+                          </span>
+                        ))}
+                        {(!row.targets || row.targets.length === 0) && (
+                          <span className="text-white/30 text-[11px]">
+                            no targets recorded
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
                 )}
               </Fragment>
             );
@@ -1192,15 +793,7 @@ function PasswordSprayTable({ rows }) {
   );
 }
 
-const STALE_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  UAL_COL_EVENT_TYPE,
-  UAL_COL_WORKLOAD,
-  UAL_COL_IP,
-];
-
 function StaleAccountsTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -1211,78 +804,41 @@ function StaleAccountsTable({ rows }) {
             <Th>Last Activity</Th>
             <Th>Event Types</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const isOpen = openId === row.entity_key;
-            return (
-              <Fragment key={row.entity_key}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : row.entity_key)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.total_events)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_activity)}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/60 truncate max-w-[340px]"
-                    title={(row.event_types || []).join(", ")}
-                  >
-                    {(row.event_types || []).slice(0, 3).map(getEventLabel).join(", ") || "—"}
-                    {(row.event_types || []).length > 3 && (
-                      <span className="text-white/30"> · +{row.event_types.length - 3}</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="monitor" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={6}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      columns={STALE_EXPAND_COLUMNS}
-                      eventsParams={{ user: row.user_id }}
-                    />
-                  </ExpandedPanel>
+          {rows.map((row) => (
+            <tr key={row.entity_key} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5 text-right tabular-nums">
+                {fmtNumber(row.total_events)}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {fmtRelative(row.last_activity)}
+              </td>
+              <td
+                className="px-4 py-2.5 text-white/60 truncate max-w-[340px]"
+                title={(row.event_types || []).join(", ")}
+              >
+                {(row.event_types || []).slice(0, 3).map(getEventLabel).join(", ") || "—"}
+                {(row.event_types || []).length > 3 && (
+                  <span className="text-white/30"> · +{row.event_types.length - 3}</span>
                 )}
-              </Fragment>
-            );
-          })}
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="monitor" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
   );
 }
 
-const MFA_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  {
-    key: "operation",
-    label: "Operation",
-    render: (r) => (
-      <span
-        className="truncate max-w-[260px] inline-block align-middle"
-        title={r.event_type}
-      >
-        {getEventLabel(r.event_type) || r.event_type || "—"}
-      </span>
-    ),
-  },
-  UAL_COL_IP,
-];
-
 function MfaChangesTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -1293,100 +849,41 @@ function MfaChangesTable({ rows }) {
             <Th>Last Seen</Th>
             <Th>Operations</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const isOpen = openId === row.entity_key;
-            return (
-              <Fragment key={row.entity_key}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : row.entity_key)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.change_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/60 truncate max-w-[340px]"
-                    title={(row.operations || []).join(", ")}
-                  >
-                    {(row.operations || []).slice(0, 2).join(", ") || "—"}
-                    {(row.operations || []).length > 2 && (
-                      <span className="text-white/30"> · +{row.operations.length - 2}</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="review" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={6}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      eventTypes={(row.operations || []).join(",") || undefined}
-                      columns={MFA_EXPAND_COLUMNS}
-                      eventsParams={{ user: row.user_id }}
-                    />
-                  </ExpandedPanel>
+          {rows.map((row) => (
+            <tr key={row.entity_key} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5 text-right tabular-nums">
+                {fmtNumber(row.change_count)}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {fmtRelative(row.last_seen)}
+              </td>
+              <td
+                className="px-4 py-2.5 text-white/60 truncate max-w-[340px]"
+                title={(row.operations || []).join(", ")}
+              >
+                {(row.operations || []).slice(0, 2).join(", ") || "—"}
+                {(row.operations || []).length > 2 && (
+                  <span className="text-white/30"> · +{row.operations.length - 2}</span>
                 )}
-              </Fragment>
-            );
-          })}
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="review" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
   );
 }
 
-const PRIV_ROLE_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  {
-    key: "operation",
-    label: "Operation",
-    render: (r) => (
-      <span
-        className="truncate max-w-[220px] inline-block align-middle"
-        title={r.event_type}
-      >
-        {getEventLabel(r.event_type) || r.event_type || "—"}
-      </span>
-    ),
-  },
-  {
-    key: "role",
-    label: "Role",
-    render: (r) => {
-      // Pull the first ModifiedProperty NewValue if the backend didn't
-      // pre-flatten it onto the row.
-      const rp = r.raw_json || {};
-      const modified = rp.ModifiedProperties || [];
-      const roleProp =
-        Array.isArray(modified) &&
-        modified.find((p) => (p?.Name || "").toLowerCase().includes("role"));
-      const role = roleProp?.NewValue || rp.Role || "";
-      return role ? (
-        <span className="truncate max-w-[220px] inline-block align-middle" title={role}>
-          {role}
-        </span>
-      ) : (
-        <span className="text-white/30">—</span>
-      );
-    },
-  },
-  UAL_COL_IP,
-];
-
 function PrivilegedRolesTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -1398,84 +895,38 @@ function PrivilegedRolesTable({ rows }) {
             <Th>User</Th>
             <Th>Actor</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row, i) => {
-            const rowKey = `${row.entity_key}-${row.timestamp}-${i}`;
-            const isOpen = openId === rowKey;
-            return (
-              <Fragment key={rowKey}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : rowKey)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtTime(row.timestamp)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/80" title={row.event_type}>
-                    {getEventLabel(row.operation || row.event_type)}
-                  </td>
-                  <td className="px-4 py-2.5 truncate max-w-[260px]" title={row.role}>
-                    {row.role || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-white/60 truncate max-w-[220px]">
-                    {row.actor || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="critical" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={7}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      eventTypes={row.event_type || row.operation}
-                      columns={PRIV_ROLE_EXPAND_COLUMNS}
-                      eventsParams={{
-                        user: row.user_id,
-                        event_type: row.event_type || row.operation,
-                      }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
-            );
-          })}
+          {rows.map((row, i) => (
+            <tr key={`${row.entity_key}-${row.timestamp}-${i}`} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {fmtTime(row.timestamp)}
+              </td>
+              <td className="px-4 py-2.5 text-white/80" title={row.event_type}>
+                {getEventLabel(row.operation || row.event_type)}
+              </td>
+              <td className="px-4 py-2.5 truncate max-w-[260px]" title={row.role}>
+                {row.role || <span className="text-white/30">—</span>}
+              </td>
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5 text-white/60 truncate max-w-[220px]">
+                {row.actor || <span className="text-white/30">—</span>}
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="critical" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
   );
 }
 
-const GUEST_EXPAND_COLUMNS = [
-  UAL_COL_TIMESTAMP,
-  UAL_COL_EVENT_TYPE,
-  UAL_COL_WORKLOAD,
-  {
-    key: "resource",
-    label: "Resource",
-    render: (r) => {
-      const obj = r.raw_json?.ObjectId || r.raw_json?.TargetResources?.[0]?.displayName;
-      if (!obj) return <span className="text-white/30">—</span>;
-      const fn = filenameFromObjectId(obj) || obj;
-      return (
-        <span className="truncate max-w-[260px] inline-block align-middle" title={obj}>
-          {fn}
-        </span>
-      );
-    },
-  },
-];
-
 function GuestUsersTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
-  const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -1486,66 +937,36 @@ function GuestUsersTable({ rows }) {
             <Th>Created</Th>
             <Th>Last Sign-In</Th>
             <Th>Status</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const rowKey = row.id || row.userPrincipalName || row.mail;
-            const isOpen = openId === rowKey;
-            const upn = row.userPrincipalName || row.mail || "";
-            // Guest users don't carry an entity_key on the row, so
-            // synthesize one from the GCS tenant id + UPN for the
-            // expand links and the per-user events query.
-            const entityKey = upn && ctxTenantId ? `${ctxTenantId}::${upn}` : null;
-            return (
-              <Fragment key={rowKey}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : rowKey)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <Avatar email={row.mail || row.displayName} tenant={ctxClient} size={28} />
-                      <span className="font-medium truncate max-w-[220px]">
-                        {row.displayName || <span className="text-white/40">—</span>}
-                      </span>
-                    </div>
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/70 truncate max-w-[280px]"
-                    title={row.mail || row.userPrincipalName}
-                  >
-                    {row.mail || row.userPrincipalName || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {row.createdDateTime ? fmtTime(row.createdDateTime) : <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {row.lastSignIn ? fmtRelative(row.lastSignIn) : <span className="text-white/30">never</span>}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="monitor" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={6}>
-                    <UserEventsExpand
-                      entityKey={entityKey}
-                      columns={GUEST_EXPAND_COLUMNS}
-                      eventsParams={{ user: upn }}
-                      emptyMessage={
-                        entityKey
-                          ? "no matching events"
-                          : "no UPN recorded for this guest"
-                      }
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
-            );
-          })}
+          {rows.map((row) => (
+            <tr key={row.id || row.userPrincipalName} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <div className="flex items-center gap-2">
+                  <Avatar email={row.mail || row.displayName} tenant={TENANT} size={28} />
+                  <span className="font-medium truncate max-w-[220px]">
+                    {row.displayName || <span className="text-white/40">—</span>}
+                  </span>
+                </div>
+              </td>
+              <td
+                className="px-4 py-2.5 text-white/70 truncate max-w-[280px]"
+                title={row.mail || row.userPrincipalName}
+              >
+                {row.mail || row.userPrincipalName || <span className="text-white/30">—</span>}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {row.createdDateTime ? fmtTime(row.createdDateTime) : <span className="text-white/30">—</span>}
+              </td>
+              <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                {row.lastSignIn ? fmtRelative(row.lastSignIn) : <span className="text-white/30">never</span>}
+              </td>
+              <td className="px-4 py-2.5">
+                <SeverityPill severity="monitor" />
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
@@ -1570,246 +991,6 @@ function Chevron({ open }) {
     </svg>
   );
 }
-
-// ---------------------------------------------------------------------------
-// shared expand helpers
-// ---------------------------------------------------------------------------
-//
-// Every governance table expands its rows in-place using the same
-// pattern: a trailing chevron cell on every row, a dark inner card
-// (#0D1428) rendered as a full-width <tr> below the clicked row, and
-// a footer with "View User" / "View in Events" shortcuts. Click
-// handlers live on the outer row so clicking anywhere on it toggles.
-// Any inner link still needs `onClick={(e) => e.stopPropagation()}`
-// so it navigates without collapsing the row first.
-
-function ChevronCell({ open }) {
-  return (
-    <td className="px-3 py-2.5 w-8 text-white/30">
-      <Chevron open={open} />
-    </td>
-  );
-}
-
-function ExpandedPanel({ colSpan, children }) {
-  return (
-    <tr>
-      <td
-        colSpan={colSpan}
-        className="p-0 border-t border-white/5"
-        style={{ backgroundColor: "#0D1428" }}
-      >
-        <div className="px-4 py-4">{children}</div>
-      </td>
-    </tr>
-  );
-}
-
-// Footer links rendered at the bottom of every expand panel. `entityKey`
-// drives the "View User" link; the Events link takes an explicit
-// query-param object so each tab can point the filter at the most
-// useful slice (workload, event_type, user, client_ip, ...).
-function ExpandedFooterLinks({ entityKey, eventsParams }) {
-  const params = new URLSearchParams();
-  Object.entries(eventsParams || {}).forEach(([k, v]) => {
-    if (v != null && v !== "") params.set(k, v);
-  });
-  const search = params.toString();
-  return (
-    <div className="mt-3 pt-3 border-t border-white/10 flex items-center gap-4 text-[11px]">
-      {entityKey && (
-        <Link
-          to={`/users/${encodeURIComponent(entityKey)}`}
-          onClick={(e) => e.stopPropagation()}
-          className="text-primary-light hover:underline"
-        >
-          View User →
-        </Link>
-      )}
-      <Link
-        to={`/events${search ? `?${search}` : ""}`}
-        onClick={(e) => e.stopPropagation()}
-        className="text-primary-light hover:underline"
-      >
-        View in Events →
-      </Link>
-    </div>
-  );
-}
-
-// Low-level renderer for the inner event table. `columns` is an array
-// of { key, label, render?(row) } cell definitions; `render` can return
-// any ReactNode.
-function InnerEventsTable({ rows, columns, emptyMessage = "no matching events" }) {
-  if (rows == null) {
-    return <div className="text-white/40 text-[11px] py-2">loading events…</div>;
-  }
-  if (rows.length === 0) {
-    return <div className="text-white/40 text-[11px] py-2">{emptyMessage}</div>;
-  }
-  return (
-    <div className="overflow-x-auto rounded-lg border border-white/5">
-      <table className="min-w-full text-[10px]">
-        <thead>
-          <tr>
-            {columns.map((c) => (
-              <th
-                key={c.key}
-                className="text-left px-2 py-1.5 text-[9px] uppercase tracking-wider text-white/40 font-semibold bg-white/[0.02]"
-              >
-                {c.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-white/5">
-          {rows.map((r, i) => (
-            <tr key={r.id || i} className="hover:bg-white/[0.02]">
-              {columns.map((c) => (
-                <td
-                  key={c.key}
-                  className="px-2 py-1.5 text-white/70 align-top"
-                >
-                  {c.render ? c.render(r) : (r[c.key] ?? <span className="text-white/30">—</span>)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// Fetch + render events for an entity_key using /api/users/{key}/events
-// and the supplied event_types / workloads filter. Every UAL-derived
-// governance expand goes through this helper.
-function UserEventsExpand({
-  entityKey,
-  eventTypes,
-  workloads,
-  columns,
-  eventsParams,
-  title = "Recent matching events",
-  emptyMessage,
-}) {
-  const [rows, setRows] = useState(null);
-
-  useEffect(() => {
-    if (!entityKey) {
-      setRows([]);
-      return;
-    }
-    let cancel = false;
-    api
-      .userEvents(entityKey, {
-        event_types: eventTypes,
-        workloads,
-        limit: 10,
-      })
-      .then((r) => !cancel && setRows(r || []))
-      .catch(() => !cancel && setRows([]));
-    return () => {
-      cancel = true;
-    };
-  }, [entityKey, eventTypes, workloads]);
-
-  return (
-    <>
-      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-        {title}
-      </div>
-      <InnerEventsTable rows={rows} columns={columns} emptyMessage={emptyMessage} />
-      <ExpandedFooterLinks entityKey={entityKey} eventsParams={eventsParams} />
-    </>
-  );
-}
-
-// Generic wrapper for an endpoint-driven expand (EDR, ThreatLocker,
-// OAuth Apps, Password Spray). Takes an async fetcher that returns the
-// inner rows directly so each call site keeps its own param shape.
-function AsyncEventsExpand({
-  fetcher,
-  depKey,
-  columns,
-  entityKey,
-  eventsParams,
-  title = "Recent matching events",
-  emptyMessage,
-}) {
-  const [rows, setRows] = useState(null);
-
-  useEffect(() => {
-    let cancel = false;
-    setRows(null);
-    Promise.resolve()
-      .then(() => fetcher())
-      .then((r) => !cancel && setRows(r || []))
-      .catch(() => !cancel && setRows([]));
-    return () => {
-      cancel = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depKey]);
-
-  return (
-    <>
-      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-        {title}
-      </div>
-      <InnerEventsTable rows={rows} columns={columns} emptyMessage={emptyMessage} />
-      <ExpandedFooterLinks entityKey={entityKey} eventsParams={eventsParams} />
-    </>
-  );
-}
-
-// Shorthand helpers for some very common UAL event shapes so each
-// table can reuse the same column specs.
-const _ipCell = (r) =>
-  r.client_ip ? (
-    <span className="font-mono tabular-nums">{r.client_ip}</span>
-  ) : (
-    <span className="text-white/30">—</span>
-  );
-
-const _fileCell = (r) => {
-  const fn = filenameFromObjectId(r.raw_json?.ObjectId);
-  return fn || <span className="text-white/30">—</span>;
-};
-
-const UAL_COL_TIMESTAMP = {
-  key: "timestamp",
-  label: "Time",
-  render: (r) => (
-    <span className="text-white/60 whitespace-nowrap tabular-nums">
-      {fmtTime(r.timestamp)}
-    </span>
-  ),
-};
-const UAL_COL_IP = { key: "client_ip", label: "IP", render: _ipCell };
-const UAL_COL_EVENT_TYPE = {
-  key: "event_type",
-  label: "Type",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.event_type}>
-      {getEventLabel(r.event_type) || "—"}
-    </span>
-  ),
-};
-const UAL_COL_WORKLOAD = {
-  key: "workload",
-  label: "Workload",
-  render: (r) => r.workload || <span className="text-white/30">—</span>,
-};
-const UAL_COL_USER = {
-  key: "user_id",
-  label: "User",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.user_id}>
-      {r.user_id || <span className="text-white/30">—</span>}
-    </span>
-  ),
-};
 
 // ---- AI Activity tab -------------------------------------------------------
 
@@ -1858,11 +1039,13 @@ function aiToolDisplay(remoteUrl) {
   return { label: host, host };
 }
 
-function AiActivityTab({ copilot, external, externalError }) {
+function AiActivityTab({ copilot, external, externalError, claudeConnector = {} }) {
   const [subTab, setSubTab] = useState("copilot");
+  const claudeTotal = (claudeConnector?.admin_grants?.length || 0) + (claudeConnector?.shadow_it_attempts?.length || 0);
   const SUB_TABS = [
     { id: "copilot",  label: "Microsoft Copilot", count: copilot.length },
     { id: "external", label: "External AI Tools", count: external.length },
+    { id: "claude",   label: "Claude Connector",  count: claudeTotal },
   ];
   return (
     <div className="space-y-4">
@@ -1902,6 +1085,8 @@ function AiActivityTab({ copilot, external, externalError }) {
 
       {subTab === "copilot" ? (
         <AiCopilotSection rows={copilot} />
+      ) : subTab === "claude" ? (
+        <AiClaudeConnectorSection data={claudeConnector} />
       ) : (
         <AiExternalSection rows={external} error={externalError} />
       )}
@@ -1910,7 +1095,6 @@ function AiActivityTab({ copilot, external, externalError }) {
 }
 
 function AiCopilotSection({ rows }) {
-  const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
@@ -1942,9 +1126,7 @@ function AiCopilotSection({ rows }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row) => {
-                const entityKey = ctxTenantId
-                  ? `${ctxTenantId}::${row.user_id}`
-                  : null;
+                const entityKey = `${GCS_TENANT_ID}::${row.user_id}`;
                 const types = Array.isArray(row.event_types) ? row.event_types : [];
                 return (
                   <tr key={row.user_id} className="hover:bg-white/[0.03]">
@@ -1952,7 +1134,7 @@ function AiCopilotSection({ rows }) {
                       <UserCell
                         entityKey={entityKey}
                         userId={row.user_id}
-                        clientName={ctxClient}
+                        clientName="GameChange Solar"
                       />
                     </td>
                     <td className="px-4 py-2.5 text-right tabular-nums">
@@ -1994,7 +1176,6 @@ function AiCopilotSection({ rows }) {
 }
 
 function AiExternalSection({ rows, error }) {
-  const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
@@ -2040,8 +1221,8 @@ function AiExternalSection({ rows, error }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row, i) => {
-                const entityKey = row.user && ctxTenantId
-                  ? `${ctxTenantId}::${row.user}`
+                const entityKey = row.user
+                  ? `${GCS_TENANT_ID}::${row.user}`
                   : null;
                 const { label: toolLabel, host } = aiToolDisplay(row.tool);
                 const devices = Array.isArray(row.devices) ? row.devices : [];
@@ -2052,7 +1233,7 @@ function AiExternalSection({ rows, error }) {
                         <UserCell
                           entityKey={entityKey}
                           userId={row.user}
-                          clientName={ctxClient}
+                          clientName="GameChange Solar"
                         />
                       ) : (
                         <span className="text-white/40">—</span>
@@ -2108,6 +1289,60 @@ function AiExternalSection({ rows, error }) {
   );
 }
 
+function AiClaudeConnectorSection({ data = {} }) {
+  const adminGrants = data?.admin_grants || [];
+  const shadowIt = data?.shadow_it_attempts || [];
+  const all = [
+    ...adminGrants.map(r => ({ ...r, _type: "ADMIN GRANT" })),
+    ...shadowIt.map(r => ({ ...r, _type: "SHADOW IT" })),
+  ];
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-5 py-4 border-b border-white/5">
+        <div className="text-base font-bold">Claude M365 Connector</div>
+        <div className="text-[11px] text-white/50 mt-0.5">
+          Admin grants (ResultType=0) and shadow IT attempts (ResultType=90095) for the Claude M365 Connector
+        </div>
+      </div>
+      {all.length === 0 ? (
+        <div className="px-5 py-8 text-white/40 text-sm text-center">
+          No Claude Connector activity detected
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-[11px]">
+            <thead>
+              <tr>
+                <Th>User</Th>
+                <Th>Client</Th>
+                <Th>Type</Th>
+                <Th>IP</Th>
+                <Th>Time</Th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {all.map((row, i) => (
+                <tr key={i} className="hover:bg-white/[0.03]">
+                  <td className="px-4 py-2.5 font-mono text-[10px]">{row.user_id || "—"}</td>
+                  <td className="px-4 py-2.5 text-white/60">{row.client_name || "—"}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                      row._type === "ADMIN GRANT"
+                        ? "bg-critical/15 text-critical border border-critical/30"
+                        : "bg-warning/15 text-warning border border-warning/30"
+                    }`}>{row._type}</span>
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-[10px] text-white/50">{row.client_ip || "—"}</td>
+                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">{fmtRelative(row.timestamp)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 function UnmanagedDevicesTable({ rows }) {
   const [expanded, setExpanded] = useState(null);
   // Per-user cache so re-opening doesn't refetch.
@@ -2250,7 +1485,6 @@ function intuneDeviceStatus(device) {
 
 function IntuneDevicesTable({ rows }) {
   const [expanded, setExpanded] = useState(null);
-  const { tenantId: ctxTenantId } = useContext(TenantContext);
 
   function toggle(user) {
     setExpanded(expanded === user ? null : user);
@@ -2271,9 +1505,7 @@ function IntuneDevicesTable({ rows }) {
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
             const isOpen = expanded === row.user;
-            const entityKey = ctxTenantId
-              ? `${ctxTenantId}::${row.user}`
-              : null;
+            const entityKey = `${GCS_TENANT_ID}::${row.user}`;
             return (
               <Fragment key={row.user}>
                 <tr
@@ -2644,48 +1876,7 @@ function edrSeverityToPill(raw) {
   return "monitor";
 }
 
-const EDR_EXPAND_COLUMNS = [
-  {
-    key: "timestamp",
-    label: "Time",
-    render: (r) => (
-      <span className="text-white/60 whitespace-nowrap tabular-nums">
-        {fmtTime(r.timestamp)}
-      </span>
-    ),
-  },
-  {
-    key: "action_taken",
-    label: "Action",
-    render: (r) => r.action_taken || <span className="text-white/30">—</span>,
-  },
-  {
-    key: "event_type",
-    label: "Type",
-    render: (r) => r.event_type || <span className="text-white/30">—</span>,
-  },
-  {
-    key: "process_name",
-    label: "Process",
-    render: (r) => (
-      <span className="font-mono text-[10px] truncate max-w-[220px] inline-block align-middle" title={r.process_name || ""}>
-        {r.process_name || "—"}
-      </span>
-    ),
-  },
-  {
-    key: "threat_name",
-    label: "Threat",
-    render: (r) => (
-      <span className="truncate max-w-[220px] inline-block align-middle" title={r.threat_name || ""}>
-        {r.threat_name || <span className="text-white/30">—</span>}
-      </span>
-    ),
-  },
-];
-
 function EdrAlertsTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -2698,78 +1889,52 @@ function EdrAlertsTable({ rows }) {
             <Th align="right">Count</Th>
             <Th>Last Seen</Th>
             <Th>Action</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
           {rows.map((row, idx) => {
             const key = `${row.host_name || ""}|${row.user_account || ""}|${row.threat_name || ""}|${row.severity || ""}|${idx}`;
             const actions = (row.actions || []).filter(Boolean);
-            const isOpen = openId === key;
             return (
-              <Fragment key={key}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : key)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
+              <tr key={key} className="hover:bg-white/[0.03]">
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
+                  title={row.host_name || ""}
                 >
-                  <td
-                    className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
-                    title={row.host_name || ""}
-                  >
-                    {row.host_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
-                    title={row.user_account || ""}
-                  >
-                    {row.user_account || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/80 truncate max-w-[240px]"
-                    title={row.threat_name || ""}
-                  >
-                    {row.threat_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity={edrSeverityToPill(row.severity)} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.alert_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/60 truncate max-w-[200px]"
-                    title={actions.join(", ")}
-                  >
-                    {actions.length > 0 ? (
-                      actions.join(", ")
-                    ) : (
-                      <span className="text-white/30">—</span>
-                    )}
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={8}>
-                    <AsyncEventsExpand
-                      fetcher={() =>
-                        api.govEdrAlertsEvents({
-                          hostname: row.host_name || undefined,
-                          username: row.user_account || undefined,
-                          threat_name: row.threat_name || undefined,
-                          severity: row.severity || undefined,
-                          limit: 10,
-                        })
-                      }
-                      depKey={key}
-                      columns={EDR_EXPAND_COLUMNS}
-                      eventsParams={{ user: row.user_account || undefined }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
+                  {row.host_name || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
+                  title={row.user_account || ""}
+                >
+                  {row.user_account || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[240px]"
+                  title={row.threat_name || ""}
+                >
+                  {row.threat_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5">
+                  <SeverityPill severity={edrSeverityToPill(row.severity)} />
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  {fmtNumber(row.alert_count)}
+                </td>
+                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                  {fmtRelative(row.last_seen)}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/60 truncate max-w-[200px]"
+                  title={actions.join(", ")}
+                >
+                  {actions.length > 0 ? (
+                    actions.join(", ")
+                  ) : (
+                    <span className="text-white/30">—</span>
+                  )}
+                </td>
+              </tr>
             );
           })}
         </tbody>
@@ -2827,54 +1992,7 @@ function ThreatLockerActionBadge({ row }) {
   );
 }
 
-const THREATLOCKER_EXPAND_COLUMNS = [
-  {
-    key: "event_time",
-    label: "Time",
-    render: (r) => (
-      <span className="text-white/60 whitespace-nowrap tabular-nums">
-        {fmtTime(r.event_time)}
-      </span>
-    ),
-  },
-  {
-    key: "action",
-    label: "Action",
-    render: (r) => <ThreatLockerActionBadge row={r} />,
-  },
-  {
-    key: "action_type",
-    label: "Type",
-    render: (r) => r.action_type || <span className="text-white/30">—</span>,
-  },
-  {
-    key: "full_path",
-    label: "Full Path",
-    render: (r) => (
-      <span
-        className="font-mono text-[10px] truncate max-w-[260px] inline-block align-middle"
-        title={r.full_path || ""}
-      >
-        {r.full_path || "—"}
-      </span>
-    ),
-  },
-  {
-    key: "policy_name",
-    label: "Policy",
-    render: (r) => (
-      <span
-        className="truncate max-w-[200px] inline-block align-middle"
-        title={r.policy_name || ""}
-      >
-        {r.policy_name || <span className="text-white/30">—</span>}
-      </span>
-    ),
-  },
-];
-
 function ThreatLockerTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -2887,75 +2005,48 @@ function ThreatLockerTable({ rows }) {
             <Th>Policy</Th>
             <Th align="right">Count</Th>
             <Th>Last Seen</Th>
-            <Th>{""}</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
           {rows.map((row, idx) => {
             const key = `${row.hostname || ""}|${row.username || ""}|${row.action || ""}|${row.action_type || ""}|${row.policy_name || ""}|${idx}`;
-            const isOpen = openId === key;
             return (
-              <Fragment key={key}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : key)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
+              <tr key={key} className="hover:bg-white/[0.03]">
+                <td
+                  className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
+                  title={row.hostname || ""}
                 >
-                  <td
-                    className="px-4 py-2.5 text-white/80 truncate max-w-[200px]"
-                    title={row.hostname || ""}
-                  >
-                    {row.hostname || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
-                    title={row.username || ""}
-                  >
-                    {row.username || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-4 py-2.5 space-x-2">
-                    <ThreatLockerActionBadge row={row} />
-                    <SeverityPill severity={threatLockerActionPill(row)} />
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/70 truncate max-w-[180px]"
-                    title={row.action_type || ""}
-                  >
-                    {row.action_type || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-white/60 truncate max-w-[220px]"
-                    title={row.policy_name || ""}
-                  >
-                    {row.policy_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.event_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={8}>
-                    <AsyncEventsExpand
-                      fetcher={() =>
-                        api.govThreatLockerEvents({
-                          hostname: row.hostname || undefined,
-                          username: row.username || undefined,
-                          action: row.action || undefined,
-                          action_type: row.action_type || undefined,
-                          policy_name: row.policy_name || undefined,
-                          limit: 10,
-                        })
-                      }
-                      depKey={key}
-                      columns={THREATLOCKER_EXPAND_COLUMNS}
-                      eventsParams={{ user: row.username || undefined }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
+                  {row.hostname || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[220px]"
+                  title={row.username || ""}
+                >
+                  {row.username || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5 space-x-2">
+                  <ThreatLockerActionBadge row={row} />
+                  <SeverityPill severity={threatLockerActionPill(row)} />
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/70 truncate max-w-[180px]"
+                  title={row.action_type || ""}
+                >
+                  {row.action_type || <span className="text-white/30">—</span>}
+                </td>
+                <td
+                  className="px-4 py-2.5 text-white/60 truncate max-w-[220px]"
+                  title={row.policy_name || ""}
+                >
+                  {row.policy_name || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  {fmtNumber(row.event_count)}
+                </td>
+                <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                  {fmtRelative(row.last_seen)}
+                </td>
+              </tr>
             );
           })}
         </tbody>
