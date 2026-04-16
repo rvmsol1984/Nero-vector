@@ -8,5 +8,10 @@
     "name": "GameChange Solar",
     "tenant_id": "07b4c47a-e461-493e-91c4-90df73e2ebc6",
     "license_tier": "E5"
+  },
+  {
+    "name": "London Fischer",
+    "tenant_id": "4bddd2a5-8bee-46c0-968c-a7a0190e1245",
+    "license_tier": "BizPremium"
   }
 ]
