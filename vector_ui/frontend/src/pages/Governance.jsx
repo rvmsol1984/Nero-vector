@@ -117,26 +117,24 @@ export default function Governance() {
       {/* ----- header ----- */}
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="text-2xl font-bold">Governance</h1>
-        {tenants.map((t) => (
-          <button
-            key={t.client_name}
-            type="button"
-            onClick={() => {
-              if (t.client_name !== selectedTenant) {
-                setSelectedTenant(t.client_name);
-                setSelectedTenantId(t.tenant_id || DEFAULT_TENANT_ID);
-                setData({});
-              }
-            }}
-            className={`px-3 py-1 rounded-xl text-xs font-medium transition-all active:scale-95 ${
-              selectedTenant === t.client_name
-                ? "bg-primary text-white"
-                : "bg-white/10 text-white/70 hover:bg-white/15"
-            }`}
-          >
-            {t.client_name}
-          </button>
-        ))}
+        <select
+          value={selectedTenant}
+          onChange={(e) => {
+            const t = tenants.find((x) => x.client_name === e.target.value);
+            if (t) {
+              setSelectedTenant(t.client_name);
+              setSelectedTenantId(t.tenant_id || DEFAULT_TENANT_ID);
+              setData({});
+            }
+          }}
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-primary-light"
+        >
+          {tenants.map((t) => (
+            <option key={t.client_name} value={t.client_name}>
+              {t.client_name}
+            </option>
+          ))}
+        </select>
       </div>
       <p className="text-white/50 text-sm -mt-3">
         UAL-derived policy findings and identity hygiene signals.
