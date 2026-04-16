@@ -12,6 +12,7 @@ import logging
 import os
 import signal
 import sys
+import asyncio
 import time
 from pathlib import Path
 
@@ -199,35 +200,30 @@ def main() -> int:
     db.run_migrations(migrations_dir)
 
     ingestors = build_ingestors(tenants, db)
+    global_types = (BaselineEngine, ScoringEngine, ThreatIntelMonitor, IocEnricher)
+    tenant_ingestors = [i for i in ingestors if not isinstance(i, global_types)]
+    global_ingestors  = [i for i in ingestors if isinstance(i, global_types)]
+
+    def _poll_one(ingestor):
+        kind = type(ingestor).__name__
+        logger.info("polling ingestor", extra={"kind": kind, "tenant_id": ingestor.tenant_id, "client_name": ingestor.client_name})
+        try:
+            ingestor.poll_once()
+        except Exception as exc:
+            logger.exception("ingestor poll crashed", extra={"kind": kind, "tenant_id": ingestor.tenant_id, "client_name": ingestor.client_name, "error": str(exc)})
+
+    async def _run_parallel(ingestors_list):
+        tasks = [asyncio.to_thread(_poll_one, i) for i in ingestors_list]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     try:
         while not _SHUTDOWN:
             cycle_start = time.monotonic()
-            for ingestor in ingestors:
+            asyncio.run(_run_parallel(tenant_ingestors))
+            for ingestor in global_ingestors:
                 if _SHUTDOWN:
                     break
-                kind = type(ingestor).__name__
-                logger.info(
-                    "polling ingestor",
-                    extra={
-                        "kind": kind,
-                        "tenant_id": ingestor.tenant_id,
-                        "client_name": ingestor.client_name,
-                    },
-                )
-                try:
-                    ingestor.poll_once()
-                except Exception as exc:
-                    logger.exception(
-                        "ingestor poll crashed",
-                        extra={
-                            "kind": kind,
-                            "tenant_id": ingestor.tenant_id,
-                            "client_name": ingestor.client_name,
-                            "error": str(exc),
-                        },
-                    )
-
+                _poll_one(ingestor)
             elapsed = time.monotonic() - cycle_start
             sleep_for = max(5, poll_interval - int(elapsed))
             logger.info(
