@@ -485,6 +485,14 @@ def user_emails(
     entity_key: str,
     direction: str | None = Query(None),
     search: str | None = Query(None),
+    attachment: str | None = Query(
+        None,
+        description=(
+            "Case-insensitive substring match against any element of "
+            "attachment_names (populated by the MessageTraceIngestor's "
+            "post-insert Graph backfill)."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> list[dict]:
@@ -493,6 +501,13 @@ def user_emails(
     entity_key is the standard tenant_id::user_id composite; we pull the
     email out of the right-hand side and match it against both
     sender_address and recipient_address.
+
+    Filters:
+      * direction  -- exact match on direction (IN/OUT/ACTIVITY)
+      * search     -- ILIKE substring against subject
+      * attachment -- case-insensitive substring against any element
+                      of attachment_names (the MessageTraceIngestor
+                      backfills names post-insert via Graph)
     """
     user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
     return db.fetch_all(
@@ -506,11 +521,21 @@ def user_emails(
             received,
             status,
             size_bytes,
-            direction
+            direction,
+            has_attachments,
+            attachment_names
         FROM vector_message_trace
         WHERE (sender_address = %s OR recipient_address = %s)
           AND (%s::text IS NULL OR direction = %s)
           AND (%s::text IS NULL OR subject ILIKE '%%' || %s || '%%')
+          AND (
+              %s::text IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM unnest(attachment_names) AS n
+                  WHERE n ILIKE '%%' || %s || '%%'
+              )
+          )
         ORDER BY received DESC
         LIMIT %s OFFSET %s
         """,
@@ -518,13 +543,14 @@ def user_emails(
             user_email, user_email,
             direction, direction,
             search, search,
+            attachment, attachment,
             limit, offset,
         ),
     )
 
 
 @app.get("/api/users/{entity_key}/emails/{message_id}/attachments")
-def user_email_attachments(entity_key: str, message_id: str, subject: str | None = Query(None)) -> list[dict]:
+def user_email_attachments(entity_key: str, message_id: str) -> list[dict]:
     """Fetch attachment metadata for a single email via Microsoft Graph.
 
     ``message_id`` is the RFC-2822 ``Message-ID`` header stored in
@@ -541,21 +567,21 @@ def user_email_attachments(entity_key: str, message_id: str, subject: str | None
     if not user_email or not message_id:
         return []
 
-    # Search by subject (NetworkMessageId UUIDs don't match internetMessageId filter)
+    # Graph's $filter on internetMessageId needs angle brackets.
+    mid = message_id.strip()
+    if not mid.startswith("<"):
+        mid = f"<{mid}>"
+    if not mid.endswith(">"):
+        mid = f"{mid}>"
+
     try:
-        if subject:
-            safe_subj = subject.replace("'", "''")
-            filt = urllib.parse.quote(f"subject eq '{safe_subj}'", safe="")
-        else:
-            mid = message_id.strip()
-            if not mid.startswith("<"):
-                mid = f"<{mid}>"
-            if not mid.endswith(">"):
-                mid = f"{mid}>"
-            filt = urllib.parse.quote(f"internetMessageId eq '{mid}'", safe="")
+        filter_str = urllib.parse.quote(
+            f"internetMessageId eq '{mid}'",
+            safe="",
+        )
         search_path = (
             f"/users/{urllib.parse.quote(user_email, safe='@')}"
-            f"/messages?$filter={filt}&$select=id,hasAttachments&$top=1"
+            f"/messages?$filter={filter_str}&$select=id,hasAttachments&$top=1"
         )
         data = _graph_get(search_path)
     except HTTPException:

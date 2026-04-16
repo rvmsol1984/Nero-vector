@@ -82,11 +82,13 @@ ON CONFLICT (tenant_id, query_name, device_id, timestamp) DO NOTHING
 INSERT_MESSAGE_TRACE_SQL = """
 INSERT INTO vector_message_trace (
     tenant_id, client_name, message_id, sender_address, recipient_address,
-    subject, received, status, size_bytes, direction, original_client_ip
+    subject, received, status, size_bytes, direction, original_client_ip,
+    has_attachments
 ) VALUES (
     %(tenant_id)s, %(client_name)s, %(message_id)s, %(sender_address)s,
     %(recipient_address)s, %(subject)s, %(received)s, %(status)s,
-    %(size_bytes)s, %(direction)s, %(original_client_ip)s
+    %(size_bytes)s, %(direction)s, %(original_client_ip)s,
+    COALESCE(%(has_attachments)s, FALSE)
 )
 ON CONFLICT (message_id) DO NOTHING
 """
@@ -133,33 +135,6 @@ class Database:
         if self._conn is None:
             raise RuntimeError("Database.connect() has not been called")
         return self._conn
-
-    def fetch_all(self, query: str, params=None) -> list:
-        """Execute a query and return all rows as a list of dicts."""
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute(query, params or ())
-                cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
-        except Exception:
-            self.conn.rollback()
-            raise
-
-
-
-    def fetch_one(self, query: str, params=None):
-        """Execute a query and return one row as a dict or None."""
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute(query, params or ())
-                row = cur.fetchone()
-                if row is None:
-                    return None
-                cols = [d[0] for d in cur.description]
-                return dict(zip(cols, row))
-        except Exception:
-            self.conn.rollback()
-            raise
 
     # ------------------------------------------------------------------ migrations
     def run_migrations(self, migrations_dir: str | Path) -> None:
@@ -454,37 +429,28 @@ class Database:
         self.conn.commit()
         return written > 0
 
-    def upsert_events_geo(self, events) -> int:
-        """Insert events but on conflict update geo fields from sign-in logs."""
-        written = 0
-        for ev in events:
-            rj = ev.get("raw_json") or {}
-            country = rj.get("Country")
-            city = rj.get("City")
-            asn = rj.get("ASN")
-            try:
-                self.execute("""
-                    INSERT INTO vector_events
-                        (id, tenant_id, client_name, entity_key, user_id,
-                         event_type, workload, timestamp, client_ip,
-                         result_status, dedup_fingerprint, raw_json)
-                    VALUES
-                        (%(id)s, %(tenant_id)s, %(client_name)s, %(entity_key)s,
-                         %(user_id)s, %(event_type)s, %(workload)s, %(timestamp)s,
-                         %(client_ip)s, %(result_status)s, %(dedup_fingerprint)s,
-                         %(raw_json)s)
-                    ON CONFLICT (dedup_fingerprint) DO UPDATE SET
-                        raw_json = vector_events.raw_json ||
-                            jsonb_build_object(
-                                'Country', EXCLUDED.raw_json->>'Country',
-                                'City',    EXCLUDED.raw_json->>'City',
-                                'ASN',     EXCLUDED.raw_json->>'ASN',
-                                'source',  EXCLUDED.raw_json->>'source'
-                            )
-                        WHERE vector_events.raw_json->>'Country' IS NULL
-                """, ev)
-                written += 1
-            except Exception:
-                pass
-        return written
+    def update_message_trace_attachment_names(
+        self,
+        message_id: str,
+        names: list[str],
+    ) -> bool:
+        """Patch an existing vector_message_trace row's attachment_names.
 
+        Called by MessageTraceIngestor as a second pass after the
+        primary INSERT, once Graph has returned the per-message
+        attachment list. A no-op is fine if the row was never
+        inserted (e.g. dedup) -- rowcount = 0 just means nothing to
+        update.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE vector_message_trace
+                SET attachment_names = %s
+                WHERE message_id = %s
+                """,
+                (list(names or []), message_id),
+            )
+            written = cur.rowcount
+        self.conn.commit()
+        return written > 0
