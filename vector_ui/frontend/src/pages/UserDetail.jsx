@@ -544,8 +544,7 @@ function EmailTraceTab({ entityKey }) {
         <div className="flex items-center gap-1">
           {[
             { id: "",    label: "All" },
-            { id: "IN",  label: "Inbound" },
-            { id: "OUT", label: "Outbound" },
+
           ].map((d) => (
             <button
               key={d.id || "all"}
