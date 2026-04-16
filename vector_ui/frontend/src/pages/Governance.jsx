@@ -1085,6 +1085,8 @@ function AiActivityTab({ copilot, external, externalError, claudeConnector = {} 
 
       {subTab === "copilot" ? (
         <AiCopilotSection rows={copilot} />
+      ) : subTab === "claude" ? (
+        <AiClaudeConnectorSection data={claudeConnector} />
       ) : (
         <AiExternalSection rows={external} error={externalError} />
       )}
