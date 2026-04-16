@@ -1289,6 +1289,60 @@ function AiExternalSection({ rows, error }) {
   );
 }
 
+function AiClaudeConnectorSection({ data = {} }) {
+  const adminGrants = data?.admin_grants || [];
+  const shadowIt = data?.shadow_it_attempts || [];
+  const all = [
+    ...adminGrants.map(r => ({ ...r, _type: "ADMIN GRANT" })),
+    ...shadowIt.map(r => ({ ...r, _type: "SHADOW IT" })),
+  ];
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-5 py-4 border-b border-white/5">
+        <div className="text-base font-bold">Claude M365 Connector</div>
+        <div className="text-[11px] text-white/50 mt-0.5">
+          Admin grants (ResultType=0) and shadow IT attempts (ResultType=90095) for the Claude M365 Connector
+        </div>
+      </div>
+      {all.length === 0 ? (
+        <div className="px-5 py-8 text-white/40 text-sm text-center">
+          No Claude Connector activity detected
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-[11px]">
+            <thead>
+              <tr>
+                <Th>User</Th>
+                <Th>Client</Th>
+                <Th>Type</Th>
+                <Th>IP</Th>
+                <Th>Time</Th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {all.map((row, i) => (
+                <tr key={i} className="hover:bg-white/[0.03]">
+                  <td className="px-4 py-2.5 font-mono text-[10px]">{row.user_id || "—"}</td>
+                  <td className="px-4 py-2.5 text-white/60">{row.client_name || "—"}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                      row._type === "ADMIN GRANT"
+                        ? "bg-critical/15 text-critical border border-critical/30"
+                        : "bg-warning/15 text-warning border border-warning/30"
+                    }`}>{row._type}</span>
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-[10px] text-white/50">{row.client_ip || "—"}</td>
+                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">{fmtRelative(row.timestamp)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 function UnmanagedDevicesTable({ rows }) {
   const [expanded, setExpanded] = useState(null);
   // Per-user cache so re-opening doesn't refetch.
