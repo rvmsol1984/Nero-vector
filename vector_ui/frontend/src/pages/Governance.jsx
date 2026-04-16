@@ -26,10 +26,10 @@ const TABS = [
   { id: "unmanagedDevices",  label: "Unmanaged Devices", endpoint: "govUnmanagedDevices",  severity: "review",   withTenant: false },
   { id: "intuneDevices",     label: "Intune Devices",    endpoint: "govIntuneDevices",     severity: "review",   withTenant: false },
   { id: "aiActivity",        label: "AI Activity",       endpoint: "govAiActivity",        severity: "monitor",  withTenant: false },
+  { id: "claudeConnector",   label: "Claude Connector",  endpoint: "govClaudeConnector",   severity: "critical", withTenant: false },
   { id: "edrAlerts",         label: "EDR Alerts",        endpoint: "govEdrAlerts",         severity: "critical", withTenant: false },
   { id: "threatLocker",      label: "ThreatLocker",      endpoint: "govThreatLocker",      severity: "critical", withTenant: false },
   { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
-  { id: "claudeConnector",   label: "Claude Connector",  endpoint: "govClaudeConnector",   severity: "critical", withTenant: false },
 ];
 
 // GCS tenant -- hardcoded here because the Governance board is GCS-only and
