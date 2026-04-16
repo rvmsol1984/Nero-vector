@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, createContext, useContext, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import Avatar from "../components/Avatar.jsx";
@@ -7,8 +7,6 @@ import TenantBadge from "../components/TenantBadge.jsx";
 import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
 import { filenameFromObjectId, fmtNumber, fmtRelative, fmtTime } from "../utils/format.js";
-
-const TENANT = "GameChange Solar";
 
 // Each tab owns its own endpoint, its default severity pill, and an
 // intrinsic severity (what the empty-vs-finding story looks like).
@@ -31,9 +29,39 @@ const TABS = [
   { id: "iocMatches",        label: "IOC Matches",       endpoint: "govIocMatches",        severity: "critical", withTenant: false },
 ];
 
-// GCS tenant -- hardcoded here because the Governance board is GCS-only and
-// we need to synthesize entity_key for the Intune user detail link.
-const GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6";
+// Shared context so the deeply-nested table components that synthesize
+// entity_keys or render Avatars don't need a fresh prop threaded
+// through every layer. Any descendant reads the currently-selected
+// tenant via ``useContext(TenantContext)``; the value is populated by
+// the top-level <Governance> provider whenever the tenant pill
+// selector changes.
+//
+// Shape:
+//   { clientName: string, tenantId: string }
+//
+// Before the first api.byTenant() response returns both fields are
+// empty strings; consumers must handle empty-string defensively.
+const TenantContext = createContext({ clientName: "", tenantId: "" });
+
+// Tenant pill selector -- same visual language as the Events page's
+// Pill component so the two filter strips read consistently. Kept
+// local to Governance.jsx since we aren't allowed to touch
+// App.jsx / api.js this change and don't want to churn imports.
+function TenantPill({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all duration-200 active:scale-95 ${
+        active
+          ? "bg-primary text-white"
+          : "bg-white/10 text-white/70 hover:bg-white/15"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
 
 // ---------------------------------------------------------------------------
 
@@ -46,6 +74,84 @@ export default function Governance() {
   const [loadingTabs, setLoadingTabs] = useState(() => new Set());
   const [activeTab, setActiveTab] = useState("dlp");
 
+  // ----- tenant selector state ---------------------------------------
+  //
+  // ``tenants`` is the full list of available tenants (from
+  // api.byTenant()); ``selectedTenantName`` is the client_name the
+  // user has picked; ``tenantId`` is the resolved UUID that the
+  // deeply-nested table components need for entity_key synthesis.
+  //
+  // api.byTenant() only returns (client_name, count) -- no
+  // tenant_id -- so after the selection changes we kick a second
+  // query (api.events with a 1-row limit) to pull tenant_id off a
+  // real event row. The extra call fires at most once per tenant
+  // switch, not per tab.
+  const [tenants, setTenants] = useState([]);
+  const [selectedTenantName, setSelectedTenantName] = useState("");
+  const [tenantId, setTenantId] = useState("");
+
+  // Fetch the list of tenants once on mount. First tenant wins the
+  // initial selection so the page has something to show before the
+  // user interacts.
+  useEffect(() => {
+    let cancel = false;
+    api
+      .byTenant()
+      .then((rows) => {
+        if (cancel) return;
+        const list = Array.isArray(rows) ? rows : [];
+        setTenants(list);
+        if (list.length && !selectedTenantName) {
+          setSelectedTenantName(list[0].client_name || "");
+        }
+      })
+      .catch(() => {
+        if (!cancel) setTenants([]);
+      });
+    return () => {
+      cancel = true;
+    };
+    // One-shot on mount. Don't depend on selectedTenantName so
+    // switching the pill doesn't re-fetch the tenant list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Resolve tenant_id for the currently-selected tenant name via a
+  // one-row event fetch. Runs every time the selection changes and
+  // clears the id while the lookup is in flight so consumers don't
+  // briefly see a stale mismatch.
+  useEffect(() => {
+    if (!selectedTenantName) {
+      setTenantId("");
+      return;
+    }
+    let cancel = false;
+    setTenantId("");
+    api
+      .events({ tenant: selectedTenantName, limit: 1 })
+      .then((rows) => {
+        if (cancel) return;
+        const first = Array.isArray(rows) && rows.length ? rows[0] : null;
+        if (first && first.tenant_id) setTenantId(first.tenant_id);
+      })
+      .catch(() => {
+        /* keep tenantId empty; entity_key links simply render without */
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [selectedTenantName]);
+
+  // When the selected tenant changes, drop every cached tab result
+  // so the next visit re-fetches against the new tenant. We keep
+  // activeTab itself -- the operator's focus shouldn't jump when
+  // they switch tenants.
+  useEffect(() => {
+    setData({});
+    setErrors({});
+    setLoadingTabs(new Set());
+  }, [selectedTenantName]);
+
   // Lazy-load the active tab on first visit only. Switching back to
   // a previously-viewed tab uses the cached rows and fires no new
   // request, which keeps the Postgres pool from getting hammered by
@@ -53,6 +159,8 @@ export default function Governance() {
   useEffect(() => {
     // Already cached? nothing to do.
     if (data[activeTab] !== undefined) return;
+    // Don't fire until we know which tenant to query for.
+    if (!selectedTenantName) return;
 
     const tab = TABS.find((t) => t.id === activeTab);
     if (!tab) return;
@@ -66,7 +174,7 @@ export default function Governance() {
       return next;
     });
 
-    const promise = tab.withTenant ? fn(TENANT) : fn();
+    const promise = tab.withTenant ? fn(selectedTenantName) : fn();
     promise
       .then((rows) => {
         if (cancel) return;
@@ -97,22 +205,46 @@ export default function Governance() {
     return () => {
       cancel = true;
     };
-    // The effect intentionally only re-runs on activeTab change; the
-    // in-effect `data[activeTab]` check reads the live snapshot and
-    // bails early if the tab is already cached.
+    // The effect intentionally only re-runs on activeTab or
+    // selectedTenantName change; the in-effect ``data[activeTab]``
+    // check reads the live snapshot and bails early if cached.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab]);
+  }, [activeTab, selectedTenantName]);
+
+  const tenantCtx = useMemo(
+    () => ({ clientName: selectedTenantName, tenantId }),
+    [selectedTenantName, tenantId],
+  );
 
   return (
+    <TenantContext.Provider value={tenantCtx}>
     <div className="space-y-5 animate-fade-in">
       {/* ----- header ----- */}
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="text-2xl font-bold">Governance</h1>
-        <TenantBadge name={TENANT} />
+        {selectedTenantName && <TenantBadge name={selectedTenantName} />}
       </div>
       <p className="text-white/50 text-sm -mt-3">
         UAL-derived policy findings and identity hygiene signals.
       </p>
+
+      {/* ----- tenant selector ----- */}
+      {tenants.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold mr-1">
+            tenant
+          </span>
+          {tenants.map((t) => (
+            <TenantPill
+              key={t.client_name}
+              active={selectedTenantName === t.client_name}
+              onClick={() => setSelectedTenantName(t.client_name)}
+            >
+              {t.client_name}
+            </TenantPill>
+          ))}
+        </div>
+      )}
 
       {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
       <div
@@ -180,6 +312,7 @@ export default function Governance() {
         error={errors[activeTab]}
       />
     </div>
+    </TenantContext.Provider>
   );
 }
 
@@ -440,11 +573,16 @@ function Th({ children, align = "left" }) {
   );
 }
 
-function UserCell({ entityKey, userId, clientName = TENANT }) {
+function UserCell({ entityKey, userId, clientName }) {
+  // Fall back to the currently-selected tenant when the row didn't
+  // carry its own client_name (most API responses do include one --
+  // Intune / Graph-derived rows don't).
+  const ctx = useContext(TenantContext);
+  const effectiveClientName = clientName || ctx.clientName || "";
   if (!entityKey) {
     return (
       <div className="flex items-center gap-2">
-        <Avatar email={userId} tenant={clientName} size={28} />
+        <Avatar email={userId} tenant={effectiveClientName} size={28} />
         <span className="truncate max-w-[260px]">{userId || "—"}</span>
       </div>
     );
@@ -456,7 +594,7 @@ function UserCell({ entityKey, userId, clientName = TENANT }) {
       className="flex items-center gap-2 hover:text-primary-light"
       title={userId || entityKey}
     >
-      <Avatar email={userId} tenant={clientName} size={28} />
+      <Avatar email={userId} tenant={effectiveClientName} size={28} />
       <span className="truncate max-w-[260px]">{userId || entityKey}</span>
     </Link>
   );
@@ -1337,6 +1475,7 @@ const GUEST_EXPAND_COLUMNS = [
 
 function GuestUsersTable({ rows }) {
   const [openId, setOpenId] = useState(null);
+  const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -1358,7 +1497,7 @@ function GuestUsersTable({ rows }) {
             // Guest users don't carry an entity_key on the row, so
             // synthesize one from the GCS tenant id + UPN for the
             // expand links and the per-user events query.
-            const entityKey = upn ? `${GCS_TENANT_ID}::${upn}` : null;
+            const entityKey = upn && ctxTenantId ? `${ctxTenantId}::${upn}` : null;
             return (
               <Fragment key={rowKey}>
                 <tr
@@ -1367,7 +1506,7 @@ function GuestUsersTable({ rows }) {
                 >
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">
-                      <Avatar email={row.mail || row.displayName} tenant={TENANT} size={28} />
+                      <Avatar email={row.mail || row.displayName} tenant={ctxClient} size={28} />
                       <span className="font-medium truncate max-w-[220px]">
                         {row.displayName || <span className="text-white/40">—</span>}
                       </span>
@@ -1771,6 +1910,7 @@ function AiActivityTab({ copilot, external, externalError }) {
 }
 
 function AiCopilotSection({ rows }) {
+  const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
@@ -1802,7 +1942,9 @@ function AiCopilotSection({ rows }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row) => {
-                const entityKey = `${GCS_TENANT_ID}::${row.user_id}`;
+                const entityKey = ctxTenantId
+                  ? `${ctxTenantId}::${row.user_id}`
+                  : null;
                 const types = Array.isArray(row.event_types) ? row.event_types : [];
                 return (
                   <tr key={row.user_id} className="hover:bg-white/[0.03]">
@@ -1810,7 +1952,7 @@ function AiCopilotSection({ rows }) {
                       <UserCell
                         entityKey={entityKey}
                         userId={row.user_id}
-                        clientName="GameChange Solar"
+                        clientName={ctxClient}
                       />
                     </td>
                     <td className="px-4 py-2.5 text-right tabular-nums">
@@ -1852,6 +1994,7 @@ function AiCopilotSection({ rows }) {
 }
 
 function AiExternalSection({ rows, error }) {
+  const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
@@ -1897,8 +2040,8 @@ function AiExternalSection({ rows, error }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row, i) => {
-                const entityKey = row.user
-                  ? `${GCS_TENANT_ID}::${row.user}`
+                const entityKey = row.user && ctxTenantId
+                  ? `${ctxTenantId}::${row.user}`
                   : null;
                 const { label: toolLabel, host } = aiToolDisplay(row.tool);
                 const devices = Array.isArray(row.devices) ? row.devices : [];
@@ -1909,7 +2052,7 @@ function AiExternalSection({ rows, error }) {
                         <UserCell
                           entityKey={entityKey}
                           userId={row.user}
-                          clientName="GameChange Solar"
+                          clientName={ctxClient}
                         />
                       ) : (
                         <span className="text-white/40">—</span>
@@ -2107,6 +2250,7 @@ function intuneDeviceStatus(device) {
 
 function IntuneDevicesTable({ rows }) {
   const [expanded, setExpanded] = useState(null);
+  const { tenantId: ctxTenantId } = useContext(TenantContext);
 
   function toggle(user) {
     setExpanded(expanded === user ? null : user);
@@ -2127,7 +2271,9 @@ function IntuneDevicesTable({ rows }) {
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
             const isOpen = expanded === row.user;
-            const entityKey = `${GCS_TENANT_ID}::${row.user}`;
+            const entityKey = ctxTenantId
+              ? `${ctxTenantId}::${row.user}`
+              : null;
             return (
               <Fragment key={row.user}>
                 <tr
