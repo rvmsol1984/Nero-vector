@@ -123,6 +123,8 @@ export const api = {
   govIocMatches:         () => get("/api/ioc/matches?limit=200"),
 
   // ----- incidents -----------------------------------------------------
+  claudeConnector:    () => get("/api/governance/claude-connector"),
+  govClaudeConnector: () => get("/api/governance/claude-connector"),
   incidentStats:    () => get("/api/incidents/stats"),
   incidentList:     ({ limit = 50, status = "" } = {}) =>
                       get(`/api/incidents/list${qs({ limit, status })}`),
