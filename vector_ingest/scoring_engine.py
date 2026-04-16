@@ -57,7 +57,7 @@ SCORING_WINDOW = timedelta(minutes=30)
 # Aggregate score at which a user's evaluation produces an incident.
 # Rules contribute positive integers via ``RuleResult.score_delta``;
 # the total across all fired rules is compared against this value.
-INCIDENT_THRESHOLD = 30
+INCIDENT_THRESHOLD = 80
 
 # Two confirmed incidents of the same type for the same user within
 # this window collapse into one. Prevents a single ongoing anomaly
@@ -472,6 +472,10 @@ class ScoringEngine:
         Skips the insert (returns False) if an incident of type
         ``DEFAULT_INCIDENT_TYPE`` already exists for this user
         inside the ``DEDUP_WINDOW``.
+
+        After the incident row is written, each fired rule gets a
+        companion ``vector_incident_events`` row so the Incidents
+        UI's evidence timeline can render a per-signal breakdown.
         """
         if self._incident_exists(user_id, DEFAULT_INCIDENT_TYPE):
             logger.info(
@@ -484,6 +488,23 @@ class ScoringEngine:
             return False
 
         fired = [r for r in results if r.fired]
+
+        # Enrich fired rules' evidence with VPN info before
+        # serialising. Any IP in the evidence dict (keyed as "ip",
+        # "matched_ip", or "client_ip") is looked up once and the
+        # result is merged into the evidence so operators see VPN
+        # status on the Incidents UI without a second click.
+        for r in fired:
+            ip = (
+                r.evidence.get("ip")
+                or r.evidence.get("matched_ip")
+                or r.evidence.get("client_ip")
+            )
+            if ip:
+                vpn_info = self._check_vpn(ip)
+                if vpn_info:
+                    r.evidence["vpn_info"] = vpn_info
+
         severity = self._severity_for(total_score)
         client_name = self._client_name_for(events, tenant_id)
         entity_key = f"{tenant_id}::{user_id}"
@@ -531,6 +552,29 @@ class ScoringEngine:
                     ),
                 )
                 new_id = cur.fetchone()[0]
+
+                # Write one vector_incident_events row per fired rule
+                # so the Incidents UI's evidence timeline can render
+                # a per-signal breakdown with source badges and score
+                # contributions.
+                for r in fired:
+                    cur.execute(
+                        """
+                        INSERT INTO vector_incident_events (
+                            incident_id, event_source, event_type,
+                            significance, raw_json, timestamp
+                        ) VALUES (
+                            %s::uuid, 'scoring_engine', %s,
+                            'high', %s::jsonb, NOW()
+                        )
+                        """,
+                        (
+                            new_id,
+                            r.rule_name,
+                            json.dumps(r.evidence or {}),
+                        ),
+                    )
+
             self._db.conn.commit()
         except Exception:
             logger.exception(
@@ -566,6 +610,101 @@ class ScoringEngine:
                 (user_id, incident_type, DEDUP_WINDOW),
             )
             return cur.fetchone() is not None
+
+    # ----- VPN detection -------------------------------------------------
+
+    # Instance-level cache: ip -> (expires_at, result_dict | None).
+    # Constructed lazily on first _check_vpn call so the engine
+    # doesn't carry empty dicts when VPN checks never fire.
+    _vpn_cache: dict[str, tuple[datetime, dict | None]] | None = None
+    _vpn_session: requests.Session | None = None
+
+    VPN_API_URL = "https://ipapi.is/json/"
+    VPN_CACHE_TTL = timedelta(hours=24)
+    VPN_REQUEST_TIMEOUT = 5
+
+    def _check_vpn(self, ip: str) -> dict | None:
+        """Check whether ``ip`` is a known VPN endpoint via the
+        ipapi.is API. Returns ``{is_vpn, vpn_name, asn}`` on
+        success, ``None`` when the IP is private / unreachable /
+        unparseable. All errors are swallowed -- VPN enrichment is
+        best-effort and must never block incident creation.
+
+        Results are cached per-IP for 24 hours on the engine
+        instance so the same IP across multiple rules in the same
+        cycle only produces one outbound request.
+        """
+        if not ip:
+            return None
+        try:
+            addr = ipaddress.ip_address(str(ip).strip())
+        except (ValueError, TypeError):
+            return None
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.is_reserved
+        ):
+            return None
+
+        # Lazy-init cache + session so a ScoringEngine that never
+        # fires any IP-bearing rules costs nothing.
+        if self._vpn_cache is None:
+            self._vpn_cache = {}
+        hit = self._vpn_cache.get(ip)
+        if hit:
+            expires_at, cached = hit
+            if datetime.now(timezone.utc) < expires_at:
+                return cached
+            self._vpn_cache.pop(ip, None)
+
+        if self._vpn_session is None:
+            self._vpn_session = requests.Session()
+        try:
+            resp = self._vpn_session.get(
+                f"{self.VPN_API_URL}?ip={ip}",
+                timeout=self.VPN_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.debug("[vpn_check] request failed ip=%s err=%s", ip, exc)
+            return None
+
+        if not resp.ok:
+            logger.debug("[vpn_check] non-2xx ip=%s status=%s", ip, resp.status_code)
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+
+        is_vpn = bool(data.get("is_vpn"))
+        vpn_block = data.get("vpn") or {}
+        vpn_name = (
+            vpn_block.get("name")
+            if isinstance(vpn_block, dict)
+            else None
+        )
+        asn_block = data.get("asn") or {}
+        asn = (
+            asn_block.get("org") or asn_block.get("asn")
+            if isinstance(asn_block, dict)
+            else None
+        )
+        result = {
+            "is_vpn":  is_vpn,
+            "vpn_name": vpn_name or None,
+            "asn":     str(asn) if asn else None,
+        }
+
+        self._vpn_cache[ip] = (
+            datetime.now(timezone.utc) + self.VPN_CACHE_TTL,
+            result,
+        )
+        return result
 
     # ----- small helpers --------------------------------------------------
 
@@ -973,8 +1112,12 @@ class OffHoursLoginRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        tenant_id = user_profile.get("tenant_id")
-        user_id = user_profile.get("user_id")
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1078,8 +1221,12 @@ class HighVolumeFileAccessRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        tenant_id = user_profile.get("tenant_id")
-        user_id = user_profile.get("user_id")
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1190,8 +1337,12 @@ class SuspiciousMailboxRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        tenant_id = user_profile.get("tenant_id")
-        user_id = user_profile.get("user_id")
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1314,8 +1465,12 @@ class MalwareDetectedRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        tenant_id = user_profile.get("tenant_id")
-        user_id = user_profile.get("user_id")
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
@@ -1441,8 +1596,12 @@ class IOCMatchRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
-        tenant_id = user_profile.get("tenant_id")
-        user_id = user_profile.get("user_id")
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
         if not tenant_id or not user_id:
             return miss
 
