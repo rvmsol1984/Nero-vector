@@ -1763,12 +1763,15 @@ _COUNTRY_NAMES: dict[str, str] = {
     "CU": "Cuba",
     "SY": "Syria",
     "VE": "Venezuela",
+    "MM": "Myanmar",
+    "SD": "Sudan",
 }
 
 
 class HighRiskCountryLoginRule(CorrelationRule):
     """Fires when a user logged in from an IP geolocated to a
-    country on the high-risk list.
+    country on the high-risk list AND that country is not already
+    in the user's baseline login_countries profile.
 
     The high-risk set is the union of OFAC-sanctioned jurisdictions
     and countries with well-documented state-sponsored cyber
@@ -1776,13 +1779,20 @@ class HighRiskCountryLoginRule(CorrelationRule):
     ``TENANT_EXCLUSIONS`` -- for example, GameChange Solar has a
     China office so CN is excluded for that tenant only.
 
+    The baseline guard stops this rule from firing on a legitimate
+    global organisation whose users routinely authenticate from a
+    high-risk jurisdiction -- if the country is already a known
+    part of their login pattern, the signal is redundant with the
+    existing sign-ins and would just produce noise. First-time
+    hits from a high-risk country still fire cleanly.
+
     IP resolution reuses the same ``ipinfo.io`` cache, rate-limit,
     and private-IP-skip logic as ``NewCountryLoginRule``. A single
     ``HighRiskCountryLoginRule`` instance shares its own cache so
     the same IP evaluated across multiple users in one cycle is
     resolved exactly once.
 
-    Score: 35 points. Intentionally higher than ``NewCountryLogin``
+    Score: 40 points. Intentionally higher than ``NewCountryLogin``
     (+25) because a sanctioned-country origin is a stronger signal,
     but still below the 80-point incident threshold on its own so a
     legitimate traveller whose tenant exclusion list simply hasn't
@@ -1790,11 +1800,20 @@ class HighRiskCountryLoginRule(CorrelationRule):
     """
 
     name = "HighRiskCountryLogin"
-    SCORE_DELTA = 35
+    SCORE_DELTA = 40
     LOOKBACK = timedelta(hours=24)
 
     HIGH_RISK_COUNTRIES: set[str] = {
-        "CN", "RU", "IR", "KP", "BY", "CU", "SY", "VE",
+        "CN",  # China
+        "RU",  # Russia
+        "KP",  # North Korea
+        "IR",  # Iran
+        "BY",  # Belarus
+        "CU",  # Cuba
+        "SY",  # Syria
+        "VE",  # Venezuela
+        "MM",  # Myanmar
+        "SD",  # Sudan
     }
 
     # Per-tenant exclusion overrides. Keys are tenant_id strings;
@@ -1857,6 +1876,7 @@ class HighRiskCountryLoginRule(CorrelationRule):
             return miss
 
         exclusions = self.TENANT_EXCLUSIONS.get(tenant_id) or set()
+        baseline_countries = self._baseline_country_set(user_profile)
 
         for ip in login_ips:
             country = self._resolve_country(ip)
@@ -1867,21 +1887,46 @@ class HighRiskCountryLoginRule(CorrelationRule):
                 continue
             if upper in exclusions:
                 continue
+            # Baseline gate: only fire if this high-risk country is
+            # NOT already in the user's known login distribution.
+            # A user who has legitimately been authenticating from
+            # this country shouldn't trigger a new incident every
+            # cycle just because the code is high-risk.
+            if upper in baseline_countries:
+                continue
             return RuleResult(
                 rule_name=self.rule_name,
                 score_delta=self.SCORE_DELTA,
                 fired=True,
                 evidence={
-                    "user":         user_id,
-                    "country":      upper,
-                    "ip":           ip,
-                    "country_name": _COUNTRY_NAMES.get(upper, upper),
+                    "user":               user_id,
+                    "country_code":       upper,
+                    "ip":                 ip,
+                    "baseline_countries": sorted(baseline_countries),
+                    "is_new_country":     True,
+                    "country_name":       _COUNTRY_NAMES.get(upper, upper),
                 },
             )
 
         return miss
 
     # ----- database -------------------------------------------------------
+
+    @staticmethod
+    def _baseline_country_set(user_profile: dict) -> set[str]:
+        """Extract the user's known-country set from the baseline
+        profile. Tolerates both the object shape
+        ``{"US": 42, "DE": 3}`` (what BaselineEngine currently
+        writes) and a flat array shape so a future schema tweak
+        doesn't silently break the rule. Codes are upper-cased so
+        matching against ``HIGH_RISK_COUNTRIES`` works regardless
+        of how the baseline was stored."""
+        raw = user_profile.get("login_countries") if user_profile else None
+        if isinstance(raw, dict):
+            return {str(k).upper() for k in raw.keys() if k}
+        if isinstance(raw, (list, tuple, set)):
+            return {str(v).upper() for v in raw if v}
+        return set()
 
     def _fetch_login_ips(
         self,
