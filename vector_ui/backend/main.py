@@ -1138,6 +1138,7 @@ _INCIDENT_STATUSES = {"open", "investigating", "contained", "closed"}
 
 
 @app.get("/api/incidents")
+@app.get("/api/incidents/list")
 def incidents_list(
     status: str | None = Query(None),
     severity: str | None = Query(None),
