@@ -1112,17 +1112,17 @@ function AiActivityTab({ copilot, external, externalError, claudeConnector = {} 
       </div>
 
       {subTab === "copilot" ? (
-        <AiCopilotSection rows={copilot} />
+        <AiCopilotSection rows={copilot} tenantId={tenantId} />
       ) : subTab === "claude" ? (
         <AiClaudeConnectorSection data={claudeConnector} />
       ) : (
-        <AiExternalSection rows={external} error={externalError} />
+        <AiExternalSection rows={external} error={externalError} tenantId={tenantId} />
       )}
     </div>
   );
 }
 
-function AiCopilotSection({ rows }) {
+function AiCopilotSection({ rows, tenantId }) {
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
@@ -1203,7 +1203,7 @@ function AiCopilotSection({ rows }) {
   );
 }
 
-function AiExternalSection({ rows, error }) {
+function AiExternalSection({ rows, error, tenantId }) {
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
@@ -1371,7 +1371,7 @@ function AiClaudeConnectorSection({ data = {} }) {
     </div>
   );
 }
-function UnmanagedDevicesTable({ rows }) {
+function UnmanagedDevicesTable({ rows, tenantId }) {
   const [expanded, setExpanded] = useState(null);
   // Per-user cache so re-opening doesn't refetch.
   const [detailCache, setDetailCache] = useState({});
