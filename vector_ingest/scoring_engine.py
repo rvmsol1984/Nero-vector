@@ -57,7 +57,7 @@ SCORING_WINDOW = timedelta(minutes=30)
 # Aggregate score at which a user's evaluation produces an incident.
 # Rules contribute positive integers via ``RuleResult.score_delta``;
 # the total across all fired rules is compared against this value.
-INCIDENT_THRESHOLD = 25
+INCIDENT_THRESHOLD = 80
 
 # Two confirmed incidents of the same type for the same user within
 # this window collapse into one. Prevents a single ongoing anomaly
@@ -236,6 +236,7 @@ class ScoringEngine:
                 SuspiciousMailboxRule(),
                 MalwareDetectedRule(),
                 IOCMatchRule(),
+                HighRiskCountryLoginRule(),
             ]
         for r in rules:
             self.register_rule(r)
@@ -506,10 +507,6 @@ class ScoringEngine:
                     r.evidence["vpn_info"] = vpn_info
 
         severity = self._severity_for(total_score)
-        # IOC match or malware always escalates to critical regardless of score
-        fired_rule_names = {r.rule_name for r in fired}
-        if "IOCMatch" in fired_rule_names or "MalwareDetected" in fired_rule_names:
-            severity = "critical"
         client_name = self._client_name_for(events, tenant_id)
         entity_key = f"{tenant_id}::{user_id}"
         first_seen, last_seen = self._timespan(events)
@@ -1075,38 +1072,76 @@ class NewCountryLoginRule(CorrelationRule):
 
 
 class OffHoursLoginRule(CorrelationRule):
-    """Fires when a user logged in during the overnight window
-    22:00-06:00 UTC inside the last 24 hours.
+    """Fires when a user logged in at a time they don't normally
+    authenticate.
 
-    A single off-hours login rarely means compromise by itself --
-    night-shift admins, travelling execs, and scheduled service
-    accounts all trip this regularly -- so the rule is intentionally
-    low-weight. It exists to stack with other signals: a new-country
-    login *at 03:00 UTC* is a lot more suspicious than either signal
-    alone, and that's the shape the aggregate scoring model is
-    designed to catch.
+    The rule has two modes, selected automatically based on how much
+    history the user's baseline profile has accumulated:
 
-    Time handling: event timestamps on ``vector_events`` are stored
-    as TIMESTAMPTZ and Postgres sessions in vector-ingest are pinned
-    to UTC in db.py's ``connect()``, so ``EXTRACT(HOUR FROM timestamp)``
-    returns the UTC hour directly. We also double-check client-side
-    using the ``datetime`` object psycopg2 hands back, in case a
-    future migration changes the session tz.
+    **Personal baseline** (>= 7 distinct hours in ``login_hours``):
+        ``login_hours`` is a dict ``{"8": 5, "9": 4, ...}`` whose
+        keys are UTC hours and values are event counts.  A login is
+        flagged when the hour it occurred in has 0 appearances or
+        accounts for < 2% of the user's total login volume.  This
+        respects shift workers, global travellers, and service
+        accounts that legitimately authenticate overnight.
+
+    **Fixed fallback** (< 7 distinct baseline hours):
+        Falls back to the static 22:00-06:00 UTC window from the
+        original v1 rule. Seven distinct hours is the minimum where
+        we can trust the distribution enough to flag a *missing*
+        hour as anomalous -- fewer than that and most normal users
+        would trigger on any new hour they hadn't been active
+        during yet.
+
+    Score: 15 points. Intentionally low so a single off-hours
+    login doesn't page anyone. Stacks with NewCountryLogin (+25),
+    HighRiskCountry (+35), or IOCMatch (+50) to cross the 80-point
+    incident threshold.
     """
 
     name = "OffHoursLogin"
     SCORE_DELTA = 15
     LOOKBACK = timedelta(hours=24)
 
-    # Off-hours window: 22:00 (inclusive) through 06:00 (exclusive),
-    # UTC. The window wraps midnight, so membership is
-    # ``hour >= 22 or hour < 6``.
+    # Fixed fallback window (v1 behaviour) used when the user's
+    # baseline is too thin for a personal distribution check.
     OFF_HOURS_START = 22  # 22:00 UTC
     OFF_HOURS_END = 6     # 06:00 UTC
 
+    # Minimum number of distinct hours in the baseline before we
+    # trust the personal distribution. Anything below this count
+    # falls back to the fixed window.
+    MIN_BASELINE_HOURS = 7
+
+    # Fraction of total logins below which an hour is considered
+    # "anomalous" in the personal baseline mode.
+    RARE_THRESHOLD = 0.02  # 2%
+
     @classmethod
-    def _is_off_hours(cls, hour: int) -> bool:
+    def _is_off_hours_fixed(cls, hour: int) -> bool:
+        """v1 fixed-window check (22:00-06:00 UTC)."""
         return hour >= cls.OFF_HOURS_START or hour < cls.OFF_HOURS_END
+
+    @classmethod
+    def _is_off_hours_personal(
+        cls,
+        hour: int,
+        login_hours: dict,
+    ) -> bool:
+        """Personal-baseline check. Returns True when ``hour`` is
+        absent from the user's distribution or represents < 2% of
+        their total login volume."""
+        total = sum(int(v or 0) for v in login_hours.values())
+        if total <= 0:
+            # Degenerate baseline (all counts zero) -- treat as
+            # insufficient data and let the caller fall through to
+            # the fixed window.
+            return False
+        count = int(login_hours.get(str(hour)) or 0)
+        if count == 0:
+            return True
+        return (count / total) < cls.RARE_THRESHOLD
 
     def evaluate(
         self,
@@ -1144,6 +1179,14 @@ class OffHoursLoginRule(CorrelationRule):
                 pass
             return miss
 
+        # Decide which check mode to use for this user based on the
+        # richness of their login_hours baseline.
+        login_hours = user_profile.get("login_hours") or {}
+        if not isinstance(login_hours, dict):
+            login_hours = {}
+        baseline_hours_count = len(login_hours)
+        use_personal = baseline_hours_count >= self.MIN_BASELINE_HOURS
+
         # First off-hours login wins. We take the earliest qualifying
         # login so the evidence's ``login_time`` is deterministic and
         # reproducible across repeated cycles.
@@ -1151,17 +1194,23 @@ class OffHoursLoginRule(CorrelationRule):
             if not isinstance(ts, datetime):
                 continue
             hour = int(ts.hour)
-            if not self._is_off_hours(hour):
+            if use_personal:
+                flagged = self._is_off_hours_personal(hour, login_hours)
+            else:
+                flagged = self._is_off_hours_fixed(hour)
+            if not flagged:
                 continue
             return RuleResult(
                 rule_name=self.rule_name,
                 score_delta=self.SCORE_DELTA,
                 fired=True,
                 evidence={
-                    "user":       user_id,
-                    "login_time": ts.isoformat(),
-                    "hour":       hour,
-                    "client_ip":  client_ip,
+                    "user":                 user_id,
+                    "login_time":           ts.isoformat(),
+                    "hour":                 hour,
+                    "client_ip":            client_ip,
+                    "baseline_hours_count": baseline_hours_count,
+                    "mode":                 "personal" if use_personal else "fixed",
                 },
             )
 
@@ -1700,6 +1749,231 @@ class IOCMatchRule(CorrelationRule):
             "ioc_type":       row[3],
             "indicator_name": row[4],
         }
+
+
+# ISO-3166 alpha-2 → English name for the high-risk set so the
+# evidence dict carries a human-readable label the Incidents UI can
+# show without an extra lookup.
+_COUNTRY_NAMES: dict[str, str] = {
+    "CN": "China",
+    "RU": "Russia",
+    "IR": "Iran",
+    "KP": "North Korea",
+    "BY": "Belarus",
+    "CU": "Cuba",
+    "SY": "Syria",
+    "VE": "Venezuela",
+}
+
+
+class HighRiskCountryLoginRule(CorrelationRule):
+    """Fires when a user logged in from an IP geolocated to a
+    country on the high-risk list.
+
+    The high-risk set is the union of OFAC-sanctioned jurisdictions
+    and countries with well-documented state-sponsored cyber
+    programmes. Any tenant can carve out legitimate exceptions via
+    ``TENANT_EXCLUSIONS`` -- for example, GameChange Solar has a
+    China office so CN is excluded for that tenant only.
+
+    IP resolution reuses the same ``ipinfo.io`` cache, rate-limit,
+    and private-IP-skip logic as ``NewCountryLoginRule``. A single
+    ``HighRiskCountryLoginRule`` instance shares its own cache so
+    the same IP evaluated across multiple users in one cycle is
+    resolved exactly once.
+
+    Score: 35 points. Intentionally higher than ``NewCountryLogin``
+    (+25) because a sanctioned-country origin is a stronger signal,
+    but still below the 80-point incident threshold on its own so a
+    legitimate traveller whose tenant exclusion list simply hasn't
+    been updated doesn't auto-page.
+    """
+
+    name = "HighRiskCountryLogin"
+    SCORE_DELTA = 35
+    LOOKBACK = timedelta(hours=24)
+
+    HIGH_RISK_COUNTRIES: set[str] = {
+        "CN", "RU", "IR", "KP", "BY", "CU", "SY", "VE",
+    }
+
+    # Per-tenant exclusion overrides. Keys are tenant_id strings;
+    # values are sets of ISO-3166 alpha-2 codes that are considered
+    # legitimate for that tenant and should NOT fire.
+    TENANT_EXCLUSIONS: dict[str, set[str]] = {
+        "07b4c47a-e461-493e-91c4-90df73e2ebc6": {"CN"},  # GameChange Solar China office
+    }
+
+    # ipinfo plumbing (same tunables as NewCountryLoginRule so
+    # operators see consistent behaviour across the two rules)
+    IPINFO_URL_TEMPLATE = "https://ipinfo.io/{ip}/json"
+    IPINFO_TIMEOUT = 5
+    IPINFO_RATE_LIMIT_SEC = 1.0
+    CACHE_TTL = timedelta(hours=24)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cache: dict[str, tuple[datetime, str | None]] = {}
+        self._last_call_at: float = 0.0
+        self._session: requests.Session | None = None
+
+    # ----- evaluate -------------------------------------------------------
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[high_risk_country] no DB handle, skipping")
+            return miss
+
+        try:
+            login_ips = self._fetch_login_ips(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[high_risk_country] login IP fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if not login_ips:
+            return miss
+
+        exclusions = self.TENANT_EXCLUSIONS.get(tenant_id) or set()
+
+        for ip in login_ips:
+            country = self._resolve_country(ip)
+            if country is None:
+                continue
+            upper = country.upper()
+            if upper not in self.HIGH_RISK_COUNTRIES:
+                continue
+            if upper in exclusions:
+                continue
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":         user_id,
+                    "country":      upper,
+                    "ip":           ip,
+                    "country_name": _COUNTRY_NAMES.get(upper, upper),
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_login_ips(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[str]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT client_ip
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND client_ip IS NOT NULL
+                  AND timestamp > NOW() - %s
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+            return [row[0] for row in cur.fetchall() if row[0]]
+
+    # ----- ipinfo resolver (mirrors NewCountryLoginRule) ------------------
+
+    @staticmethod
+    def _is_skippable_ip(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(str(ip).strip())
+        except (ValueError, TypeError):
+            return True
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.is_reserved
+        )
+
+    def _cache_get(self, ip: str) -> tuple[bool, str | None]:
+        entry = self._cache.get(ip)
+        if not entry:
+            return (False, None)
+        expires_at, country = entry
+        if datetime.now(timezone.utc) > expires_at:
+            self._cache.pop(ip, None)
+            return (False, None)
+        return (True, country)
+
+    def _cache_put(self, ip: str, country: str | None) -> None:
+        self._cache[ip] = (
+            datetime.now(timezone.utc) + self.CACHE_TTL,
+            country,
+        )
+
+    def _rate_limit(self) -> None:
+        elapsed = time.monotonic() - self._last_call_at
+        if elapsed < self.IPINFO_RATE_LIMIT_SEC:
+            time.sleep(self.IPINFO_RATE_LIMIT_SEC - elapsed)
+        self._last_call_at = time.monotonic()
+
+    def _resolve_country(self, ip: str) -> str | None:
+        if self._is_skippable_ip(ip):
+            return None
+
+        hit, cached = self._cache_get(ip)
+        if hit:
+            return cached
+
+        self._rate_limit()
+        if self._session is None:
+            self._session = requests.Session()
+        url = self.IPINFO_URL_TEMPLATE.format(ip=ip)
+        try:
+            resp = self._session.get(url, timeout=self.IPINFO_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.debug("[high_risk_country] ipinfo failed ip=%s err=%s", ip, exc)
+            return None
+
+        if not resp.ok:
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                self._cache_put(ip, None)
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            self._cache_put(ip, None)
+            return None
+
+        country = (data.get("country") or "").strip() or None
+        self._cache_put(ip, country)
+        return country
 
 
 class ThreatIntelMonitor:
