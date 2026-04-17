@@ -784,22 +784,34 @@ function TimelineTab({ incident }) {
 
 function timelineTarget(r) {
   const raw = r.raw_json || {};
-  // Extract filename from full SharePoint URL
+  // MailItemsAccessed — extract subject + folder from nested structure
+  if (r.event_type === "MailItemsAccessed") {
+    const folders = raw.Folders || [];
+    const subjects = [];
+    for (const folder of folders) {
+      const path = folder.Path || "";
+      const items = folder.FolderItems || [];
+      for (const item of items) {
+        if (item.Subject) subjects.push(item.Subject);
+      }
+      if (subjects.length === 0 && path) subjects.push(path);
+    }
+    if (subjects.length > 0) return subjects.slice(0, 2).join(", ");
+  }
+  // Extract filename from full SharePoint/OneDrive URL
   const objId = raw.ObjectId || raw.SourceFileName || raw.DestinationFileName || "";
   let fileName = objId;
   if (objId && objId.includes("/")) {
-    fileName = objId.split("/").pop() || objId;
+    fileName = decodeURIComponent(objId.split("/").pop() || objId);
   }
   return (
     raw.DestinationFileName ||
     (fileName && fileName !== objId ? fileName : null) ||
     raw.SourceFileName ||
-    raw.ObjectId ||
+    (objId.length < 120 ? objId : null) ||
     raw.Subject ||
-    raw.MailboxOwnerUPN ||
     raw.TargetUserOrGroupName ||
     raw.ModifiedProperties?.[0]?.Name ||
-    r.result_status ||
     null
   );
 }
