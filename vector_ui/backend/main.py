@@ -302,6 +302,210 @@ def user_profile(entity_key: str) -> dict:
     return row
 
 
+# ---------------------------------------------------------------------------
+# enriched user profile (Graph + stats)
+# ---------------------------------------------------------------------------
+
+_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
+_PROFILE_CACHE_TTL = 300  # 5 minutes
+
+
+@app.get("/api/users/{entity_key}/profile")
+def user_enriched_profile(entity_key: str) -> dict:
+    """Enriched user profile merging Microsoft Graph identity data
+    with quick-stats computed from vector_events, vector_message_trace
+    and vector_incidents. The response degrades gracefully: if Graph
+    is unavailable or the app registration lacks the required
+    permissions, the Graph-derived fields are simply absent and the
+    frontend shows "—" placeholders. DB-derived stats always succeed.
+
+    Results are cached per entity_key for 5 minutes so a page
+    reload doesn't hammer Graph.
+    """
+    now = time.monotonic()
+    cached = _PROFILE_CACHE.get(entity_key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    tenant_id = entity_key.split("::", 1)[0] if "::" in entity_key else ""
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    if not user_email:
+        return {}
+
+    result: dict = {
+        "entity_key": entity_key,
+        "user_email": user_email,
+        "tenant_id": tenant_id,
+    }
+
+    # 1. Graph user properties
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        graph_user = _graph_get(
+            f"/users/{upn}?$select=displayName,jobTitle,department,"
+            "accountEnabled,lastPasswordChangeDateTime,mobilePhone,"
+            "officeLocation,createdDateTime,onPremisesSyncEnabled,"
+            "signInSessionsValidFromDateTime"
+        )
+        result["display_name"] = graph_user.get("displayName")
+        result["job_title"] = graph_user.get("jobTitle")
+        result["department"] = graph_user.get("department")
+        result["account_enabled"] = graph_user.get("accountEnabled")
+        result["last_password_change"] = graph_user.get("lastPasswordChangeDateTime")
+        result["mobile_phone"] = graph_user.get("mobilePhone")
+        result["office_location"] = graph_user.get("officeLocation")
+        result["created_datetime"] = graph_user.get("createdDateTime")
+        result["on_premises_sync"] = graph_user.get("onPremisesSyncEnabled")
+        result["sign_in_sessions_valid_from"] = graph_user.get(
+            "signInSessionsValidFromDateTime"
+        )
+    except Exception:
+        logger.debug("graph user fetch failed for %s", entity_key, exc_info=True)
+
+    # 2. Manager
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        mgr = _graph_get(f"/users/{upn}/manager?$select=displayName")
+        result["manager_name"] = mgr.get("displayName")
+    except Exception:
+        result["manager_name"] = None
+
+    # 3. MFA / auth methods
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        auth_data = _graph_get(
+            f"/users/{upn}/authentication/methods"
+        )
+        methods_raw = auth_data.get("value") or []
+        method_names: list[str] = []
+        for m in methods_raw:
+            odata = m.get("@odata.type", "")
+            if "microsoftAuthenticator" in odata:
+                method_names.append("Microsoft Authenticator")
+            elif "phone" in odata.lower():
+                method_names.append("Phone (SMS/Call)")
+            elif "fido2" in odata.lower():
+                method_names.append("FIDO2 Security Key")
+            elif "softwareOath" in odata.lower():
+                method_names.append("Software OATH Token")
+            elif "windowsHello" in odata.lower():
+                method_names.append("Windows Hello")
+            elif "email" in odata.lower():
+                method_names.append("Email")
+            elif "password" in odata.lower():
+                pass  # password is always present, not MFA
+            elif odata:
+                method_names.append(odata.split(".")[-1])
+        result["mfa_methods"] = sorted(set(method_names))
+        result["has_mfa"] = len(result["mfa_methods"]) > 0
+    except Exception:
+        result["mfa_methods"] = []
+        result["has_mfa"] = None
+
+    # 4. Quick stats from DB
+    try:
+        login_row = db.fetch_one(
+            """
+            SELECT
+                COUNT(*)::bigint AS total,
+                COUNT(*) FILTER (
+                    WHERE result_status ILIKE '%%fail%%'
+                       OR event_type = 'UserLoginFailed'
+                )::bigint AS failed
+            FROM vector_events
+            WHERE entity_key = %s
+              AND event_type IN ('UserLoggedIn', 'UserLoginFailed')
+              AND timestamp > NOW() - INTERVAL '30 days'
+            """,
+            (entity_key,),
+        ) or {}
+        result["login_total_30d"] = int(login_row.get("total") or 0)
+        result["login_failed_30d"] = int(login_row.get("failed") or 0)
+    except Exception:
+        result["login_total_30d"] = 0
+        result["login_failed_30d"] = 0
+
+    try:
+        email_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_message_trace
+            WHERE (sender_address = %s OR recipient_address = %s)
+            """,
+            (user_email, user_email),
+        ) or {}
+        result["email_count"] = int(email_row.get("count") or 0)
+    except Exception:
+        result["email_count"] = 0
+
+    try:
+        file_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_events
+            WHERE entity_key = %s
+              AND workload IN ('SharePoint', 'OneDrive', 'OneDriveForBusiness')
+              AND timestamp > NOW() - INTERVAL '30 days'
+            """,
+            (entity_key,),
+        ) or {}
+        result["file_count_30d"] = int(file_row.get("count") or 0)
+    except Exception:
+        result["file_count_30d"] = 0
+
+    try:
+        inc_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_incidents
+            WHERE entity_key = %s AND status = 'open'
+            """,
+            (entity_key,),
+        ) or {}
+        result["open_incidents"] = int(inc_row.get("count") or 0)
+    except Exception:
+        result["open_incidents"] = 0
+
+    # 5. Risk indicators
+    try:
+        watchlist_row = db.fetch_one(
+            """
+            SELECT status, COUNT(*)::bigint AS count
+            FROM vector_watchlist
+            WHERE user_email = %s
+              AND expires_at > NOW()
+            GROUP BY status
+            ORDER BY count DESC
+            LIMIT 1
+            """,
+            (user_email,),
+        )
+        result["watchlist_status"] = (
+            watchlist_row.get("status") if watchlist_row else None
+        )
+    except Exception:
+        result["watchlist_status"] = None
+
+    try:
+        offhours_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_events
+            WHERE entity_key = %s
+              AND event_type = 'UserLoggedIn'
+              AND EXTRACT(HOUR FROM timestamp) NOT BETWEEN 6 AND 21
+              AND timestamp > NOW() - INTERVAL '30 days'
+            """,
+            (entity_key,),
+        ) or {}
+        result["off_hours_logins_30d"] = int(offhours_row.get("count") or 0)
+    except Exception:
+        result["off_hours_logins_30d"] = 0
+
+    _PROFILE_CACHE[entity_key] = (now + _PROFILE_CACHE_TTL, result)
+    return result
+
+
 @app.get("/api/users/{entity_key}/events")
 def user_events(
     entity_key: str,
@@ -354,6 +558,36 @@ def user_stats(entity_key: str) -> dict:
         (entity_key,),
     )
     return {"by_event_type": by_event_type, "by_workload": by_workload}
+
+
+@app.get("/api/users/{entity_key}/memberships")
+def user_memberships(entity_key: str) -> list[dict]:
+    """Directory roles and group memberships for this user via Graph
+    ``/users/{upn}/memberOf``. Returns a list of
+    ``{display_name, description, type}`` dicts. Fails gracefully to
+    ``[]`` on any Graph error."""
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    if not user_email:
+        return []
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        data = _graph_get(
+            f"/users/{upn}/memberOf?$select=displayName,description&$top=50"
+        )
+    except Exception:
+        return []
+    out: list[dict] = []
+    for m in data.get("value") or []:
+        if not isinstance(m, dict):
+            continue
+        odata = m.get("@odata.type", "")
+        mtype = "Role" if "directoryRole" in odata else "Group"
+        out.append({
+            "display_name": m.get("displayName"),
+            "description":  m.get("description"),
+            "type":         mtype,
+        })
+    return out
 
 
 @app.get("/api/users/{entity_key}/edr")
@@ -907,13 +1141,14 @@ _INCIDENT_STATUSES = {"open", "investigating", "contained", "closed"}
 def incidents_list(
     status: str | None = Query(None),
     severity: str | None = Query(None),
+    user: str | None = Query(None, description="user_id substring filter"),
     limit: int = Query(50, ge=1, le=500),
 ) -> list[dict]:
     """Confirmed incidents produced by the Phase 2 scoring engine.
 
     Ordered by newest-first so the Incidents page defaults to the
-    latest escalations. ``status`` and ``severity`` are optional
-    string filters.
+    latest escalations. ``status``, ``severity`` and ``user`` are
+    optional string filters.
     """
     return db.fetch_all(
         """
@@ -942,10 +1177,11 @@ def incidents_list(
         FROM vector_incidents
         WHERE (%s::text IS NULL OR status   = %s)
           AND (%s::text IS NULL OR severity = %s)
+          AND (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
         ORDER BY confirmed_at DESC
         LIMIT %s
         """,
-        (status, status, severity, severity, limit),
+        (status, status, severity, severity, user, user, limit),
     )
 
 
