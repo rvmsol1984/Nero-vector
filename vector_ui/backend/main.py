@@ -344,7 +344,7 @@ def user_enriched_profile(entity_key: str) -> dict:
         graph_user = _graph_get(
             f"/users/{upn}?$select=displayName,jobTitle,department,"
             "accountEnabled,lastPasswordChangeDateTime,mobilePhone,"
-            "businessPhones,officeLocation,createdDateTime,onPremisesSyncEnabled,"
+            "officeLocation,createdDateTime,onPremisesSyncEnabled,"
             "signInSessionsValidFromDateTime"
         )
         result["display_name"] = graph_user.get("displayName")
@@ -352,8 +352,7 @@ def user_enriched_profile(entity_key: str) -> dict:
         result["department"] = graph_user.get("department")
         result["account_enabled"] = graph_user.get("accountEnabled")
         result["last_password_change"] = graph_user.get("lastPasswordChangeDateTime")
-        business_phones = graph_user.get("businessPhones") or []
-        result["mobile_phone"] = business_phones[0] if business_phones else graph_user.get("mobilePhone")
+        result["mobile_phone"] = graph_user.get("mobilePhone")
         result["office_location"] = graph_user.get("officeLocation")
         result["created_datetime"] = graph_user.get("createdDateTime")
         result["on_premises_sync"] = graph_user.get("onPremisesSyncEnabled")
@@ -1264,6 +1263,164 @@ def incidents_detail(incident_id: str) -> dict:
         (incident_id,),
     )
     return row
+
+
+@app.get("/api/incidents/{incident_id}/impact")
+def incidents_impact(incident_id: str) -> dict:
+    """Impact summary for the Incidents page's ``Impact`` tab.
+
+    Walks ``vector_events`` + ``vector_message_trace`` over the
+    incident's dwell window (first_seen -> last_seen) and returns
+    four buckets -- accessed / sent / modified / deleted -- each with
+    counts plus a small sample of the actual events. Frontend renders
+    these as stat cards and a drill-down table.
+
+    Returns an empty envelope with zero counts when the incident
+    doesn't exist or has no dwell window so the frontend renders
+    cleanly instead of crashing.
+    """
+    empty = {
+        "accessed":       {"emails": 0, "files": 0, "events": []},
+        "sent":           {"emails": 0, "files": 0, "events": []},
+        "modified":       {"emails": 0, "files": 0, "events": []},
+        "deleted":        {"emails": 0, "files": 0, "events": []},
+        "dwell_minutes":  0,
+    }
+
+    inc = db.fetch_one(
+        """
+        SELECT entity_key, user_id, tenant_id,
+               first_seen, last_seen, dwell_time_minutes
+        FROM vector_incidents
+        WHERE id = %s
+        """,
+        (incident_id,),
+    )
+    if not inc:
+        return empty
+
+    entity_key = inc.get("entity_key")
+    user_id = inc.get("user_id")
+    tenant_id = inc.get("tenant_id")
+    # Fall back to "last hour" when the incident didn't record a
+    # dwell window (e.g. immediate-fire IOC match). Most scoring
+    # rules DO stamp first_seen / last_seen, but the safety net
+    # means the tab still populates.
+    first_seen = inc.get("first_seen")
+    last_seen = inc.get("last_seen")
+    if not first_seen or not last_seen:
+        last_seen = last_seen or inc.get("confirmed_at")
+        first_seen = first_seen or (
+            last_seen - timedelta(hours=1) if last_seen else None
+        )
+    if not first_seen or not last_seen:
+        return empty
+
+    # ---- file-action buckets (UAL) ----
+    ACCESSED_EVENTS = ("FileAccessed", "MailItemsAccessed", "FilePreviewed")
+    MODIFIED_EVENTS = ("FileModified", "FileUploaded", "FileRenamed")
+    DELETED_EVENTS = (
+        "FileDeleted", "SoftDelete", "HardDelete", "FileRecycled",
+    )
+
+    def _fetch_bucket(event_types: tuple[str, ...]) -> list[dict]:
+        if not entity_key:
+            return []
+        try:
+            return db.fetch_all(
+                """
+                SELECT id::text, timestamp, event_type, workload,
+                       client_ip, raw_json
+                FROM vector_events
+                WHERE entity_key = %s
+                  AND event_type = ANY(%s)
+                  AND timestamp BETWEEN %s AND %s
+                ORDER BY timestamp DESC
+                LIMIT 50
+                """,
+                (entity_key, list(event_types), first_seen, last_seen),
+            )
+        except Exception:
+            logger.debug("incident impact fetch failed", exc_info=True)
+            return []
+
+    accessed_events = _fetch_bucket(ACCESSED_EVENTS)
+    modified_events = _fetch_bucket(MODIFIED_EVENTS)
+    deleted_events = _fetch_bucket(DELETED_EVENTS)
+
+    # ---- sent email bucket (message_trace) ----
+    # The activity-report fallback path writes a single "ACTIVITY"
+    # direction row per user per refresh date, which should NOT
+    # count as "sent" -- filter those out explicitly.
+    sent_emails: list[dict] = []
+    if user_id:
+        try:
+            sent_emails = db.fetch_all(
+                """
+                SELECT id::text, message_id, sender_address,
+                       recipient_address, subject, received, status,
+                       size_bytes, direction
+                FROM vector_message_trace
+                WHERE sender_address = %s
+                  AND received BETWEEN %s AND %s
+                  AND COALESCE(direction, '') <> 'ACTIVITY'
+                ORDER BY received DESC
+                LIMIT 50
+                """,
+                (user_id, first_seen, last_seen),
+            )
+        except Exception:
+            logger.debug("incident impact sent fetch failed", exc_info=True)
+
+    # ---- dwell ----
+    dwell_minutes = inc.get("dwell_time_minutes")
+    if dwell_minutes is None:
+        try:
+            dwell_minutes = int(
+                (last_seen - first_seen).total_seconds() // 60
+            )
+        except Exception:
+            dwell_minutes = 0
+
+    def _split_kinds(rows: list[dict]) -> tuple[int, int]:
+        """Return (email_count, file_count) based on workload."""
+        emails = 0
+        files = 0
+        for r in rows:
+            wl = (r.get("workload") or "").lower()
+            if "exchange" in wl or "mail" in wl:
+                emails += 1
+            else:
+                files += 1
+        return (emails, files)
+
+    acc_e, acc_f = _split_kinds(accessed_events)
+    mod_e, mod_f = _split_kinds(modified_events)
+    del_e, del_f = _split_kinds(deleted_events)
+
+    return {
+        "accessed": {
+            "emails": acc_e,
+            "files":  acc_f,
+            "events": accessed_events,
+        },
+        "sent": {
+            "emails": len(sent_emails),
+            "files":  0,
+            "events": sent_emails,
+        },
+        "modified": {
+            "emails": mod_e,
+            "files":  mod_f,
+            "events": modified_events,
+        },
+        "deleted": {
+            "emails": del_e,
+            "files":  del_f,
+            "events": deleted_events,
+        },
+        "dwell_minutes": int(dwell_minutes or 0),
+    }
 
 
 @app.put("/api/incidents/{incident_id}/status")
