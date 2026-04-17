@@ -2377,6 +2377,8 @@ def governance_ai_activity(tenant: str | None = Query(None)) -> dict:
         """
         SELECT
             user_id,
+            MAX(tenant_id) || '::' || user_id AS entity_key,
+            MAX(client_name) AS client_name,
             COUNT(*)::bigint AS event_count,
             MAX(timestamp)   AS last_seen,
             COALESCE(

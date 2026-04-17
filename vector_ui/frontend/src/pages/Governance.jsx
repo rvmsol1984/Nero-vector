@@ -1132,7 +1132,7 @@ function AiCopilotSection({ rows, tenantId, tenantName }) {
         <div>
           <div className="text-base font-bold">Microsoft Copilot</div>
           <div className="text-[11px] text-white/50 mt-0.5">
-            Copilot workload usage from UAL for {tenantName || "this tenant"}
+            Copilot workload usage from UAL
           </div>
         </div>
         <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-semibold bg-primary/15 border border-primary/40 text-primary-light tabular-nums">
@@ -1157,7 +1157,7 @@ function AiCopilotSection({ rows, tenantId, tenantName }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row) => {
-                const entityKey = `${tenantId}::${row.user_id}`;
+                const entityKey = row.entity_key || `${tenantId}::${row.user_id}`;
                 const types = Array.isArray(row.event_types) ? row.event_types : [];
                 return (
                   <tr key={row.user_id} className="hover:bg-white/[0.03]">
@@ -1165,7 +1165,7 @@ function AiCopilotSection({ rows, tenantId, tenantName }) {
                       <UserCell
                         entityKey={entityKey}
                         userId={row.user_id}
-                        clientName={tenantName || DEFAULT_TENANT}
+                        clientName={row.client_name || DEFAULT_TENANT}
                       />
                     </td>
                     <td className="px-4 py-2.5 text-right tabular-nums">
@@ -1253,7 +1253,7 @@ function AiExternalSection({ rows, error, tenantId, tenantName }) {
             <tbody className="divide-y divide-white/5">
               {rows.map((row, i) => {
                 const entityKey = row.user
-                  ? `${tenantId}::${row.user}`
+                  ? (row.entity_key || `${tenantId}::${row.user}`)
                   : null;
                 const { label: toolLabel, host } = aiToolDisplay(row.tool);
                 const devices = Array.isArray(row.devices) ? row.devices : [];
@@ -1264,7 +1264,7 @@ function AiExternalSection({ rows, error, tenantId, tenantName }) {
                         <UserCell
                           entityKey={entityKey}
                           userId={row.user}
-                          clientName={tenantName || DEFAULT_TENANT}
+                          clientName={row.client_name || DEFAULT_TENANT}
                         />
                       ) : (
                         <span className="text-white/40">—</span>
@@ -1536,7 +1536,7 @@ function IntuneDevicesTable({ rows, tenantId }) {
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
             const isOpen = expanded === row.user;
-            const entityKey = `${tenantId}::${row.user}`;
+            const entityKey = row.entity_key || `${tenantId}::${row.user}`;
             return (
               <Fragment key={row.user}>
                 <tr
@@ -1552,7 +1552,7 @@ function IntuneDevicesTable({ rows, tenantId }) {
                     <UserCell
                       entityKey={entityKey}
                       userId={row.user}
-                      clientName={tenantName || DEFAULT_TENANT}
+                      clientName={row.client_name || DEFAULT_TENANT}
                     />
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
