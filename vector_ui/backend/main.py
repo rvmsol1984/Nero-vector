@@ -2156,16 +2156,39 @@ def governance_mfa_methods(tenant: str | None = Query(None)) -> list[dict]:
         return []
     tid = row["tenant_id"]
     # Get all users for this tenant
+    # Get tenant domain from a known user
+    domain_row = db.fetch_one(
+        """
+        SELECT user_id FROM vector_events
+        WHERE client_name = %s
+          AND user_id LIKE '%%@%%'
+          AND user_id NOT LIKE 'ServicePrincipal_%%'
+          AND user_id NOT LIKE '%%#EXT#%%'
+        ORDER BY COUNT(*) DESC
+        LIMIT 1
+        """,
+        (tenant_name,)
+    )
+    # Extract primary domain
+    primary_domain = None
+    if domain_row:
+        parts = domain_row["user_id"].split("@")
+        if len(parts) == 2:
+            primary_domain = parts[1].lower()
+
     users = db.fetch_all(
         """
         SELECT DISTINCT user_id FROM vector_events
         WHERE client_name = %s
           AND user_id LIKE '%%@%%'
           AND user_id NOT LIKE 'ServicePrincipal_%%'
+          AND user_id NOT LIKE '%%#EXT#%%'
+          AND (%s::text IS NULL OR LOWER(user_id) LIKE '%%@' || %s)
+          AND timestamp > NOW() - INTERVAL '30 days'
         ORDER BY user_id
         LIMIT 200
         """,
-        (tenant_name,)
+        (tenant_name, primary_domain, primary_domain)
     )
     results = []
     for u in users:
