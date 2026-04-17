@@ -1316,6 +1316,10 @@ def incidents_impact(incident_id: str) -> dict:
         )
     if not first_seen or not last_seen:
         return empty
+    # Expand zero-dwell windows to ±2 hours for meaningful impact data
+    if first_seen == last_seen or (last_seen - first_seen).total_seconds() < 300:
+        first_seen = first_seen - timedelta(hours=2)
+        last_seen = last_seen + timedelta(hours=2)
 
     # ---- file-action buckets (UAL) ----
     ACCESSED_EVENTS = ("FileAccessed", "MailItemsAccessed", "FilePreviewed")
