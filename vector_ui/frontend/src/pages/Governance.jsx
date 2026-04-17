@@ -1084,9 +1084,10 @@ function aiToolDisplay(remoteUrl) {
 function AiActivityTab({ copilot, external, externalError, claudeConnector = {}, tenantId, tenantName }) {
   const [subTab, setSubTab] = useState("copilot");
   const claudeTotal = (claudeConnector?.admin_grants?.length || 0) + (claudeConnector?.shadow_it_attempts?.length || 0);
+  const isGCS = tenantName === "GameChange Solar" || !tenantName;
   const SUB_TABS = [
     { id: "copilot",  label: "Microsoft Copilot", count: copilot.length },
-    { id: "external", label: "External AI Tools", count: external.length },
+    ...(isGCS ? [{ id: "external", label: "External AI Tools", count: external.length }] : []),
     { id: "claude",   label: "Claude Connector",  count: claudeTotal },
   ];
   return (
