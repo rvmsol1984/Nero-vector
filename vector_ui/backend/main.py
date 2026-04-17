@@ -2170,15 +2170,16 @@ def governance_privileged_roles(
 # ---- guest users (Graph API) -----------------------------------------------
 
 _GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6"
-_GRAPH_TOKEN_CACHE: dict = {"token": None, "expires_at": 0.0}
+_GRAPH_TOKEN_CACHE: dict = {}
 
 
-def _get_graph_token() -> str:
-    """Client credentials token for the GCS tenant, cached until ~1m before expiry."""
+def _get_graph_token(tenant_id: str | None = None) -> str:
+    """Client credentials token for the given tenant, cached per tenant_id."""
+    tid = tenant_id or _GCS_TENANT_ID
     now = time.monotonic()
-    cached_token = _GRAPH_TOKEN_CACHE.get("token")
-    if cached_token and _GRAPH_TOKEN_CACHE.get("expires_at", 0.0) > now + 60:
-        return cached_token
+    cached = _GRAPH_TOKEN_CACHE.get(tid, {})
+    if cached.get("token") and cached.get("expires_at", 0.0) > now + 60:
+        return cached["token"]
 
     client_id = os.environ.get("VECTOR_CLIENT_ID")
     client_secret = os.environ.get("VECTOR_CLIENT_SECRET")
@@ -2188,7 +2189,7 @@ def _get_graph_token() -> str:
             detail="VECTOR_CLIENT_ID / VECTOR_CLIENT_SECRET not configured",
         )
 
-    url = f"https://login.microsoftonline.com/{_GCS_TENANT_ID}/oauth2/v2.0/token"
+    url = f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/token"
     body = urllib.parse.urlencode(
         {
             "client_id": client_id,
@@ -2210,13 +2211,12 @@ def _get_graph_token() -> str:
     if not token:
         raise HTTPException(status_code=502, detail="graph token response missing access_token")
 
-    _GRAPH_TOKEN_CACHE["token"] = token
-    _GRAPH_TOKEN_CACHE["expires_at"] = now + int(data.get("expires_in", 3600))
+    _GRAPH_TOKEN_CACHE[tid] = {"token": token, "expires_at": now + int(data.get("expires_in", 3600))}
     return token
 
 
-def _graph_get(path_with_query: str) -> dict:
-    token = _get_graph_token()
+def _graph_get(path_with_query: str, tenant_id: str | None = None) -> dict:
+    token = _get_graph_token(tenant_id=tenant_id)
     url = f"https://graph.microsoft.com/v1.0{path_with_query}"
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
@@ -2519,14 +2519,16 @@ def _parse_graph_iso(value: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _fetch_intune_devices(force: bool = False) -> list[dict]:
+def _fetch_intune_devices(force: bool = False, tenant_id: str | None = None) -> list[dict]:
     """Return the cached /deviceManagement/managedDevices payload."""
+    tid = tenant_id or _GCS_TENANT_ID
     now_mono = time.monotonic()
-    cached = _INTUNE_CACHE.get("data")
+    cache_key = f"data_{tid}"
+    cached = _INTUNE_CACHE.get(cache_key)
     if (
         not force
         and cached is not None
-        and now_mono - _INTUNE_CACHE.get("fetched_at", 0.0) < _INTUNE_CACHE_TTL
+        and now_mono - _INTUNE_CACHE.get(f"fetched_at_{tid}", 0.0) < _INTUNE_CACHE_TTL
     ):
         return cached
 
@@ -2544,10 +2546,10 @@ def _fetch_intune_devices(force: bool = False) -> list[dict]:
         ]
     )
     path = f"/deviceManagement/managedDevices?$select={select_fields}&$top=999"
-    data = _graph_get(path)
+    data = _graph_get(path, tenant_id=tid)
     values = data.get("value") or []
-    _INTUNE_CACHE["data"] = values
-    _INTUNE_CACHE["fetched_at"] = now_mono
+    _INTUNE_CACHE[cache_key] = values
+    _INTUNE_CACHE[f"fetched_at_{tid}"] = now_mono
     return values
 
 
@@ -2635,7 +2637,13 @@ def governance_intune_devices(
 ) -> list[dict]:
     """Users with at least one non-compliant, unencrypted, or stale
     Intune-managed device."""
-    devices = _fetch_intune_devices()
+    # Look up tenant_id from tenant name
+    tenant_id = None
+    if tenant:
+        row = db.fetch_one("SELECT tenant_id FROM vector_events WHERE client_name = %s LIMIT 1", (tenant,))
+        if row:
+            tenant_id = row.get("tenant_id")
+    devices = _fetch_intune_devices(tenant_id=tenant_id)
     return _group_intune_by_user(devices, only_with_issues=True)
 
 
