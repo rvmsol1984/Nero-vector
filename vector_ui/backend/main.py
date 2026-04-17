@@ -1359,7 +1359,9 @@ _GCS = "GameChange Solar"
 
 
 @app.get("/api/governance/threatlocker")
-def governance_threatlocker() -> list[dict]:
+def governance_threatlocker(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """ThreatLocker block/ringfenced/elevation events grouped by
     (host, user, action). action_id filter matches the blocking
     action codes: 2=Deny, 3=Ringfenced, 6=Elevated."""
@@ -1376,12 +1378,12 @@ def governance_threatlocker() -> list[dict]:
             MAX(event_time)            AS last_seen
         FROM vector_threatlocker_events
         WHERE action_id IN (2, 3, 6)
-          AND client_name = %s
+          AND (%s::text IS NULL OR client_name = %s)
         GROUP BY hostname, username, action_type, action, action_id, policy_name
         ORDER BY event_count DESC
         LIMIT 100
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
 
@@ -1435,7 +1437,9 @@ def governance_threatlocker_events(
 
 
 @app.get("/api/governance/edr-alerts")
-def governance_edr_alerts() -> list[dict]:
+def governance_edr_alerts(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """Datto EDR alerts aggregated by (host, user, threat, severity)."""
     return db.fetch_all(
         """
@@ -1452,12 +1456,12 @@ def governance_edr_alerts() -> list[dict]:
                 ARRAY[]::text[]
             )                           AS actions
         FROM vector_edr_events
-        WHERE client_name = %s
+        WHERE (%s::text IS NULL OR client_name = %s)
         GROUP BY host_name, user_account, threat_name, severity
         ORDER BY alert_count DESC
         LIMIT 200
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
 
@@ -1604,7 +1608,9 @@ def governance_external_forwarding() -> list[dict]:
 
 
 @app.get("/api/governance/unmanaged-devices")
-def governance_unmanaged_devices() -> list[dict]:
+def governance_unmanaged_devices(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """Events from devices whose DeviceProperties report IsCompliant = False."""
     return db.fetch_all(
         """
@@ -1620,7 +1626,7 @@ def governance_unmanaged_devices() -> list[dict]:
                 ARRAY[]::jsonb[]
             ) AS devices
         FROM vector_events
-        WHERE client_name = %s
+        WHERE (%s::text IS NULL OR client_name = %s)
           AND raw_json::text ILIKE '%%"IsCompliant"%%'
           AND (
               raw_json::text ILIKE '%%"IsCompliant", "Value": "False"%%'
@@ -1631,7 +1637,7 @@ def governance_unmanaged_devices() -> list[dict]:
         ORDER BY event_count DESC
         LIMIT 100
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
 
@@ -1870,7 +1876,9 @@ def governance_unmanaged_devices_detail(user_id: str) -> list[dict]:
 
 
 @app.get("/api/governance/broken-inheritance")
-def governance_broken_inheritance() -> list[dict]:
+def governance_broken_inheritance(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """SharingInheritanceBroken events rolled up by user."""
     return db.fetch_all(
         """
@@ -1887,12 +1895,12 @@ def governance_broken_inheritance() -> list[dict]:
             ) AS files
         FROM vector_events
         WHERE event_type = 'SharingInheritanceBroken'
-          AND client_name = %s
+          AND (%s::text IS NULL OR client_name = %s)
         GROUP BY entity_key, user_id, client_name
         ORDER BY event_count DESC
         LIMIT 100
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
 
@@ -1946,7 +1954,9 @@ def _resolve_app_display_name(app_id: str | None) -> str | None:
 
 
 @app.get("/api/governance/oauth-apps")
-def governance_oauth_apps() -> list[dict]:
+def governance_oauth_apps(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """Consent to application. events grouped by app, with the NERO
     Vector app itself filtered out and every remaining GUID resolved
     to its servicePrincipal displayName (cached)."""
@@ -1963,13 +1973,13 @@ def governance_oauth_apps() -> list[dict]:
             MAX(timestamp)                     AS last_consent
         FROM vector_events
         WHERE event_type = 'Consent to application.'
-          AND client_name = %s
+          AND (%s::text IS NULL OR client_name = %s)
           AND COALESCE(raw_json->>'ObjectId', '') <> %s
         GROUP BY raw_json->>'ObjectId'
         ORDER BY user_count DESC
         LIMIT 100
         """,
-        (_GCS, _NERO_VECTOR_APP_ID),
+        (tenant, tenant, _NERO_VECTOR_APP_ID),
     )
     for row in rows:
         app_id = row.get("app_name")
@@ -1980,7 +1990,9 @@ def governance_oauth_apps() -> list[dict]:
 
 
 @app.get("/api/governance/password-spray")
-def governance_password_spray() -> list[dict]:
+def governance_password_spray(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """Source IPs hitting 3+ distinct users with login failures in 24h."""
     return db.fetch_all(
         """
@@ -1997,7 +2009,7 @@ def governance_password_spray() -> list[dict]:
             ) AS targets
         FROM vector_events
         WHERE event_type = 'UserLoginFailed'
-          AND client_name = %s
+          AND (%s::text IS NULL OR client_name = %s)
           AND client_ip IS NOT NULL
           AND timestamp > now() - INTERVAL '24 hours'
         GROUP BY client_ip
@@ -2005,7 +2017,7 @@ def governance_password_spray() -> list[dict]:
         ORDER BY targeted_users DESC, total_attempts DESC
         LIMIT 100
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
 
@@ -2013,10 +2025,12 @@ _STALE_REQUIRED_DAYS = 14
 
 
 @app.get("/api/governance/stale-accounts")
-def governance_stale_accounts() -> dict:
+def governance_stale_accounts(
+    tenant: str | None = Query(None),
+) -> dict:
     """Users with activity in the last 30d but no UserLoggedIn in the last
     30d. Guarded by a baseline check: if we have less than
-    ``_STALE_REQUIRED_DAYS`` of data for GCS, return an
+    ``_STALE_REQUIRED_DAYS`` of data for the selected tenant, return an
     ``insufficient_data`` envelope so the UI can render a
     "check back later" state instead of listing every active user as
     "stale" during the initial monitoring window.
@@ -2029,9 +2043,9 @@ def governance_stale_accounts() -> dict:
                 0
             )::float AS days_of_data
         FROM vector_events
-        WHERE client_name = %s
+        WHERE (%s::text IS NULL OR client_name = %s)
         """,
-        (_GCS,),
+        (tenant, tenant),
     ) or {}
     days_of_data = float(baseline.get("days_of_data") or 0)
 
@@ -2057,12 +2071,12 @@ def governance_stale_accounts() -> dict:
                 ARRAY[]::text[]
             ) AS event_types
         FROM vector_events
-        WHERE client_name = %s
+        WHERE (%s::text IS NULL OR client_name = %s)
           AND user_id NOT IN (
               SELECT DISTINCT user_id
               FROM vector_events
               WHERE event_type = 'UserLoggedIn'
-                AND client_name = %s
+                AND (%s::text IS NULL OR client_name = %s)
                 AND timestamp > now() - INTERVAL '30 days'
                 AND user_id IS NOT NULL
           )
@@ -2071,7 +2085,7 @@ def governance_stale_accounts() -> dict:
         ORDER BY last_activity DESC
         LIMIT 100
         """,
-        (_GCS, _GCS),
+        (tenant, tenant, tenant, tenant),
     )
     return {
         "sufficient_data": True,
@@ -2082,7 +2096,9 @@ def governance_stale_accounts() -> dict:
 
 
 @app.get("/api/governance/mfa-changes")
-def governance_mfa_changes() -> list[dict]:
+def governance_mfa_changes(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """StrongAuthentication / MFA config mutations.
 
     Filters out ServicePrincipal_-prefixed user_id values so the view
@@ -2103,7 +2119,7 @@ def governance_mfa_changes() -> list[dict]:
                 ARRAY[]::text[]
             ) AS operations
         FROM vector_events
-        WHERE client_name = %s
+        WHERE (%s::text IS NULL OR client_name = %s)
           AND user_id NOT LIKE 'ServicePrincipal_%%'
           AND (
               event_type               ILIKE '%%StrongAuthentication%%'
@@ -2115,12 +2131,14 @@ def governance_mfa_changes() -> list[dict]:
         ORDER BY last_seen DESC
         LIMIT 100
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
 
 @app.get("/api/governance/privileged-roles")
-def governance_privileged_roles() -> list[dict]:
+def governance_privileged_roles(
+    tenant: str | None = Query(None),
+) -> list[dict]:
     """Raw role add/remove events (no roll-up; operators want the audit trail)."""
     return db.fetch_all(
         """
@@ -2134,7 +2152,7 @@ def governance_privileged_roles() -> list[dict]:
             raw_json->>'Actor'     AS actor,
             timestamp
         FROM vector_events
-        WHERE client_name = %s
+        WHERE (%s::text IS NULL OR client_name = %s)
           AND event_type IN (
               'Add member to role.',
               'Remove member from role.',
@@ -2144,7 +2162,7 @@ def governance_privileged_roles() -> list[dict]:
         ORDER BY timestamp DESC
         LIMIT 100
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
 
@@ -2424,8 +2442,10 @@ def governance_ai_activity_external_raw() -> list[dict]:
 
 
 @app.get("/api/governance/guest-users")
-def governance_guest_users() -> list[dict]:
-    """List guest users in the GCS tenant via Microsoft Graph.
+def governance_guest_users(
+    tenant: str | None = Query(None),
+) -> list[dict]:
+    """List guest users via Microsoft Graph.
 
     Hand-builds the query string with literal ``$`` so Graph parses
     ``$filter`` / ``$select`` correctly (python's ``urlencode`` would
@@ -2606,9 +2626,11 @@ def _group_intune_by_user(
 
 
 @app.get("/api/governance/intune-devices")
-def governance_intune_devices() -> list[dict]:
-    """Users in the GCS tenant with at least one non-compliant,
-    unencrypted, or stale Intune-managed device."""
+def governance_intune_devices(
+    tenant: str | None = Query(None),
+) -> list[dict]:
+    """Users with at least one non-compliant, unencrypted, or stale
+    Intune-managed device."""
     devices = _fetch_intune_devices()
     return _group_intune_by_user(devices, only_with_issues=True)
 
