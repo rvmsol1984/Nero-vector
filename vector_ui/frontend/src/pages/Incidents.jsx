@@ -461,6 +461,7 @@ function Th({ children, align = "left" }) {
 function IncidentDetail({ incident, onStatusChange }) {
   const [saving, setSaving] = useState(null);
   const [saveErr, setSaveErr] = useState(null);
+  const [tab, setTab] = useState("timeline");
 
   // Parse the evidence array. Scoring engine writes this as a JSON array
   // of signal objects; be defensive against either a JSON string or a
@@ -494,6 +495,13 @@ function IncidentDetail({ incident, onStatusChange }) {
     { id: "investigating", label: "Investigating", color: "#EAB308" },
     { id: "contained",     label: "Contained",     color: "#10B981" },
     { id: "closed",        label: "Close",         color: "rgba(255,255,255,0.45)" },
+  ];
+
+  const TABS = [
+    { id: "timeline",    label: "Timeline"    },
+    { id: "impact",      label: "Impact"      },
+    { id: "containment", label: "Containment" },
+    { id: "crimescene",  label: "CrimeScene"  },
   ];
 
   return (
@@ -550,29 +558,8 @@ function IncidentDetail({ incident, onStatusChange }) {
         </div>
       )}
 
-      {/* ----- evidence timeline ----- */}
-      <div>
-        <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-          Evidence timeline
-        </div>
-        {evidence.length === 0 ? (
-          <div className="text-white/40 text-[11px] py-2">
-            no evidence recorded
-          </div>
-        ) : (
-          <div
-            className="rounded-lg border border-white/5 divide-y divide-white/5"
-            style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
-          >
-            {evidence.map((sig, i) => (
-              <EvidenceRow key={sig.id || i} signal={sig} />
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ----- action buttons ----- */}
-      <div className="pt-3 border-t border-white/10 flex items-center gap-3 flex-wrap">
+      {/* ----- action buttons (moved to header per spec) ----- */}
+      <div className="pt-2 border-t border-white/10 flex items-center gap-3 flex-wrap">
         {incident.entity_key && (
           <Link
             to={`/users/${encodeURIComponent(incident.entity_key)}`}
@@ -614,7 +601,564 @@ function IncidentDetail({ incident, onStatusChange }) {
           status update failed: {saveErr}
         </div>
       )}
+
+      {/* ----- 4-tab investigation view ----- */}
+      <div
+        className="flex items-center gap-1 border-b border-white/10"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {TABS.map((t) => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setTab(t.id);
+              }}
+              className={`px-4 py-2 text-[11px] uppercase tracking-wider font-semibold border-b-2 -mb-px whitespace-nowrap transition-colors ${
+                active
+                  ? "border-primary text-primary-light"
+                  : "border-transparent text-white/50 hover:text-white"
+              }`}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === "timeline"    && <TimelineTab    incident={incident} />}
+      {tab === "impact"      && <ImpactTab      incident={incident} />}
+      {tab === "containment" && <ContainmentTab incident={incident} />}
+      {tab === "crimescene"  && <CrimeSceneTab  incident={incident} />}
+
+      {/* ----- detection signals (below tabs, always visible) ----- */}
+      <div className="pt-4 border-t border-white/10">
+        <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
+          Detection Signals
+        </div>
+        {evidence.length === 0 ? (
+          <div className="text-white/40 text-[11px] py-2">
+            no evidence recorded
+          </div>
+        ) : (
+          <div
+            className="rounded-lg border border-white/5 divide-y divide-white/5"
+            style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
+          >
+            {evidence.map((sig, i) => (
+              <EvidenceRow key={sig.id || i} signal={sig} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 1: Timeline -- chronological event list for the user during the
+// incident dwell window
+// ---------------------------------------------------------------------------
+
+function workloadBadgeStyle(workload, eventType) {
+  const wl = String(workload || "").toLowerCase();
+  const et = String(eventType || "").toLowerCase();
+  if (wl.includes("exchange") || et.includes("mail")) {
+    return { color: "#F97316", label: `Email: ${eventType || "event"}` };
+  }
+  if (wl.includes("sharepoint") || wl.includes("onedrive")) {
+    return { color: "#14B8A6", label: `File: ${eventType || "event"}` };
+  }
+  if (wl.includes("azureactivedirectory") || wl.includes("azuread")) {
+    return { color: "#3B82F6", label: `Login: ${eventType || "event"}` };
+  }
+  if (wl.includes("teams")) {
+    return { color: "#8B5CF6", label: `Teams: ${eventType || "event"}` };
+  }
+  if (wl.includes("threat") || wl === "inky" || wl === "edr") {
+    return { color: "#EF4444", label: `Phish: ${eventType || "event"}` };
+  }
+  return {
+    color: "rgba(255,255,255,0.4)",
+    label: `${workload || "Event"}: ${eventType || "event"}`,
+  };
+}
+
+function ActionBadge({ workload, eventType }) {
+  const cfg = workloadBadgeStyle(workload, eventType);
+  return (
+    <span
+      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+      style={{
+        color: cfg.color,
+        borderColor: cfg.color + "55",
+        backgroundColor: cfg.color + "14",
+      }}
+    >
+      {cfg.label}
+    </span>
+  );
+}
+
+function TimelineTab({ incident }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!incident?.user_id) {
+      setRows([]);
+      return;
+    }
+    let cancel = false;
+    setRows(null);
+    setErr(null);
+    api
+      .events({ user: incident.user_id, limit: 100 })
+      .then((r) => { if (!cancel) setRows(r || []); })
+      .catch((e) => {
+        if (!cancel) { setRows([]); setErr(String(e.message || e)); }
+      });
+    return () => { cancel = true; };
+  }, [incident?.id, incident?.user_id]);
+
+  if (rows === null) {
+    return <div className="text-white/40 text-[11px] py-4">loading timeline…</div>;
+  }
+  if (err) {
+    return <div className="text-white/40 text-[11px] py-4">could not load timeline</div>;
+  }
+  if (rows.length === 0) {
+    return <div className="text-white/40 text-[11px] py-4">no events in the incident window</div>;
+  }
+
+  return (
+    <div
+      className="rounded-lg border border-white/5 overflow-hidden"
+      style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
+    >
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[10px]">
+          <thead>
+            <tr>
+              <Th11>Time</Th11>
+              <Th11>Action</Th11>
+              <Th11>Target</Th11>
+              <Th11>IP</Th11>
+              <Th11>Location</Th11>
+              <Th11>ISP</Th11>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {rows.map((r) => (
+              <tr key={r.id} className="hover:bg-white/[0.02]">
+                <td className="px-2 py-1.5 text-white/60 whitespace-nowrap tabular-nums"
+                    title={r.timestamp}>
+                  {fmtRelative(r.timestamp)}
+                </td>
+                <td className="px-2 py-1.5">
+                  <ActionBadge workload={r.workload} eventType={r.event_type} />
+                </td>
+                <td className="px-2 py-1.5 text-white/70 truncate max-w-[260px]">
+                  {timelineTarget(r) || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-2 py-1.5 text-white/60 font-mono tabular-nums whitespace-nowrap">
+                  {r.client_ip || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-2 py-1.5 text-white/60 whitespace-nowrap">
+                  {timelineLocation(r) || <span className="text-white/30">—</span>}
+                </td>
+                <td className="px-2 py-1.5 text-white/50 truncate max-w-[180px]">
+                  {timelineIsp(r) || <span className="text-white/30">—</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function timelineTarget(r) {
+  const raw = r.raw_json || {};
+  return (
+    raw.DestinationFileName ||
+    raw.ObjectId ||
+    raw.Subject ||
+    r.result_status ||
+    null
+  );
+}
+
+function timelineLocation(r) {
+  const raw = r.raw_json || {};
+  const city = raw.City || raw.geo_city || "";
+  const country = raw.Country || raw.geo_country || "";
+  const parts = [city, country].filter(Boolean);
+  return parts.join(", ") || null;
+}
+
+function timelineIsp(r) {
+  const raw = r.raw_json || {};
+  return raw.ASN || raw.geo_asn_org || null;
+}
+
+// ---------------------------------------------------------------------------
+// Tab 2: Impact -- what the attacker accessed / sent / modified / deleted
+// ---------------------------------------------------------------------------
+
+function ImpactTab({ incident }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!incident?.id) return;
+    let cancel = false;
+    setData(null);
+    setErr(null);
+    fetch(`/api/incidents/${encodeURIComponent(incident.id)}/impact`, {
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        ...(localStorage.getItem("vector_token")
+          ? { Authorization: `Bearer ${localStorage.getItem("vector_token")}` }
+          : {}),
+      },
+    })
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((d) => { if (!cancel) setData(d || {}); })
+      .catch((e) => {
+        if (!cancel) { setData({}); setErr(String(e.message || e)); }
+      });
+    return () => { cancel = true; };
+  }, [incident?.id]);
+
+  if (data === null) {
+    return <div className="text-white/40 text-[11px] py-4">loading impact…</div>;
+  }
+
+  const buckets = [
+    { key: "accessed", label: "Accessed", color: "#3B82F6", icon: "👁" },
+    { key: "sent",     label: "Sent",     color: "#F97316", icon: "📤" },
+    { key: "modified", label: "Modified", color: "#EAB308", icon: "✎" },
+    { key: "deleted",  label: "Deleted",  color: "#EF4444", icon: "🗑" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {buckets.map((b) => {
+          const bucket = data[b.key] || {};
+          const total = (bucket.emails || 0) + (bucket.files || 0);
+          return (
+            <div
+              key={b.key}
+              className="rounded-xl border px-4 py-3"
+              style={{
+                borderColor: b.color + "55",
+                backgroundColor: b.color + "0D",
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-base" aria-hidden="true">{b.icon}</span>
+                <span
+                  className="text-[10px] uppercase tracking-wider font-semibold"
+                  style={{ color: b.color }}
+                >
+                  {b.label}
+                </span>
+              </div>
+              <div
+                className="text-2xl font-bold mt-1 tabular-nums leading-none"
+                style={{ color: b.color }}
+              >
+                {fmtNumber(total)}
+              </div>
+              <div className="text-[10px] text-white/50 mt-1">
+                {fmtNumber(bucket.emails || 0)} emails · {fmtNumber(bucket.files || 0)} files
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {err && (
+        <div className="text-[11px] text-white/40">
+          impact data partially unavailable
+        </div>
+      )}
+
+      <ImpactEventsTable data={data} />
+    </div>
+  );
+}
+
+function ImpactEventsTable({ data }) {
+  const rows = [];
+  const buckets = ["accessed", "sent", "modified", "deleted"];
+  for (const b of buckets) {
+    for (const e of (data[b]?.events || [])) {
+      rows.push({ ...e, _bucket: b });
+    }
+  }
+  rows.sort((a, b) => {
+    const ta = a.timestamp || a.received || "";
+    const tb = b.timestamp || b.received || "";
+    return tb.localeCompare(ta);
+  });
+  if (rows.length === 0) {
+    return (
+      <div className="text-white/40 text-[11px] py-4">
+        no impact events recorded in the dwell window
+      </div>
+    );
+  }
+  return (
+    <div
+      className="rounded-lg border border-white/5 overflow-hidden"
+      style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
+    >
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[10px]">
+          <thead>
+            <tr>
+              <Th11>Time</Th11>
+              <Th11>Bucket</Th11>
+              <Th11>Action</Th11>
+              <Th11>Subject / File</Th11>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {rows.slice(0, 50).map((r, i) => {
+              const ts = r.timestamp || r.received;
+              const isEmail = r.subject != null || r._bucket === "sent";
+              const subj = isEmail
+                ? (r.subject || "(no subject)")
+                : (r.raw_json?.DestinationFileName
+                    || r.raw_json?.ObjectId
+                    || "(no target)");
+              return (
+                <tr key={r.id || i} className="hover:bg-white/[0.02]">
+                  <td className="px-2 py-1.5 text-white/60 whitespace-nowrap tabular-nums">
+                    {fmtRelative(ts)}
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <BucketPill bucket={r._bucket} />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    {isEmail
+                      ? <ActionBadge workload="Exchange" eventType={r._bucket === "sent" ? "Send" : "Access"} />
+                      : <ActionBadge workload={r.workload} eventType={r.event_type} />
+                    }
+                  </td>
+                  <td className="px-2 py-1.5 text-white/70 truncate max-w-[320px]"
+                      title={subj}>
+                    {subj}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function BucketPill({ bucket }) {
+  const colors = {
+    accessed: "#3B82F6",
+    sent:     "#F97316",
+    modified: "#EAB308",
+    deleted:  "#EF4444",
+  };
+  const color = colors[bucket] || "rgba(255,255,255,0.4)";
+  return (
+    <span
+      className="inline-flex items-center px-1.5 py-[2px] text-[9px] font-bold uppercase tracking-wider rounded border whitespace-nowrap"
+      style={{
+        color,
+        borderColor: color + "55",
+        backgroundColor: color + "14",
+      }}
+    >
+      {bucket}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 3: Containment -- 6-step remediation checklist (Phase 4)
+// ---------------------------------------------------------------------------
+
+function ContainmentTab({ incident }) {
+  const steps = [
+    {
+      n: 1, name: "Revoke Sessions",
+      desc: "Sign out all active sessions via Graph API.",
+    },
+    {
+      n: 2, name: "Disable Account",
+      desc: "Temporarily disable the Entra ID account.",
+    },
+    {
+      n: 3, name: "Reset Password",
+      desc: "Force password reset on next login.",
+    },
+    {
+      n: 4, name: "Remove Inbox Rules",
+      desc: "Delete any suspicious inbox rules created during incident.",
+    },
+    {
+      n: 5, name: "Revoke OAuth Apps",
+      desc: "Remove OAuth app consents created during incident.",
+    },
+    {
+      n: 6, name: "Block IP",
+      desc: "Add attacker IP to Conditional Access named locations blocklist.",
+    },
+  ];
+  return (
+    <div className="space-y-3">
+      <div
+        className="rounded-lg border border-white/10 px-4 py-2 text-[11px] text-white/60"
+        style={{ backgroundColor: "rgba(234,179,8,0.08)" }}
+      >
+        Automated containment coming in Phase 4. Actions below are
+        disabled for now.
+      </div>
+      <div className="rounded-lg border border-white/5 divide-y divide-white/5"
+           style={{ backgroundColor: "rgba(255,255,255,0.015)" }}>
+        {steps.map((s) => (
+          <div key={s.n} className="flex items-start gap-3 px-4 py-3">
+            <div
+              className="shrink-0 h-7 w-7 rounded-full flex items-center justify-center text-[11px] font-bold"
+              style={{
+                color: "#3B82F6",
+                background: "rgba(37,99,235,0.15)",
+                border: "1px solid rgba(37,99,235,0.45)",
+              }}
+            >
+              {s.n}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold text-white">{s.name}</div>
+              <div className="text-[11px] text-white/50 mt-0.5">{s.desc}</div>
+            </div>
+            <div className="flex items-center gap-2 text-[10px]">
+              <span
+                className="inline-flex items-center px-2 py-[3px] font-semibold uppercase tracking-wider rounded-md border whitespace-nowrap"
+                style={{
+                  color: "rgba(255,255,255,0.5)",
+                  borderColor: "rgba(255,255,255,0.15)",
+                  backgroundColor: "rgba(255,255,255,0.05)",
+                }}
+              >
+                PENDING
+              </span>
+              <span className="text-white/30 tabular-nums w-20 text-right">
+                —
+              </span>
+              <button
+                type="button"
+                disabled
+                className="px-3 py-1 text-[11px] font-semibold rounded-xl border text-white/30 bg-white/[0.02] border-white/10 cursor-not-allowed"
+              >
+                Run
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 4: CrimeScene -- AI-written report placeholder (Phase 3)
+// ---------------------------------------------------------------------------
+
+function CrimeSceneTab({ incident }) {
+  return (
+    <div className="space-y-4">
+      <div
+        className="rounded-xl border p-6 flex items-start gap-4"
+        style={{
+          borderColor: "rgba(139,92,246,0.4)",
+          backgroundColor: "rgba(139,92,246,0.06)",
+        }}
+      >
+        <div
+          className="shrink-0 h-12 w-12 rounded-xl flex items-center justify-center text-2xl"
+          style={{
+            background: "rgba(139,92,246,0.15)",
+            border: "1px solid rgba(139,92,246,0.45)",
+          }}
+          aria-hidden="true"
+        >
+          📄
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-base font-bold text-white">
+            Generate CrimeScene Report
+          </div>
+          <div className="text-[12px] text-white/60 mt-1 leading-relaxed">
+            AI-written executive narrative delivered as PDF. Summarizes
+            the incident, attacker behavior, dwell time, and
+            remediation steps.
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              type="button"
+              disabled
+              className="px-4 py-2 text-[12px] font-semibold rounded-xl border cursor-not-allowed"
+              style={{
+                color: "#C4B5FD",
+                borderColor: "rgba(139,92,246,0.45)",
+                backgroundColor: "rgba(139,92,246,0.18)",
+              }}
+            >
+              Generate Report
+            </button>
+            <span
+              className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border whitespace-nowrap"
+              style={{
+                color: "#3B82F6",
+                borderColor: "rgba(37,99,235,0.4)",
+                backgroundColor: "rgba(37,99,235,0.14)",
+              }}
+            >
+              Coming in Phase 3
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {incident.summary && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
+            Report preview (narrative stub)
+          </div>
+          <div
+            className="rounded-lg border border-white/5 px-4 py-3 text-[12px] text-white/70 leading-relaxed"
+            style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
+          >
+            {incident.summary}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Th11({ children }) {
+  return (
+    <th className="text-left px-2 py-1.5 text-[9px] uppercase tracking-wider text-white/40 font-semibold bg-white/[0.02]">
+      {children}
+    </th>
   );
 }
 
