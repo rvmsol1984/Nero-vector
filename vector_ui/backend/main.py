@@ -833,8 +833,8 @@ def sources_inky_count() -> dict:
 # ============================================================================
 
 @app.get("/api/ioc/matches")
-def ioc_matches(limit: int = Query(50, ge=1, le=500)) -> list[dict]:
-    """Recent OpenCTI-backed IOC matches across every tenant."""
+def ioc_matches(limit: int = Query(50, ge=1, le=500), tenant: str | None = Query(None)) -> list[dict]:
+    """Recent OpenCTI-backed IOC matches, optionally filtered by tenant."""
     return db.fetch_all(
         """
         SELECT
@@ -855,10 +855,11 @@ def ioc_matches(limit: int = Query(50, ge=1, le=500)) -> list[dict]:
             ve.workload
         FROM vector_ioc_matches m
         LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
+        WHERE (%s::text IS NULL OR m.client_name = %s)
         ORDER BY m.matched_at DESC
         LIMIT %s
         """,
-        (limit,),
+        (tenant, tenant, limit),
     )
 
 
