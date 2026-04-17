@@ -2142,6 +2142,77 @@ def governance_mfa_changes(
     )
 
 
+@app.get("/api/governance/mfa-methods")
+def governance_mfa_methods(tenant: str | None = Query(None)) -> list[dict]:
+    """List primary MFA method for all users via Microsoft Graph
+    authenticationMethods API. Works for any tenant."""
+    tenant_name = tenant or _GCS
+    # Get tenant_id from DB
+    row = db.fetch_one(
+        "SELECT DISTINCT tenant_id FROM vector_events WHERE client_name = %s LIMIT 1",
+        (tenant_name,)
+    )
+    if not row:
+        return []
+    tid = row["tenant_id"]
+    # Get all users for this tenant
+    users = db.fetch_all(
+        """
+        SELECT DISTINCT user_id FROM vector_events
+        WHERE client_name = %s
+          AND user_id LIKE '%%@%%'
+          AND user_id NOT LIKE 'ServicePrincipal_%%'
+        ORDER BY user_id
+        LIMIT 200
+        """,
+        (tenant_name,)
+    )
+    results = []
+    for u in users:
+        upn = u["user_id"]
+        try:
+            path = f"/users/{urllib.parse.quote(upn, safe='@')}/authentication/methods"
+            data = _graph_get(path, tenant_id=tid)
+            methods = data.get("value") or []
+            method_types = []
+            for m in methods:
+                odata = m.get("@odata.type", "")
+                if "microsoftAuthenticator" in odata:
+                    method_types.append("Microsoft Authenticator")
+                elif "phone" in odata:
+                    method_types.append("Phone (SMS/Call)")
+                elif "fido2" in odata:
+                    method_types.append("FIDO2 Key")
+                elif "windowsHello" in odata:
+                    method_types.append("Windows Hello")
+                elif "email" in odata:
+                    method_types.append("Email OTP")
+                elif "temporaryAccessPass" in odata:
+                    method_types.append("Temporary Pass")
+                elif "password" in odata:
+                    pass  # skip password, not MFA
+                elif odata:
+                    method_types.append(odata.split("#")[-1])
+            has_mfa = len(method_types) > 0
+            results.append({
+                "user_id": upn,
+                "client_name": tenant_name,
+                "has_mfa": has_mfa,
+                "methods": method_types,
+                "method_count": len(method_types),
+            })
+        except Exception:
+            results.append({
+                "user_id": upn,
+                "client_name": tenant_name,
+                "has_mfa": None,
+                "methods": [],
+                "method_count": 0,
+            })
+    # Sort: no MFA first, then by user
+    results.sort(key=lambda r: (r["has_mfa"] is not False, r["user_id"]))
+    return results
+
 @app.get("/api/governance/privileged-roles")
 def governance_privileged_roles(
     tenant: str | None = Query(None),

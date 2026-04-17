@@ -12,6 +12,7 @@ export default function IdentityAccess() {
       tabIds={[
         "passwordSpray",
         "mfaChanges",
+        "mfaMethods",
         "privilegedRoles",
         "staleAccounts",
         "oauthApps",

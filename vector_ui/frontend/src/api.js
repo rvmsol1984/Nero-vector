@@ -116,6 +116,7 @@ export const api = {
   govPasswordSpray:      (tenant) => get(`/api/governance/password-spray${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govStaleAccounts:      (tenant) => get(`/api/governance/stale-accounts${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govMfaChanges:         (tenant) => get(`/api/governance/mfa-changes${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govMfaMethods:         (tenant) => get(`/api/governance/mfa-methods${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govPrivilegedRoles:    (tenant) => get(`/api/governance/privileged-roles${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govGuestUsers:         (tenant) => get(`/api/governance/guest-users${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govEdrAlerts:          (tenant) => get(`/api/governance/edr-alerts${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),

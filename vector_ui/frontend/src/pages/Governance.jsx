@@ -23,6 +23,7 @@ const TABS = [
   { id: "passwordSpray",     label: "Password Spray",    endpoint: "govPasswordSpray",     severity: "critical", withTenant: false },
   { id: "staleAccounts",     label: "Stale Accounts",    endpoint: "govStaleAccounts",     severity: "monitor",  withTenant: false },
   { id: "mfaChanges",        label: "MFA Changes",       endpoint: "govMfaChanges",        severity: "review",   withTenant: false },
+  { id: "mfaMethods",        label: "MFA Methods",       endpoint: "govMfaMethods",        severity: "review",   withTenant: false },
   { id: "privilegedRoles",   label: "Privileged Roles",  endpoint: "govPrivilegedRoles",   severity: "critical", withTenant: false },
   { id: "guestUsers",        label: "Guest Users",       endpoint: "govGuestUsers",        severity: "monitor",  withTenant: false },
   { id: "unmanagedDevices",  label: "Unmanaged Devices", endpoint: "govUnmanagedDevices",  severity: "review",   withTenant: false },
@@ -337,6 +338,7 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
     case "passwordSpray":     return <PasswordSprayTable rows={rows} />;
     case "staleAccounts":     return <StaleAccountsTable rows={rows} />;
     case "mfaChanges":        return <MfaChangesTable rows={rows} />;
+    case "mfaMethods":        return <MfaMethodsTable rows={rows} />;
     case "privilegedRoles":   return <PrivilegedRolesTable rows={rows} />;
     case "guestUsers":        return <GuestUsersTable rows={rows} tenantName={tenantName} />;
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} tenantId={tenantId} tenantName={tenantName} />;
@@ -2264,6 +2266,49 @@ function IocMatchesTable({ rows }) {
               </Fragment>
             );
           })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+function MfaMethodsTable({ rows }) {
+  return (
+    <TableCard>
+      <table className="min-w-full text-[11px]">
+        <thead>
+          <tr>
+            <Th>User</Th>
+            <Th>MFA Status</Th>
+            <Th>Methods</Th>
+            <Th align="right">Count</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((row) => (
+            <tr key={row.user_id} className="hover:bg-white/[0.03]">
+              <td className="px-4 py-2.5">
+                <UserCell entityKey={`${row.client_name}::${row.user_id}`} userId={row.user_id} clientName={row.client_name} />
+              </td>
+              <td className="px-4 py-2.5">
+                {row.has_mfa === null ? (
+                  <span className="text-white/30 text-[10px]">unknown</span>
+                ) : row.has_mfa ? (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-success/10 text-success border border-success/20">ENROLLED</span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-critical/10 text-critical border border-critical/20">NO MFA</span>
+                )}
+              </td>
+              <td className="px-4 py-2.5 text-white/70">
+                {row.methods && row.methods.length > 0
+                  ? row.methods.join(", ")
+                  : <span className="text-white/30">—</span>}
+              </td>
+              <td className="px-4 py-2.5 text-right tabular-nums text-white/50">
+                {row.method_count || 0}
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </TableCard>
