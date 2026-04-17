@@ -167,7 +167,7 @@ export default function UserDetail() {
             />
             <InfoPill
               label="Password"
-              value={ep.last_password_change ? fmtRelative(ep.last_password_change) : "—"}
+              value={ep.last_password_change ? new Date(ep.last_password_change).toLocaleDateString("en-US", {month:"2-digit",day:"2-digit",year:"numeric"}) : "—"}
               color={passwordAgeColor(ep.last_password_change)}
             />
             <InfoPill

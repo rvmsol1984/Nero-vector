@@ -344,7 +344,7 @@ def user_enriched_profile(entity_key: str) -> dict:
         graph_user = _graph_get(
             f"/users/{upn}?$select=displayName,jobTitle,department,"
             "accountEnabled,lastPasswordChangeDateTime,mobilePhone,"
-            "officeLocation,createdDateTime,onPremisesSyncEnabled,"
+            "businessPhones,officeLocation,createdDateTime,onPremisesSyncEnabled,"
             "signInSessionsValidFromDateTime"
         )
         result["display_name"] = graph_user.get("displayName")
@@ -352,7 +352,8 @@ def user_enriched_profile(entity_key: str) -> dict:
         result["department"] = graph_user.get("department")
         result["account_enabled"] = graph_user.get("accountEnabled")
         result["last_password_change"] = graph_user.get("lastPasswordChangeDateTime")
-        result["mobile_phone"] = graph_user.get("mobilePhone")
+        business_phones = graph_user.get("businessPhones") or []
+        result["mobile_phone"] = business_phones[0] if business_phones else graph_user.get("mobilePhone")
         result["office_location"] = graph_user.get("officeLocation")
         result["created_datetime"] = graph_user.get("createdDateTime")
         result["on_premises_sync"] = graph_user.get("onPremisesSyncEnabled")
