@@ -506,6 +506,10 @@ class ScoringEngine:
                     r.evidence["vpn_info"] = vpn_info
 
         severity = self._severity_for(total_score)
+        # IOC match or malware always escalates to critical regardless of score
+        fired_rule_names = {r.rule_name for r in fired}
+        if "IOCMatch" in fired_rule_names or "MalwareDetected" in fired_rule_names:
+            severity = "critical"
         client_name = self._client_name_for(events, tenant_id)
         entity_key = f"{tenant_id}::{user_id}"
         first_seen, last_seen = self._timespan(events)
