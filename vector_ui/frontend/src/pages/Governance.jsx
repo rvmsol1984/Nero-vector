@@ -263,6 +263,7 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
         externalError={raw?.external_error}
         claudeConnector={claudeConnector}
         tenantId={tenantId}
+        tenantName={tenantName}
       />
     );
   }
@@ -1070,7 +1071,7 @@ function aiToolDisplay(remoteUrl) {
   return { label: host, host };
 }
 
-function AiActivityTab({ copilot, external, externalError, claudeConnector = {}, tenantId }) {
+function AiActivityTab({ copilot, external, externalError, claudeConnector = {}, tenantId, tenantName }) {
   const [subTab, setSubTab] = useState("copilot");
   const claudeTotal = (claudeConnector?.admin_grants?.length || 0) + (claudeConnector?.shadow_it_attempts?.length || 0);
   const SUB_TABS = [
