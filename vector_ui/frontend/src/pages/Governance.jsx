@@ -245,6 +245,16 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
 
   // AI Activity: render both sub-sections together, and only fall through
   // to the generic empty state when both are empty.
+  const GCS_ONLY_TABS = ["intuneDevices"];
+  const GCS_NAME = "GameChange Solar";
+  if (GCS_ONLY_TABS.includes(tabId) && tenantName && tenantName !== GCS_NAME) {
+    return (
+      <div className="card py-14 px-6 flex flex-col items-center text-center gap-3">
+        <div className="text-white/50 text-sm">This view requires Microsoft Graph API access</div>
+        <div className="text-white/30 text-xs">Currently only available for GameChange Solar (E5)</div>
+      </div>
+    );
+  }
   if (tabId === "aiActivity") {
     const copilot = Array.isArray(raw?.copilot) ? raw.copilot : [];
     const external = Array.isArray(raw?.external_ai) ? raw.external_ai : [];
@@ -319,7 +329,7 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
     case "staleAccounts":     return <StaleAccountsTable rows={rows} />;
     case "mfaChanges":        return <MfaChangesTable rows={rows} />;
     case "privilegedRoles":   return <PrivilegedRolesTable rows={rows} />;
-    case "guestUsers":        return <GuestUsersTable rows={rows} />;
+    case "guestUsers":        return <GuestUsersTable rows={rows} tenantName={tenantName} />;
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} tenantId={tenantId} tenantName={tenantName} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} tenantId={tenantId} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
@@ -958,7 +968,7 @@ function PrivilegedRolesTable({ rows }) {
   );
 }
 
-function GuestUsersTable({ rows }) {
+function GuestUsersTable({ rows, tenantName }) {
   return (
     <TableCard>
       <table className="min-w-full text-[11px]">
@@ -976,7 +986,7 @@ function GuestUsersTable({ rows }) {
             <tr key={row.id || row.userPrincipalName} className="hover:bg-white/[0.03]">
               <td className="px-4 py-2.5">
                 <div className="flex items-center gap-2">
-                  <Avatar email={row.mail || row.displayName} tenant={TENANT} size={28} />
+                  <Avatar email={row.mail || row.displayName} tenant={tenantName || DEFAULT_TENANT} size={28} />
                   <span className="font-medium truncate max-w-[220px]">
                     {row.displayName || <span className="text-white/40">—</span>}
                   </span>
