@@ -2369,9 +2369,10 @@ DeviceNetworkEvents
 
 
 @app.get("/api/governance/ai-activity")
-def governance_ai_activity() -> dict:
+def governance_ai_activity(tenant: str | None = Query(None)) -> dict:
     """Combined Microsoft Copilot usage (from UAL) + external AI tool
-    access (from Defender Advanced Hunting) for the GCS tenant."""
+    access (from Defender Advanced Hunting)."""
+    tenant_filter = tenant or _GCS
     copilot = db.fetch_all(
         """
         SELECT
@@ -2391,7 +2392,7 @@ def governance_ai_activity() -> dict:
         ORDER BY event_count DESC
         LIMIT 200
         """,
-        (_GCS,),
+        (tenant_filter,),
     )
 
     external_ai: list[dict] = []
