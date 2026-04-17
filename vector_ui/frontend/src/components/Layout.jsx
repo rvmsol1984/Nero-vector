@@ -390,7 +390,7 @@ export default function Layout() {
         </aside>
 
         <main className="flex-1 overflow-auto pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-0">
-          <div className="max-w-6xl mx-auto px-4 md:px-6 py-5">
+          <div className="max-w-7xl mx-auto px-4 md:px-6 py-5">
             <Outlet />
           </div>
         </main>
