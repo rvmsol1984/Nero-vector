@@ -1259,9 +1259,9 @@ def watchlist(status: str | None = Query(None)) -> list[dict]:
               ORDER BY i.timestamp DESC LIMIT 1) AS latest_verdict
         FROM vector_watchlist w
         WHERE (%s::text IS NULL OR w.status = %s)
-          AND w.user_email NOT LIKE 'S-1-5-%'
-          AND w.user_email NOT LIKE 'S-1-%'
-          AND w.user_email LIKE '%@%'
+          AND w.user_email NOT LIKE 'S-1-5-%%'
+          AND w.user_email NOT LIKE 'S-1-%%'
+          AND w.user_email LIKE '%%@%%'
         ORDER BY w.created_at DESC
         LIMIT 200
         """,
