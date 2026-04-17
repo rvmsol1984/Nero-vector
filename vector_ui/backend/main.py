@@ -2159,12 +2159,13 @@ def governance_mfa_methods(tenant: str | None = Query(None)) -> list[dict]:
     # Get tenant domain from a known user
     domain_row = db.fetch_one(
         """
-        SELECT user_id FROM vector_events
+        SELECT user_id, COUNT(*) as cnt FROM vector_events
         WHERE client_name = %s
           AND user_id LIKE '%%@%%'
           AND user_id NOT LIKE 'ServicePrincipal_%%'
           AND user_id NOT LIKE '%%#EXT#%%'
-        ORDER BY COUNT(*) DESC
+        GROUP BY user_id
+        ORDER BY cnt DESC
         LIMIT 1
         """,
         (tenant_name,)
