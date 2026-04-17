@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
-import { api } from "../api.js";
 import { signOut, useAuth } from "../auth.jsx";
 import Logo from "./Logo.jsx";
-import { fmtNumber, initialsFrom } from "../utils/format.js";
+import { initialsFrom } from "../utils/format.js";
 
 // Responsive layout:
 //   desktop (>= 768px): fixed 220px sidebar on the left, 8 nav items
@@ -13,34 +12,22 @@ import { fmtNumber, initialsFrom } from "../utils/format.js";
 // Top bar is shared by both breakpoints.
 
 const SIDEBAR_ITEMS = [
-  { to: "/dashboard",  label: "Dashboard",           icon: "dashboard"  },
-  { to: "/incidents",  label: "Incidents",           icon: "alert"      },
-  { to: "/watchlist",  label: "Watchlist",           icon: "eye",      phase2: true },
-  { to: "/events",     label: "Events",              icon: "events"     },
-  { to: "/users",      label: "Users",               icon: "users"      },
-  { to: "/baseline",   label: "Baseline",            icon: "activity", phase2: true },
-  // Governance split into 5 focused boards. Ordered so the
-  // operator-facing pages (identity, data, devices, threats) come
-  // before the forward-looking AI / Shadow-IT view.
-  { to: "/identity",   label: "Identity & Access",   icon: "identity"   },
-  { to: "/data",       label: "Data & Sharing",      icon: "data"       },
-  { to: "/devices",    label: "Devices",             icon: "devices"    },
-  { to: "/threats",    label: "Threat Intelligence", icon: "threats"    },
-  { to: "/ai",         label: "AI & Shadow IT",      icon: "ai"         },
-  { to: "/sources",    label: "Sources",             icon: "sources"    },
+  { to: "/dashboard",  label: "Dashboard",  icon: "dashboard"  },
+  { to: "/incidents",  label: "Incidents",  icon: "alert",   phase2: true },
+  { to: "/watchlist",  label: "Watchlist",  icon: "eye",     phase2: true },
+  { to: "/events",     label: "Events",     icon: "events"     },
+  { to: "/users",      label: "Users",      icon: "users"      },
+  { to: "/baseline",   label: "Baseline",   icon: "activity", phase2: true },
+  { to: "/governance", label: "Governance", icon: "governance" },
+  { to: "/sources",    label: "Sources",    icon: "sources"    },
 ];
 
 const BOTTOM_TABS = [
-  // The mobile bottom bar only fits 5 items, so it gets the high-
-  // traffic pages: dashboard + events + users, plus identity +
-  // threats as the two most operator-clicked split-governance
-  // boards. Data / Devices / AI are still reachable via the slide-
-  // out drawer on mobile.
-  { to: "/dashboard",  label: "Dashboard",  icon: "dashboard" },
-  { to: "/events",     label: "Events",     icon: "events"    },
-  { to: "/users",      label: "Users",      icon: "users"     },
-  { to: "/identity",   label: "Identity",   icon: "identity"  },
-  { to: "/threats",    label: "Threats",    icon: "threats"   },
+  { to: "/dashboard",  label: "Dashboard",  icon: "dashboard"  },
+  { to: "/events",     label: "Events",     icon: "events"     },
+  { to: "/users",      label: "Users",      icon: "users"      },
+  { to: "/governance", label: "Governance", icon: "governance" },
+  { to: "/sources",    label: "Sources",    icon: "sources"    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -116,53 +103,6 @@ function Icon({ name, size = 18 }) {
           <path d="M9 12l2 2 4-4" />
         </svg>
       );
-    case "identity":
-      // Person silhouette inside a shield -- "identity + access".
-      return (
-        <svg {...p}>
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-          <circle cx="12" cy="10" r="2.4" />
-          <path d="M7.8 17c.6-2 2.3-3 4.2-3s3.6 1 4.2 3" />
-        </svg>
-      );
-    case "data":
-      // Folder with a horizontal ruling line -- "data / sharing".
-      return (
-        <svg {...p}>
-          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-          <line x1="6" y1="13" x2="18" y2="13" />
-        </svg>
-      );
-    case "devices":
-      // Laptop + phone glyph so the icon still reads well at 16px.
-      return (
-        <svg {...p}>
-          <rect x="2"  y="6"  width="13" height="9" rx="1" />
-          <line x1="1" y1="18" x2="16" y2="18" />
-          <rect x="17" y="9"  width="5"  height="10" rx="1" />
-          <line x1="19" y1="17" x2="20" y2="17" />
-        </svg>
-      );
-    case "threats":
-      // Crosshair / target reticle -- "threat intelligence".
-      return (
-        <svg {...p}>
-          <circle cx="12" cy="12" r="9" />
-          <circle cx="12" cy="12" r="4" />
-          <line x1="12" y1="2"  x2="12" y2="6" />
-          <line x1="12" y1="18" x2="12" y2="22" />
-          <line x1="2"  y1="12" x2="6"  y2="12" />
-          <line x1="18" y1="12" x2="22" y2="12" />
-        </svg>
-      );
-    case "ai":
-      // Four-point sparkle + smaller sparkle -- the gen-AI convention.
-      return (
-        <svg {...p}>
-          <path d="M12 3 l1.6 4.4 L18 9 l-4.4 1.6 L12 15 l-1.6-4.4 L6 9 l4.4-1.6 z" />
-          <path d="M18 15 l0.7 1.9 L21 18 l-2.3 0.6 L18 21 l-0.7-2.3 L15 18 l2.3-0.6 z" />
-        </svg>
-      );
     case "sources":
       return (
         <svg {...p}>
@@ -206,37 +146,17 @@ function P2Badge() {
   );
 }
 
-function OpenIncidentsBadge({ count }) {
-  if (!count) return null;
-  return (
-    <span
-      className="inline-flex items-center justify-center px-1.5 py-0.5 text-[9px] font-bold rounded tracking-wider tabular-nums"
-      style={{
-        color: "#EF4444",
-        backgroundColor: "rgba(239,68,68,0.15)",
-        border: "1px solid rgba(239,68,68,0.45)",
-        minWidth: 18,
-      }}
-      title={`${count} open incident${count === 1 ? "" : "s"}`}
-    >
-      {fmtNumber(count)}
-    </span>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // sidebar body (shared between desktop sidebar + mobile drawer)
 // ---------------------------------------------------------------------------
 
-function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
+function SidebarBody({ onNavigate, showCloseButton, onClose }) {
   return (
     <>
       <div className="flex items-center justify-between px-5 py-5 border-b border-white/5">
         <div className="flex items-center gap-3 min-w-0">
           <Logo size={32} />
-          <div className="text-[10px] tracking-[0.35em] text-white/40 font-semibold">
-            VECTOR
-          </div>
+
         </div>
         {showCloseButton && (
           <button
@@ -271,11 +191,7 @@ function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
               <Icon name={item.icon} size={16} />
               <span>{item.label}</span>
             </span>
-            {item.to === "/incidents" && openIncidents > 0 ? (
-              <OpenIncidentsBadge count={openIncidents} />
-            ) : item.phase2 ? (
-              <P2Badge />
-            ) : null}
+            {item.phase2 && <P2Badge />}
           </NavLink>
         ))}
       </nav>
@@ -295,7 +211,6 @@ function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
 export default function Layout() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [openIncidents, setOpenIncidents] = useState(0);
   const location = useLocation();
   const user = useAuth();
 
@@ -304,29 +219,6 @@ export default function Layout() {
     setDrawerOpen(false);
     setUserMenuOpen(false);
   }, [location.pathname]);
-
-  // Poll the /api/incidents/stats endpoint every 30s so the sidebar
-  // badge stays in sync with newly-confirmed incidents without
-  // requiring a full page refresh. Auth failures are swallowed
-  // silently -- the badge just stays at its last known count.
-  useEffect(() => {
-    if (!user) return undefined;
-    let cancel = false;
-    async function load() {
-      try {
-        const stats = await api.incidentStats();
-        if (!cancel) setOpenIncidents(Number(stats?.open || 0));
-      } catch {
-        /* ignore -- keep last value */
-      }
-    }
-    load();
-    const t = setInterval(load, 30000);
-    return () => {
-      cancel = true;
-      clearInterval(t);
-    };
-  }, [user]);
 
   // Prevent page scroll while the drawer is open on mobile.
   useEffect(() => {
@@ -466,7 +358,7 @@ export default function Layout() {
             borderRight: "1px solid rgba(255,255,255,0.05)",
           }}
         >
-          <SidebarBody openIncidents={openIncidents} />
+          <SidebarBody />
         </aside>
 
         <main className="flex-1 overflow-auto pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-0">
@@ -526,7 +418,6 @@ export default function Layout() {
           onNavigate={() => setDrawerOpen(false)}
           showCloseButton
           onClose={() => setDrawerOpen(false)}
-          openIncidents={openIncidents}
         />
       </aside>
     </div>
