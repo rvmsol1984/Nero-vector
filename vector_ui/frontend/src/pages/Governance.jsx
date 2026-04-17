@@ -245,7 +245,7 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
 
   // AI Activity: render both sub-sections together, and only fall through
   // to the generic empty state when both are empty.
-  const GCS_ONLY_TABS = ["intuneDevices", "threatLocker", "edrAlerts"];
+  const GCS_ONLY_TABS = ["intuneDevices", "threatLocker"];
   const GCS_NAME = "GameChange Solar";
   if (GCS_ONLY_TABS.includes(tabId) && tenantName && tenantName !== GCS_NAME) {
     return (
