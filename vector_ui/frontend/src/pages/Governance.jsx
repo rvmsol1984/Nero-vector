@@ -158,7 +158,7 @@ export default function Governance({ pageTitle, subtitle, tabIds } = {}) {
       >
         {activeTabs.filter(t => {
           if (t.id === "threatLocker" && selectedTenant !== DEFAULT_TENANT) return false;
-          if (t.id === "mfaMethods" && selectedTenant === DEFAULT_TENANT) return false;
+          if (t.id === "mfaMethods") return false;  // TODO: needs DB caching layer
           return true;
         }).map((t) => {
           const rows = data[t.id];
