@@ -202,6 +202,8 @@ export default function Governance() {
       <TabPanel
         tabId={activeTab}
         rows={data[activeTab]}
+        tenantId={selectedTenantId}
+        tenantName={selectedTenant}
         loading={loadingTabs.has(activeTab)}
         error={errors[activeTab]}
       />
@@ -213,7 +215,7 @@ export default function Governance() {
 // tab dispatch
 // ---------------------------------------------------------------------------
 
-function TabPanel({ tabId, rows: raw, loading, error }) {
+function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
   if (raw === undefined || loading) {
     return (
       <div className="card py-12 text-center text-white/40 text-sm">
@@ -1152,7 +1154,7 @@ function AiCopilotSection({ rows }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row) => {
-                const entityKey = `${selectedTenantId}::${row.user_id}`;
+                const entityKey = `${tenantId}::${row.user_id}`;
                 const types = Array.isArray(row.event_types) ? row.event_types : [];
                 return (
                   <tr key={row.user_id} className="hover:bg-white/[0.03]">
@@ -1248,7 +1250,7 @@ function AiExternalSection({ rows, error }) {
             <tbody className="divide-y divide-white/5">
               {rows.map((row, i) => {
                 const entityKey = row.user
-                  ? `${selectedTenantId}::${row.user}`
+                  ? `${tenantId}::${row.user}`
                   : null;
                 const { label: toolLabel, host } = aiToolDisplay(row.tool);
                 const devices = Array.isArray(row.devices) ? row.devices : [];
@@ -1531,7 +1533,7 @@ function IntuneDevicesTable({ rows }) {
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
             const isOpen = expanded === row.user;
-            const entityKey = `${selectedTenantId}::${row.user}`;
+            const entityKey = `${tenantId}::${row.user}`;
             return (
               <Fragment key={row.user}>
                 <tr
