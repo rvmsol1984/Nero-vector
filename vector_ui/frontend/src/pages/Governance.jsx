@@ -146,7 +146,7 @@ export default function Governance() {
       <div
         className="flex flex-wrap gap-1 border-b border-white/5 mb-4"
       >
-        {TABS.map((t) => {
+        {TABS.filter(t => t.id !== "threatLocker" || selectedTenant === DEFAULT_TENANT).map((t) => {
           const rows = data[t.id];
           const visited = rows !== undefined;
           const isLoading = loadingTabs.has(t.id);
