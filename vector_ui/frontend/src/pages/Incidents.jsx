@@ -182,6 +182,7 @@ function Chevron({ open }) {
 export default function Incidents() {
   const [stats, setStats] = useState(null);
   const [rows, setRows] = useState(null);
+  const [statusFilter, setStatusFilter] = useState("open");
   const [err, setErr] = useState(null);
   const [openId, setOpenId] = useState(null);
 
@@ -282,6 +283,22 @@ export default function Incidents() {
         />
       </div>
 
+      {/* ----- status filter ----- */}
+      <div className="flex gap-2">
+        {["open", "all", "closed"].map((f) => (
+          <button
+            key={f}
+            onClick={() => setStatusFilter(f)}
+            className={`px-3 py-1 rounded-xl text-xs font-semibold uppercase tracking-wider transition-all ${
+              statusFilter === f
+                ? "bg-primary text-white"
+                : "bg-white/5 text-white/50 hover:bg-white/10"
+            }`}
+          >
+            {f === "all" ? "All" : f === "open" ? "Open" : "Closed"}
+          </button>
+        ))}
+      </div>
       {/* ----- incidents table ----- */}
       {rows == null ? (
         <div className="card py-12 text-center text-white/40 text-sm">
@@ -291,7 +308,7 @@ export default function Incidents() {
         <EmptyState />
       ) : (
         <IncidentsTable
-          rows={rows}
+          rows={statusFilter === "all" ? rows : rows.filter(r => r.status === statusFilter)}
           openId={openId}
           setOpenId={setOpenId}
           onStatusChange={applyStatusChange}
