@@ -655,6 +655,19 @@ function EvidenceRow({ signal }) {
     signal.event_type ||
     "signal";
   const ts = signal.timestamp || signal.time || signal.event_time || signal.added_at;
+  // Extract nested evidence details from scoring engine signal
+  const ev = signal.evidence || {};
+  const details = [];
+  if (ev.new_country)        details.push(`Country: ${ev.new_country}`);
+  if (ev.baseline_countries) details.push(`Baseline: ${(ev.baseline_countries || []).join(", ")}`);
+  if (ev.ip || ev.client_ip) details.push(`IP: ${ev.ip || ev.client_ip}`);
+  if (ev.ioc_value)          details.push(`IOC: ${ev.ioc_value}`);
+  if (ev.confidence)         details.push(`Confidence: ${ev.confidence}`);
+  if (ev.hour !== undefined) details.push(`Hour: ${ev.hour}:00 UTC`);
+  if (ev.login_time)         details.push(`Login: ${ev.login_time}`);
+  if (ev.file_count)         details.push(`Files: ${ev.file_count}`);
+  if (ev.threat_type)        details.push(`Type: ${ev.threat_type}`);
+  const detailStr = signal.detail || details.join(" · ");
   return (
     <div className="px-3 py-2 flex items-start gap-3 text-[11px]">
       <SourceBadge source={source} />
@@ -662,12 +675,12 @@ function EvidenceRow({ signal }) {
         <div className="text-white/80 truncate" title={description}>
           {description}
         </div>
-        {signal.detail && (
+        {detailStr && (
           <div
             className="text-white/40 text-[10px] truncate mt-0.5"
-            title={signal.detail}
+            title={detailStr}
           >
-            {signal.detail}
+            {detailStr}
           </div>
         )}
       </div>
