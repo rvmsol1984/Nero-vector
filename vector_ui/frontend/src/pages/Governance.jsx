@@ -75,7 +75,7 @@ export default function Governance() {
       return next;
     });
 
-    const promise = tab.withTenant ? fn(selectedTenant) : fn();
+    const promise = fn(selectedTenant);
     promise
       .then((rows) => {
         if (cancel) return;

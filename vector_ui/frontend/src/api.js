@@ -102,25 +102,25 @@ export const api = {
 
   // ----- extended GCS governance (tenant hard-coded server-side) --------
   govExternalForwarding: () => get("/api/governance/external-forwarding"),
-  govUnmanagedDevices:   () => get("/api/governance/unmanaged-devices"),
+  govUnmanagedDevices:   (tenant) => get(`/api/governance/unmanaged-devices${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govUnmanagedDevicesDetail:
     (userId) =>
       get(`/api/governance/unmanaged-devices/${encodeURIComponent(userId)}/devices`),
-  govIntuneDevices:      () => get("/api/governance/intune-devices"),
+  govIntuneDevices:      (tenant) => get(`/api/governance/intune-devices${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govIntuneDevicesUser:  (upn) =>
     get(`/api/governance/intune-devices/${encodeURIComponent(upn)}`),
-  govAiActivity:         () => get("/api/governance/ai-activity"),
+  govAiActivity:         (tenant) => get(`/api/governance/ai-activity${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
   govAiActivityRaw:      () => get("/api/governance/ai-activity/external-raw"),
-  govBrokenInheritance:  () => get("/api/governance/broken-inheritance"),
-  govOauthApps:          () => get("/api/governance/oauth-apps"),
-  govPasswordSpray:      () => get("/api/governance/password-spray"),
-  govStaleAccounts:      () => get("/api/governance/stale-accounts"),
-  govMfaChanges:         () => get("/api/governance/mfa-changes"),
-  govPrivilegedRoles:    () => get("/api/governance/privileged-roles"),
-  govGuestUsers:         () => get("/api/governance/guest-users"),
-  govEdrAlerts:          () => get("/api/governance/edr-alerts"),
-  govThreatLocker:       () => get("/api/governance/threatlocker"),
-  govIocMatches:         () => get("/api/ioc/matches?limit=200"),
+  govBrokenInheritance:  (tenant) => get(`/api/governance/broken-inheritance${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govOauthApps:          (tenant) => get(`/api/governance/oauth-apps${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govPasswordSpray:      (tenant) => get(`/api/governance/password-spray${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govStaleAccounts:      (tenant) => get(`/api/governance/stale-accounts${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govMfaChanges:         (tenant) => get(`/api/governance/mfa-changes${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govPrivilegedRoles:    (tenant) => get(`/api/governance/privileged-roles${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govGuestUsers:         (tenant) => get(`/api/governance/guest-users${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govEdrAlerts:          (tenant) => get(`/api/governance/edr-alerts${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govThreatLocker:       (tenant) => get(`/api/governance/threatlocker${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`),
+  govIocMatches:         (tenant) => get(`/api/ioc/matches?limit=200${tenant ? `&tenant=${encodeURIComponent(tenant)}` : ""}`),
 
   // ----- incidents -----------------------------------------------------
   claudeConnector:    () => get("/api/governance/claude-connector"),
