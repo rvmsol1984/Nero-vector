@@ -319,7 +319,7 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
     case "mfaChanges":        return <MfaChangesTable rows={rows} />;
     case "privilegedRoles":   return <PrivilegedRolesTable rows={rows} />;
     case "guestUsers":        return <GuestUsersTable rows={rows} />;
-    case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} tenantId={tenantId} />;
+    case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} tenantId={tenantId} tenantName={tenantName} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
     case "threatLocker":      return <ThreatLockerTable rows={rows} />;
@@ -1115,24 +1115,24 @@ function AiActivityTab({ copilot, external, externalError, claudeConnector = {},
       </div>
 
       {subTab === "copilot" ? (
-        <AiCopilotSection rows={copilot} tenantId={tenantId} />
+        <AiCopilotSection rows={copilot} tenantId={tenantId} tenantName={tenantName} />
       ) : subTab === "claude" ? (
         <AiClaudeConnectorSection data={claudeConnector} />
       ) : (
-        <AiExternalSection rows={external} error={externalError} tenantId={tenantId} />
+        <AiExternalSection rows={external} error={externalError} tenantId={tenantId} tenantName={tenantName} />
       )}
     </div>
   );
 }
 
-function AiCopilotSection({ rows, tenantId }) {
+function AiCopilotSection({ rows, tenantId, tenantName }) {
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
         <div>
           <div className="text-base font-bold">Microsoft Copilot</div>
           <div className="text-[11px] text-white/50 mt-0.5">
-            Copilot workload usage from UAL for GameChange Solar
+            Copilot workload usage from UAL for {tenantName || "this tenant"}
           </div>
         </div>
         <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-semibold bg-primary/15 border border-primary/40 text-primary-light tabular-nums">
@@ -1165,7 +1165,7 @@ function AiCopilotSection({ rows, tenantId }) {
                       <UserCell
                         entityKey={entityKey}
                         userId={row.user_id}
-                        clientName="GameChange Solar"
+                        clientName={tenantName || DEFAULT_TENANT}
                       />
                     </td>
                     <td className="px-4 py-2.5 text-right tabular-nums">
@@ -1206,7 +1206,7 @@ function AiCopilotSection({ rows, tenantId }) {
   );
 }
 
-function AiExternalSection({ rows, error, tenantId }) {
+function AiExternalSection({ rows, error, tenantId, tenantName }) {
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
@@ -1264,7 +1264,7 @@ function AiExternalSection({ rows, error, tenantId }) {
                         <UserCell
                           entityKey={entityKey}
                           userId={row.user}
-                          clientName="GameChange Solar"
+                          clientName={tenantName || DEFAULT_TENANT}
                         />
                       ) : (
                         <span className="text-white/40">—</span>
@@ -1374,7 +1374,7 @@ function AiClaudeConnectorSection({ data = {} }) {
     </div>
   );
 }
-function UnmanagedDevicesTable({ rows, tenantId }) {
+function UnmanagedDevicesTable({ rows, tenantId, tenantName }) {
   const [expanded, setExpanded] = useState(null);
   // Per-user cache so re-opening doesn't refetch.
   const [detailCache, setDetailCache] = useState({});
@@ -1552,7 +1552,7 @@ function IntuneDevicesTable({ rows }) {
                     <UserCell
                       entityKey={entityKey}
                       userId={row.user}
-                      clientName="GameChange Solar"
+                      clientName={tenantName || DEFAULT_TENANT}
                     />
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
