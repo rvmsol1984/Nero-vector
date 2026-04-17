@@ -784,10 +784,21 @@ function TimelineTab({ incident }) {
 
 function timelineTarget(r) {
   const raw = r.raw_json || {};
+  // Extract filename from full SharePoint URL
+  const objId = raw.ObjectId || raw.SourceFileName || raw.DestinationFileName || "";
+  let fileName = objId;
+  if (objId && objId.includes("/")) {
+    fileName = objId.split("/").pop() || objId;
+  }
   return (
     raw.DestinationFileName ||
+    (fileName && fileName !== objId ? fileName : null) ||
+    raw.SourceFileName ||
     raw.ObjectId ||
     raw.Subject ||
+    raw.MailboxOwnerUPN ||
+    raw.TargetUserOrGroupName ||
+    raw.ModifiedProperties?.[0]?.Name ||
     r.result_status ||
     null
   );
