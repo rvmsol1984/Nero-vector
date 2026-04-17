@@ -121,6 +121,13 @@ export default function Governance() {
         <select
           value={selectedTenant}
           onChange={(e) => {
+            if (!e.target.value) {
+              setSelectedTenant("");
+              setSelectedTenantId("");
+              _currentTenantId = "";
+              setData({});
+              return;
+            }
             const t = tenants.find((x) => x.client_name === e.target.value);
             if (t) {
               setSelectedTenant(t.client_name);
@@ -131,7 +138,8 @@ export default function Governance() {
           }}
           className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-primary-light"
         >
-          {tenants.map((t) => (
+          <option value="">All Tenants</option>
+        {tenants.map((t) => (
             <option key={t.client_name} value={t.client_name}>
               {t.client_name}
             </option>
