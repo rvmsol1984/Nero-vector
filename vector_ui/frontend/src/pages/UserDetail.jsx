@@ -13,6 +13,7 @@ import {
   deviceOs,
   filenameFromObjectId,
   fmtNumber,
+  fmtRelative,
   fmtTime,
   siteDomain,
 } from "../utils/format.js";
@@ -25,6 +26,8 @@ const TABS = [
   { id: "endpoint",      label: "Endpoint"     },
   { id: "threatlocker",  label: "ThreatLocker" },
   { id: "raw",           label: "Raw"          },
+  { id: "auth",          label: "Auth Methods" },
+  { id: "permissions",   label: "Permissions"  },
 ];
 
 // The backend accepts workloads/event_types as comma-separated lists, so we
@@ -42,7 +45,6 @@ const TAB_PAGE = { raw: 25 };
 
 export default function UserDetail() {
   const { entityKey: rawKey } = useParams();
-  // Router v6 normally decodes path params, but per spec we double-check.
   let entityKey = rawKey || "";
   try {
     entityKey = decodeURIComponent(entityKey);
@@ -52,6 +54,7 @@ export default function UserDetail() {
 
   const [profile, setProfile] = useState(null);
   const [profileErr, setProfileErr] = useState(null);
+  const [enriched, setEnriched] = useState(null);
   const [iocMatches, setIocMatches] = useState([]);
 
   const [tab, setTab] = useState("timeline");
@@ -59,63 +62,172 @@ export default function UserDetail() {
   useEffect(() => {
     setProfile(null);
     setProfileErr(null);
+    setEnriched(null);
     setIocMatches([]);
     api.userProfile(entityKey).then(setProfile).catch((e) => setProfileErr(e.message));
     api.userIoc(entityKey).then((r) => setIocMatches(r || [])).catch(() => setIocMatches([]));
+    // Enriched profile (Graph + stats) — fetch independently so the
+    // page renders with DB data first while the Graph calls finish.
+    fetch(`/api/users/${encodeURIComponent(entityKey)}/profile`, {
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        ...(localStorage.getItem("vector_token")
+          ? { Authorization: `Bearer ${localStorage.getItem("vector_token")}` }
+          : {}),
+      },
+    })
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((d) => setEnriched(d || {}))
+      .catch(() => setEnriched({}));
   }, [entityKey]);
 
-  const header = useMemo(() => {
-    if (profileErr) {
-      return (
+  if (profileErr) {
+    return (
+      <div className="space-y-4 animate-fade-in">
+        <BreadcrumbBar entityKey={entityKey} />
         <div className="card border-critical/30 text-critical text-sm px-4 py-3">
           {profileErr}
         </div>
-      );
-    }
-    if (!profile) {
-      return <div className="text-white/40 text-sm">loading user…</div>;
-    }
+      </div>
+    );
+  }
+  if (!profile) {
     return (
+      <div className="space-y-4 animate-fade-in">
+        <BreadcrumbBar entityKey={entityKey} />
+        <div className="text-white/40 text-sm">loading user…</div>
+      </div>
+    );
+  }
+
+  const ep = enriched || {};
+  const displayName = ep.display_name || profile.user_id;
+
+  return (
+    <div className="space-y-4 animate-fade-in">
+      <BreadcrumbBar entityKey={entityKey} />
+
+      {/* ---- rich profile card ---------------------------------------- */}
       <div className="card p-6 animate-fade-in">
         <div className="flex flex-wrap items-start gap-5">
-          <Avatar email={profile.user_id} tenant={profile.client_name} size={64} />
+          {/* left: identity */}
+          <Avatar email={profile.user_id} tenant={profile.client_name} size={48} />
           <div className="flex-1 min-w-0">
-            <div className="text-2xl font-bold break-all">{profile.user_id}</div>
+            <div className="text-xl font-bold break-all">{displayName}</div>
+            {(ep.job_title || ep.department) && (
+              <div className="text-[12px] text-white/50 mt-0.5">
+                {[ep.job_title, ep.department].filter(Boolean).join(" · ")}
+              </div>
+            )}
+            <div className="mt-1 font-mono text-[11px] text-white/40 break-all">
+              {profile.user_id}
+            </div>
             <div className="mt-2 flex items-center gap-3 flex-wrap">
               <TenantBadge name={profile.client_name} />
               <span className="text-[11px] text-white/40">{profile.tenant_id}</span>
             </div>
           </div>
-          <div className="text-right text-[11px]">
-            <div className="text-white/40 uppercase tracking-wider">first seen</div>
-            <div className="mt-1">{fmtTime(profile.first_seen)}</div>
-            <div className="text-white/40 uppercase tracking-wider mt-3">last seen</div>
-            <div className="mt-1">{fmtTime(profile.last_seen)}</div>
+
+          {/* right: info pills */}
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[11px]">
+            <InfoPill
+              label="Account"
+              value={
+                ep.account_enabled === true
+                  ? "ACTIVE"
+                  : ep.account_enabled === false
+                  ? "DISABLED"
+                  : "—"
+              }
+              color={
+                ep.account_enabled === true
+                  ? "#10B981"
+                  : ep.account_enabled === false
+                  ? "#EF4444"
+                  : undefined
+              }
+            />
+            <InfoPill
+              label="MFA"
+              value={
+                ep.has_mfa === true
+                  ? `ENROLLED (${(ep.mfa_methods || []).join(", ") || "?"})`
+                  : ep.has_mfa === false
+                  ? "NO MFA"
+                  : "—"
+              }
+              color={
+                ep.has_mfa === true
+                  ? "#10B981"
+                  : ep.has_mfa === false
+                  ? "#EF4444"
+                  : undefined
+              }
+            />
+            <InfoPill
+              label="Password"
+              value={ep.last_password_change ? fmtRelative(ep.last_password_change) : "—"}
+              color={passwordAgeColor(ep.last_password_change)}
+            />
+            <InfoPill
+              label="Manager"
+              value={ep.manager_name || "—"}
+            />
+            <InfoPill
+              label="Phone"
+              value={ep.mobile_phone || "—"}
+            />
+            <InfoPill
+              label="Member since"
+              value={
+                ep.created_datetime
+                  ? fmtRelative(ep.created_datetime)
+                  : profile.first_seen
+                  ? fmtRelative(profile.first_seen)
+                  : "—"
+              }
+            />
           </div>
         </div>
 
+        {/* ---- quick stats ------------------------------------------- */}
         <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-3">
-          <MiniStat label="Events"   value={profile.total_events}      color="#2563EB" />
-          <MiniStat label="Types"    value={profile.unique_event_types} color="#8B5CF6" />
-          <MiniStat label="IPs"      value={profile.unique_ips}         color="#F97316" />
-          <MiniStat label="Devices"  value={profile.unique_devices}     color="#10B981" />
+          <MiniStat
+            label="Logins (30d)"
+            value={ep.login_total_30d ?? profile.total_events}
+            color="#2563EB"
+            sub={ep.login_failed_30d ? `${fmtNumber(ep.login_failed_30d)} failed` : undefined}
+          />
+          <MiniStat
+            label="Emails"
+            value={ep.email_count ?? 0}
+            color="#8B5CF6"
+          />
+          <MiniStat
+            label="Files (30d)"
+            value={ep.file_count_30d ?? 0}
+            color="#F97316"
+          />
+          <MiniStat
+            label="Incidents"
+            value={ep.open_incidents ?? 0}
+            color={ep.open_incidents > 0 ? "#EF4444" : "#10B981"}
+          />
         </div>
       </div>
-    );
-  }, [profile, profileErr]);
 
-  return (
-    <div className="space-y-4 animate-fade-in">
-      <div className="text-[11px] text-white/40">
-        <Link to="/users" className="hover:text-primary-light">users</Link>
-        <span className="mx-2">/</span>
-        <span className="text-white/70 break-all">{entityKey}</span>
-      </div>
-
-      {header}
+      {/* ---- risk indicators strip (only if any exist) --------------- */}
+      <RiskIndicators
+        iocMatches={iocMatches}
+        enriched={ep}
+        entityKey={entityKey}
+        userId={profile.user_id}
+      />
 
       <IocMatchBanner matches={iocMatches} />
 
+      {/* ---- tabs ---------------------------------------------------- */}
       <div className="border-b border-white/5 flex items-center gap-1 flex-wrap overflow-x-auto">
         {TABS.map((t) => {
           const active = tab === t.id;
@@ -143,6 +255,261 @@ export default function UserDetail() {
       {tab === "endpoint"     && <EndpointTab entityKey={entityKey} />}
       {tab === "threatlocker" && <ThreatLockerTab entityKey={entityKey} />}
       {tab === "raw"          && <ServerTab entityKey={entityKey} kind="raw" />}
+      {tab === "auth"         && <AuthMethodsTab enriched={ep} />}
+      {tab === "permissions"  && <PermissionsTab entityKey={entityKey} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// breadcrumb
+// ---------------------------------------------------------------------------
+
+function BreadcrumbBar({ entityKey }) {
+  return (
+    <div className="text-[11px] text-white/40">
+      <Link to="/users" className="hover:text-primary-light">users</Link>
+      <span className="mx-2">/</span>
+      <span className="text-white/70 break-all">{entityKey}</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// profile card helpers
+// ---------------------------------------------------------------------------
+
+function InfoPill({ label, value, color }) {
+  return (
+    <div>
+      <div className="text-[9px] uppercase tracking-wider text-white/40">{label}</div>
+      <div
+        className="mt-0.5 font-semibold truncate max-w-[260px]"
+        style={color ? { color } : undefined}
+        title={typeof value === "string" ? value : undefined}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function passwordAgeColor(iso) {
+  if (!iso) return undefined;
+  const diff = Date.now() - new Date(iso).getTime();
+  const days = diff / (1000 * 60 * 60 * 24);
+  if (days < 90) return "#10B981";
+  if (days < 180) return "#EAB308";
+  return "#EF4444";
+}
+
+// ---------------------------------------------------------------------------
+// risk indicators strip
+// ---------------------------------------------------------------------------
+
+function RiskIndicators({ iocMatches, enriched, entityKey, userId }) {
+  const ep = enriched || {};
+  const items = [];
+  if (ep.open_incidents > 0) {
+    items.push({
+      label: "Open incidents",
+      value: fmtNumber(ep.open_incidents),
+      color: "#EF4444",
+      link: `/incidents?user=${encodeURIComponent(userId)}`,
+    });
+  }
+  if (iocMatches && iocMatches.length > 0) {
+    items.push({
+      label: "IOC matches",
+      value: `${iocMatches.length} match${iocMatches.length === 1 ? "" : "es"}`,
+      color: "#EF4444",
+    });
+  }
+  if (ep.watchlist_status) {
+    items.push({
+      label: "Watchlist",
+      value: ep.watchlist_status,
+      color: ep.watchlist_status === "escalated" ? "#EF4444" : "#EAB308",
+    });
+  }
+  if (ep.off_hours_logins_30d > 0) {
+    items.push({
+      label: "Off-hours logins (30d)",
+      value: fmtNumber(ep.off_hours_logins_30d),
+      color: "#EAB308",
+    });
+  }
+
+  if (items.length === 0) return null;
+  return (
+    <div
+      className="card p-4 animate-fade-in flex flex-wrap items-center gap-4"
+      style={{
+        borderLeft: "3px solid #EF4444",
+        backgroundColor: "rgba(239,68,68,0.04)",
+      }}
+    >
+      <div className="text-[10px] uppercase tracking-wider text-white/40 font-semibold mr-1">
+        Risk indicators
+      </div>
+      {items.map((it) => (
+        <span
+          key={it.label}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border whitespace-nowrap"
+          style={{
+            color: it.color,
+            borderColor: it.color + "55",
+            backgroundColor: it.color + "14",
+          }}
+        >
+          {it.link ? (
+            <Link
+              to={it.link}
+              className="hover:underline"
+              style={{ color: it.color }}
+            >
+              {it.label}: {it.value}
+            </Link>
+          ) : (
+            <>{it.label}: {it.value}</>
+          )}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Auth Methods tab
+// ---------------------------------------------------------------------------
+
+function AuthMethodsTab({ enriched }) {
+  const methods = enriched?.mfa_methods || [];
+  return (
+    <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead>
+            <tr>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Method</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Type</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {methods.map((m) => (
+              <tr key={m} className="hover:bg-white/[0.03]">
+                <td className="px-3 py-2 text-white/80">{m}</td>
+                <td className="px-3 py-2">
+                  <span
+                    className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+                    style={{
+                      color: "#10B981",
+                      borderColor: "#10B98155",
+                      backgroundColor: "#10B98114",
+                    }}
+                  >
+                    MFA
+                  </span>
+                </td>
+              </tr>
+            ))}
+            {methods.length === 0 && (
+              <tr>
+                <td colSpan={2} className="px-3 py-10 text-center text-white/40">
+                  {enriched ? "No MFA methods registered or data unavailable" : "loading…"}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40">
+        Authentication methods registered in Azure AD for this user.
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Permissions tab
+// ---------------------------------------------------------------------------
+
+function PermissionsTab({ entityKey }) {
+  const [rows, setRows] = useState(null);
+
+  useEffect(() => {
+    let cancel = false;
+    fetch(`/api/users/${encodeURIComponent(entityKey)}/memberships`, {
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        ...(localStorage.getItem("vector_token")
+          ? { Authorization: `Bearer ${localStorage.getItem("vector_token")}` }
+          : {}),
+      },
+    })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => { if (!cancel) setRows(d || []); })
+      .catch(() => { if (!cancel) setRows([]); });
+    return () => { cancel = true; };
+  }, [entityKey]);
+
+  return (
+    <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead>
+            <tr>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Name</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Type</th>
+              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Description</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {rows === null && (
+              <tr>
+                <td colSpan={3} className="px-3 py-10 text-center text-white/40">loading…</td>
+              </tr>
+            )}
+            {rows && rows.length === 0 && (
+              <tr>
+                <td colSpan={3} className="px-3 py-10 text-center text-white/40">
+                  No directory roles or group memberships found
+                </td>
+              </tr>
+            )}
+            {rows && rows.map((r, i) => {
+              const isRole = r.type === "Role";
+              const color = isRole ? "#8B5CF6" : "#3B82F6";
+              return (
+                <tr key={`${r.display_name}-${i}`} className="hover:bg-white/[0.03]">
+                  <td className="px-3 py-2 text-white/80 truncate max-w-[300px]">
+                    {r.display_name || <span className="text-white/30">—</span>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span
+                      className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+                      style={{
+                        color,
+                        borderColor: color + "55",
+                        backgroundColor: color + "14",
+                      }}
+                    >
+                      {r.type}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-white/50 truncate max-w-[400px]">
+                    {r.description || <span className="text-white/30">—</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40">
+        Directory roles and security group memberships from Azure AD.
+      </div>
     </div>
   );
 }
@@ -200,7 +567,7 @@ function IocMatchBanner({ matches }) {
   );
 }
 
-function MiniStat({ label, value, color }) {
+function MiniStat({ label, value, color, sub }) {
   return (
     <div className="bg-white/[0.03] border border-white/5 rounded-xl px-4 py-3">
       <div className="text-[10px] uppercase tracking-wider text-white/40">{label}</div>
@@ -210,6 +577,9 @@ function MiniStat({ label, value, color }) {
       >
         {fmtNumber(value)}
       </div>
+      {sub && (
+        <div className="text-[10px] text-white/40 mt-1">{sub}</div>
+      )}
     </div>
   );
 }

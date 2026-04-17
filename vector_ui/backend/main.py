@@ -109,7 +109,6 @@ def events_recent(
     event_type: str | None = Query(None),
     workload: str | None = Query(None),
     user: str | None = Query(None, description="substring search over user_id"),
-    ip: str | None = Query(None, description="substring search over client_ip"),
     source: str | None = Query(
         None,
         description="'ual' (default) for vector_events, 'inky' to read from vector_inky_events",
@@ -171,11 +170,10 @@ def events_recent(
           AND (%s::text IS NULL OR event_type  = %s)
           AND (%s::text IS NULL OR workload    = %s)
           AND (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
-          AND (%s::text IS NULL OR client_ip ILIKE '%%' || %s || '%%')
         ORDER BY timestamp DESC
         LIMIT %s OFFSET %s
         """,
-        (tenant, tenant, event_type, event_type, workload, workload, user, user, ip, ip, limit, offset),
+        (tenant, tenant, event_type, event_type, workload, workload, user, user, limit, offset),
     )
 
 
@@ -304,6 +302,210 @@ def user_profile(entity_key: str) -> dict:
     return row
 
 
+# ---------------------------------------------------------------------------
+# enriched user profile (Graph + stats)
+# ---------------------------------------------------------------------------
+
+_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
+_PROFILE_CACHE_TTL = 300  # 5 minutes
+
+
+@app.get("/api/users/{entity_key}/profile")
+def user_enriched_profile(entity_key: str) -> dict:
+    """Enriched user profile merging Microsoft Graph identity data
+    with quick-stats computed from vector_events, vector_message_trace
+    and vector_incidents. The response degrades gracefully: if Graph
+    is unavailable or the app registration lacks the required
+    permissions, the Graph-derived fields are simply absent and the
+    frontend shows "—" placeholders. DB-derived stats always succeed.
+
+    Results are cached per entity_key for 5 minutes so a page
+    reload doesn't hammer Graph.
+    """
+    now = time.monotonic()
+    cached = _PROFILE_CACHE.get(entity_key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    tenant_id = entity_key.split("::", 1)[0] if "::" in entity_key else ""
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    if not user_email:
+        return {}
+
+    result: dict = {
+        "entity_key": entity_key,
+        "user_email": user_email,
+        "tenant_id": tenant_id,
+    }
+
+    # 1. Graph user properties
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        graph_user = _graph_get(
+            f"/users/{upn}?$select=displayName,jobTitle,department,"
+            "accountEnabled,lastPasswordChangeDateTime,mobilePhone,"
+            "officeLocation,createdDateTime,onPremisesSyncEnabled,"
+            "signInSessionsValidFromDateTime"
+        )
+        result["display_name"] = graph_user.get("displayName")
+        result["job_title"] = graph_user.get("jobTitle")
+        result["department"] = graph_user.get("department")
+        result["account_enabled"] = graph_user.get("accountEnabled")
+        result["last_password_change"] = graph_user.get("lastPasswordChangeDateTime")
+        result["mobile_phone"] = graph_user.get("mobilePhone")
+        result["office_location"] = graph_user.get("officeLocation")
+        result["created_datetime"] = graph_user.get("createdDateTime")
+        result["on_premises_sync"] = graph_user.get("onPremisesSyncEnabled")
+        result["sign_in_sessions_valid_from"] = graph_user.get(
+            "signInSessionsValidFromDateTime"
+        )
+    except Exception:
+        logger.debug("graph user fetch failed for %s", entity_key, exc_info=True)
+
+    # 2. Manager
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        mgr = _graph_get(f"/users/{upn}/manager?$select=displayName")
+        result["manager_name"] = mgr.get("displayName")
+    except Exception:
+        result["manager_name"] = None
+
+    # 3. MFA / auth methods
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        auth_data = _graph_get(
+            f"/users/{upn}/authentication/methods"
+        )
+        methods_raw = auth_data.get("value") or []
+        method_names: list[str] = []
+        for m in methods_raw:
+            odata = m.get("@odata.type", "")
+            if "microsoftAuthenticator" in odata:
+                method_names.append("Microsoft Authenticator")
+            elif "phone" in odata.lower():
+                method_names.append("Phone (SMS/Call)")
+            elif "fido2" in odata.lower():
+                method_names.append("FIDO2 Security Key")
+            elif "softwareOath" in odata.lower():
+                method_names.append("Software OATH Token")
+            elif "windowsHello" in odata.lower():
+                method_names.append("Windows Hello")
+            elif "email" in odata.lower():
+                method_names.append("Email")
+            elif "password" in odata.lower():
+                pass  # password is always present, not MFA
+            elif odata:
+                method_names.append(odata.split(".")[-1])
+        result["mfa_methods"] = sorted(set(method_names))
+        result["has_mfa"] = len(result["mfa_methods"]) > 0
+    except Exception:
+        result["mfa_methods"] = []
+        result["has_mfa"] = None
+
+    # 4. Quick stats from DB
+    try:
+        login_row = db.fetch_one(
+            """
+            SELECT
+                COUNT(*)::bigint AS total,
+                COUNT(*) FILTER (
+                    WHERE result_status ILIKE '%%fail%%'
+                       OR event_type = 'UserLoginFailed'
+                )::bigint AS failed
+            FROM vector_events
+            WHERE entity_key = %s
+              AND event_type IN ('UserLoggedIn', 'UserLoginFailed')
+              AND timestamp > NOW() - INTERVAL '30 days'
+            """,
+            (entity_key,),
+        ) or {}
+        result["login_total_30d"] = int(login_row.get("total") or 0)
+        result["login_failed_30d"] = int(login_row.get("failed") or 0)
+    except Exception:
+        result["login_total_30d"] = 0
+        result["login_failed_30d"] = 0
+
+    try:
+        email_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_message_trace
+            WHERE (sender_address = %s OR recipient_address = %s)
+            """,
+            (user_email, user_email),
+        ) or {}
+        result["email_count"] = int(email_row.get("count") or 0)
+    except Exception:
+        result["email_count"] = 0
+
+    try:
+        file_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_events
+            WHERE entity_key = %s
+              AND workload IN ('SharePoint', 'OneDrive', 'OneDriveForBusiness')
+              AND timestamp > NOW() - INTERVAL '30 days'
+            """,
+            (entity_key,),
+        ) or {}
+        result["file_count_30d"] = int(file_row.get("count") or 0)
+    except Exception:
+        result["file_count_30d"] = 0
+
+    try:
+        inc_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_incidents
+            WHERE entity_key = %s AND status = 'open'
+            """,
+            (entity_key,),
+        ) or {}
+        result["open_incidents"] = int(inc_row.get("count") or 0)
+    except Exception:
+        result["open_incidents"] = 0
+
+    # 5. Risk indicators
+    try:
+        watchlist_row = db.fetch_one(
+            """
+            SELECT status, COUNT(*)::bigint AS count
+            FROM vector_watchlist
+            WHERE user_email = %s
+              AND expires_at > NOW()
+            GROUP BY status
+            ORDER BY count DESC
+            LIMIT 1
+            """,
+            (user_email,),
+        )
+        result["watchlist_status"] = (
+            watchlist_row.get("status") if watchlist_row else None
+        )
+    except Exception:
+        result["watchlist_status"] = None
+
+    try:
+        offhours_row = db.fetch_one(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM vector_events
+            WHERE entity_key = %s
+              AND event_type = 'UserLoggedIn'
+              AND EXTRACT(HOUR FROM timestamp) NOT BETWEEN 6 AND 21
+              AND timestamp > NOW() - INTERVAL '30 days'
+            """,
+            (entity_key,),
+        ) or {}
+        result["off_hours_logins_30d"] = int(offhours_row.get("count") or 0)
+    except Exception:
+        result["off_hours_logins_30d"] = 0
+
+    _PROFILE_CACHE[entity_key] = (now + _PROFILE_CACHE_TTL, result)
+    return result
+
+
 @app.get("/api/users/{entity_key}/events")
 def user_events(
     entity_key: str,
@@ -356,6 +558,36 @@ def user_stats(entity_key: str) -> dict:
         (entity_key,),
     )
     return {"by_event_type": by_event_type, "by_workload": by_workload}
+
+
+@app.get("/api/users/{entity_key}/memberships")
+def user_memberships(entity_key: str) -> list[dict]:
+    """Directory roles and group memberships for this user via Graph
+    ``/users/{upn}/memberOf``. Returns a list of
+    ``{display_name, description, type}`` dicts. Fails gracefully to
+    ``[]`` on any Graph error."""
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    if not user_email:
+        return []
+    try:
+        upn = urllib.parse.quote(user_email, safe="@")
+        data = _graph_get(
+            f"/users/{upn}/memberOf?$select=displayName,description&$top=50"
+        )
+    except Exception:
+        return []
+    out: list[dict] = []
+    for m in data.get("value") or []:
+        if not isinstance(m, dict):
+            continue
+        odata = m.get("@odata.type", "")
+        mtype = "Role" if "directoryRole" in odata else "Group"
+        out.append({
+            "display_name": m.get("displayName"),
+            "description":  m.get("description"),
+            "type":         mtype,
+        })
+    return out
 
 
 @app.get("/api/users/{entity_key}/edr")
@@ -835,8 +1067,8 @@ def sources_inky_count() -> dict:
 # ============================================================================
 
 @app.get("/api/ioc/matches")
-def ioc_matches(limit: int = Query(50, ge=1, le=500), tenant: str | None = Query(None)) -> list[dict]:
-    """Recent OpenCTI-backed IOC matches, optionally filtered by tenant."""
+def ioc_matches(limit: int = Query(50, ge=1, le=500)) -> list[dict]:
+    """Recent OpenCTI-backed IOC matches across every tenant."""
     return db.fetch_all(
         """
         SELECT
@@ -857,11 +1089,10 @@ def ioc_matches(limit: int = Query(50, ge=1, le=500), tenant: str | None = Query
             ve.workload
         FROM vector_ioc_matches m
         LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
-        WHERE (%s::text IS NULL OR m.client_name = %s)
         ORDER BY m.matched_at DESC
         LIMIT %s
         """,
-        (tenant, tenant, limit),
+        (limit,),
     )
 
 
@@ -907,17 +1138,17 @@ _INCIDENT_STATUSES = {"open", "investigating", "contained", "closed"}
 
 
 @app.get("/api/incidents")
-@app.get("/api/incidents/list")
 def incidents_list(
     status: str | None = Query(None),
     severity: str | None = Query(None),
+    user: str | None = Query(None, description="user_id substring filter"),
     limit: int = Query(50, ge=1, le=500),
 ) -> list[dict]:
     """Confirmed incidents produced by the Phase 2 scoring engine.
 
     Ordered by newest-first so the Incidents page defaults to the
-    latest escalations. ``status`` and ``severity`` are optional
-    string filters.
+    latest escalations. ``status``, ``severity`` and ``user`` are
+    optional string filters.
     """
     return db.fetch_all(
         """
@@ -946,10 +1177,11 @@ def incidents_list(
         FROM vector_incidents
         WHERE (%s::text IS NULL OR status   = %s)
           AND (%s::text IS NULL OR severity = %s)
+          AND (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
         ORDER BY confirmed_at DESC
         LIMIT %s
         """,
-        (status, status, severity, severity, limit),
+        (status, status, severity, severity, user, user, limit),
     )
 
 
@@ -1259,9 +1491,6 @@ def watchlist(status: str | None = Query(None)) -> list[dict]:
               ORDER BY i.timestamp DESC LIMIT 1) AS latest_verdict
         FROM vector_watchlist w
         WHERE (%s::text IS NULL OR w.status = %s)
-          AND w.user_email NOT LIKE 'S-1-5-%%'
-          AND w.user_email NOT LIKE 'S-1-%%'
-          AND w.user_email LIKE '%%@%%'
         ORDER BY w.created_at DESC
         LIMIT 200
         """,
@@ -2142,101 +2371,6 @@ def governance_mfa_changes(
     )
 
 
-@app.get("/api/governance/mfa-methods")
-def governance_mfa_methods(tenant: str | None = Query(None)) -> list[dict]:
-    """List primary MFA method for all users via Microsoft Graph
-    authenticationMethods API. Works for any tenant."""
-    tenant_name = tenant or _GCS
-    # Get tenant_id from DB
-    row = db.fetch_one(
-        "SELECT DISTINCT tenant_id FROM vector_events WHERE client_name = %s LIMIT 1",
-        (tenant_name,)
-    )
-    if not row:
-        return []
-    tid = row["tenant_id"]
-    # Get all users for this tenant
-    # Get tenant domain from a known user
-    domain_row = db.fetch_one(
-        """
-        SELECT user_id, COUNT(*) as cnt FROM vector_events
-        WHERE client_name = %s
-          AND user_id LIKE '%%@%%'
-          AND user_id NOT LIKE 'ServicePrincipal_%%'
-          AND user_id NOT LIKE '%%#EXT#%%'
-        GROUP BY user_id
-        ORDER BY cnt DESC
-        LIMIT 1
-        """,
-        (tenant_name,)
-    )
-    # Extract primary domain
-    primary_domain = None
-    if domain_row:
-        parts = domain_row["user_id"].split("@")
-        if len(parts) == 2:
-            primary_domain = parts[1].lower()
-
-    users = db.fetch_all(
-        """
-        SELECT DISTINCT user_id FROM vector_events
-        WHERE client_name = %s
-          AND user_id LIKE '%%@%%'
-          AND user_id NOT LIKE 'ServicePrincipal_%%'
-          AND user_id NOT LIKE '%%#EXT#%%'
-          AND (%s::text IS NULL OR LOWER(user_id) LIKE '%%@' || %s)
-          AND timestamp > NOW() - INTERVAL '30 days'
-        ORDER BY user_id
-        LIMIT 200
-        """,
-        (tenant_name, primary_domain, primary_domain)
-    )
-    results = []
-    for u in users:
-        upn = u["user_id"]
-        try:
-            path = f"/users/{urllib.parse.quote(upn, safe='@')}/authentication/methods"
-            data = _graph_get(path, tenant_id=tid)
-            methods = data.get("value") or []
-            method_types = []
-            for m in methods:
-                odata = m.get("@odata.type", "")
-                if "microsoftAuthenticator" in odata:
-                    method_types.append("Microsoft Authenticator")
-                elif "phone" in odata:
-                    method_types.append("Phone (SMS/Call)")
-                elif "fido2" in odata:
-                    method_types.append("FIDO2 Key")
-                elif "windowsHello" in odata:
-                    method_types.append("Windows Hello")
-                elif "email" in odata:
-                    method_types.append("Email OTP")
-                elif "temporaryAccessPass" in odata:
-                    method_types.append("Temporary Pass")
-                elif "password" in odata:
-                    pass  # skip password, not MFA
-                elif odata:
-                    method_types.append(odata.split("#")[-1])
-            has_mfa = len(method_types) > 0
-            results.append({
-                "user_id": upn,
-                "client_name": tenant_name,
-                "has_mfa": has_mfa,
-                "methods": method_types,
-                "method_count": len(method_types),
-            })
-        except Exception:
-            results.append({
-                "user_id": upn,
-                "client_name": tenant_name,
-                "has_mfa": None,
-                "methods": [],
-                "method_count": 0,
-            })
-    # Sort: no MFA first, then by user
-    results.sort(key=lambda r: (r["has_mfa"] is not False, r["user_id"]))
-    return results
-
 @app.get("/api/governance/privileged-roles")
 def governance_privileged_roles(
     tenant: str | None = Query(None),
@@ -2271,16 +2405,15 @@ def governance_privileged_roles(
 # ---- guest users (Graph API) -----------------------------------------------
 
 _GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6"
-_GRAPH_TOKEN_CACHE: dict = {}
+_GRAPH_TOKEN_CACHE: dict = {"token": None, "expires_at": 0.0}
 
 
-def _get_graph_token(tenant_id: str | None = None) -> str:
-    """Client credentials token for the given tenant, cached per tenant_id."""
-    tid = tenant_id or _GCS_TENANT_ID
+def _get_graph_token() -> str:
+    """Client credentials token for the GCS tenant, cached until ~1m before expiry."""
     now = time.monotonic()
-    cached = _GRAPH_TOKEN_CACHE.get(tid, {})
-    if cached.get("token") and cached.get("expires_at", 0.0) > now + 60:
-        return cached["token"]
+    cached_token = _GRAPH_TOKEN_CACHE.get("token")
+    if cached_token and _GRAPH_TOKEN_CACHE.get("expires_at", 0.0) > now + 60:
+        return cached_token
 
     client_id = os.environ.get("VECTOR_CLIENT_ID")
     client_secret = os.environ.get("VECTOR_CLIENT_SECRET")
@@ -2290,7 +2423,7 @@ def _get_graph_token(tenant_id: str | None = None) -> str:
             detail="VECTOR_CLIENT_ID / VECTOR_CLIENT_SECRET not configured",
         )
 
-    url = f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/token"
+    url = f"https://login.microsoftonline.com/{_GCS_TENANT_ID}/oauth2/v2.0/token"
     body = urllib.parse.urlencode(
         {
             "client_id": client_id,
@@ -2312,12 +2445,13 @@ def _get_graph_token(tenant_id: str | None = None) -> str:
     if not token:
         raise HTTPException(status_code=502, detail="graph token response missing access_token")
 
-    _GRAPH_TOKEN_CACHE[tid] = {"token": token, "expires_at": now + int(data.get("expires_in", 3600))}
+    _GRAPH_TOKEN_CACHE["token"] = token
+    _GRAPH_TOKEN_CACHE["expires_at"] = now + int(data.get("expires_in", 3600))
     return token
 
 
-def _graph_get(path_with_query: str, tenant_id: str | None = None) -> dict:
-    token = _get_graph_token(tenant_id=tenant_id)
+def _graph_get(path_with_query: str) -> dict:
+    token = _get_graph_token()
     url = f"https://graph.microsoft.com/v1.0{path_with_query}"
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
@@ -2470,16 +2604,13 @@ DeviceNetworkEvents
 
 
 @app.get("/api/governance/ai-activity")
-def governance_ai_activity(tenant: str | None = Query(None)) -> dict:
+def governance_ai_activity() -> dict:
     """Combined Microsoft Copilot usage (from UAL) + external AI tool
-    access (from Defender Advanced Hunting)."""
-    tenant_filter = tenant or _GCS
+    access (from Defender Advanced Hunting) for the GCS tenant."""
     copilot = db.fetch_all(
         """
         SELECT
             user_id,
-            MAX(tenant_id) || '::' || user_id AS entity_key,
-            MAX(client_name) AS client_name,
             COUNT(*)::bigint AS event_count,
             MAX(timestamp)   AS last_seen,
             COALESCE(
@@ -2495,7 +2626,7 @@ def governance_ai_activity(tenant: str | None = Query(None)) -> dict:
         ORDER BY event_count DESC
         LIMIT 200
         """,
-        (tenant_filter,),
+        (_GCS,),
     )
 
     external_ai: list[dict] = []
@@ -2620,16 +2751,14 @@ def _parse_graph_iso(value: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _fetch_intune_devices(force: bool = False, tenant_id: str | None = None) -> list[dict]:
+def _fetch_intune_devices(force: bool = False) -> list[dict]:
     """Return the cached /deviceManagement/managedDevices payload."""
-    tid = tenant_id or _GCS_TENANT_ID
     now_mono = time.monotonic()
-    cache_key = f"data_{tid}"
-    cached = _INTUNE_CACHE.get(cache_key)
+    cached = _INTUNE_CACHE.get("data")
     if (
         not force
         and cached is not None
-        and now_mono - _INTUNE_CACHE.get(f"fetched_at_{tid}", 0.0) < _INTUNE_CACHE_TTL
+        and now_mono - _INTUNE_CACHE.get("fetched_at", 0.0) < _INTUNE_CACHE_TTL
     ):
         return cached
 
@@ -2647,10 +2776,10 @@ def _fetch_intune_devices(force: bool = False, tenant_id: str | None = None) -> 
         ]
     )
     path = f"/deviceManagement/managedDevices?$select={select_fields}&$top=999"
-    data = _graph_get(path, tenant_id=tid)
+    data = _graph_get(path)
     values = data.get("value") or []
-    _INTUNE_CACHE[cache_key] = values
-    _INTUNE_CACHE[f"fetched_at_{tid}"] = now_mono
+    _INTUNE_CACHE["data"] = values
+    _INTUNE_CACHE["fetched_at"] = now_mono
     return values
 
 
@@ -2738,13 +2867,7 @@ def governance_intune_devices(
 ) -> list[dict]:
     """Users with at least one non-compliant, unencrypted, or stale
     Intune-managed device."""
-    # Look up tenant_id from tenant name
-    tenant_id = None
-    if tenant:
-        row = db.fetch_one("SELECT tenant_id FROM vector_events WHERE client_name = %s LIMIT 1", (tenant,))
-        if row:
-            tenant_id = row.get("tenant_id")
-    devices = _fetch_intune_devices(tenant_id=tenant_id)
+    devices = _fetch_intune_devices()
     return _group_intune_by_user(devices, only_with_issues=True)
 
 
