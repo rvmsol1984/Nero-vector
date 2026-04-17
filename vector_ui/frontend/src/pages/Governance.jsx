@@ -47,7 +47,7 @@ export default function Governance({ pageTitle, subtitle, tabIds } = {}) {
   const [data, setData] = useState({});
   const [errors, setErrors] = useState({});
   const [loadingTabs, setLoadingTabs] = useState(() => new Set());
-  const [activeTab, setActiveTab] = useState("dlp");
+  const [activeTab, setActiveTab] = useState(() => tabIds ? tabIds[0] : "dlp");
   const [tenants, setTenants] = useState([]);
   const [selectedTenant, setSelectedTenant] = useState(DEFAULT_TENANT);
   const [selectedTenantId, setSelectedTenantId] = useState(DEFAULT_TENANT_ID);
