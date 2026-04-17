@@ -1072,38 +1072,76 @@ class NewCountryLoginRule(CorrelationRule):
 
 
 class OffHoursLoginRule(CorrelationRule):
-    """Fires when a user logged in during the overnight window
-    22:00-06:00 UTC inside the last 24 hours.
+    """Fires when a user logged in at a time they don't normally
+    authenticate.
 
-    A single off-hours login rarely means compromise by itself --
-    night-shift admins, travelling execs, and scheduled service
-    accounts all trip this regularly -- so the rule is intentionally
-    low-weight. It exists to stack with other signals: a new-country
-    login *at 03:00 UTC* is a lot more suspicious than either signal
-    alone, and that's the shape the aggregate scoring model is
-    designed to catch.
+    The rule has two modes, selected automatically based on how much
+    history the user's baseline profile has accumulated:
 
-    Time handling: event timestamps on ``vector_events`` are stored
-    as TIMESTAMPTZ and Postgres sessions in vector-ingest are pinned
-    to UTC in db.py's ``connect()``, so ``EXTRACT(HOUR FROM timestamp)``
-    returns the UTC hour directly. We also double-check client-side
-    using the ``datetime`` object psycopg2 hands back, in case a
-    future migration changes the session tz.
+    **Personal baseline** (>= 7 distinct hours in ``login_hours``):
+        ``login_hours`` is a dict ``{"8": 5, "9": 4, ...}`` whose
+        keys are UTC hours and values are event counts.  A login is
+        flagged when the hour it occurred in has 0 appearances or
+        accounts for < 2% of the user's total login volume.  This
+        respects shift workers, global travellers, and service
+        accounts that legitimately authenticate overnight.
+
+    **Fixed fallback** (< 7 distinct baseline hours):
+        Falls back to the static 22:00-06:00 UTC window from the
+        original v1 rule. Seven distinct hours is the minimum where
+        we can trust the distribution enough to flag a *missing*
+        hour as anomalous -- fewer than that and most normal users
+        would trigger on any new hour they hadn't been active
+        during yet.
+
+    Score: 15 points. Intentionally low so a single off-hours
+    login doesn't page anyone. Stacks with NewCountryLogin (+25),
+    HighRiskCountry (+35), or IOCMatch (+50) to cross the 80-point
+    incident threshold.
     """
 
     name = "OffHoursLogin"
     SCORE_DELTA = 15
     LOOKBACK = timedelta(hours=24)
 
-    # Off-hours window: 22:00 (inclusive) through 06:00 (exclusive),
-    # UTC. The window wraps midnight, so membership is
-    # ``hour >= 22 or hour < 6``.
+    # Fixed fallback window (v1 behaviour) used when the user's
+    # baseline is too thin for a personal distribution check.
     OFF_HOURS_START = 22  # 22:00 UTC
     OFF_HOURS_END = 6     # 06:00 UTC
 
+    # Minimum number of distinct hours in the baseline before we
+    # trust the personal distribution. Anything below this count
+    # falls back to the fixed window.
+    MIN_BASELINE_HOURS = 7
+
+    # Fraction of total logins below which an hour is considered
+    # "anomalous" in the personal baseline mode.
+    RARE_THRESHOLD = 0.02  # 2%
+
     @classmethod
-    def _is_off_hours(cls, hour: int) -> bool:
+    def _is_off_hours_fixed(cls, hour: int) -> bool:
+        """v1 fixed-window check (22:00-06:00 UTC)."""
         return hour >= cls.OFF_HOURS_START or hour < cls.OFF_HOURS_END
+
+    @classmethod
+    def _is_off_hours_personal(
+        cls,
+        hour: int,
+        login_hours: dict,
+    ) -> bool:
+        """Personal-baseline check. Returns True when ``hour`` is
+        absent from the user's distribution or represents < 2% of
+        their total login volume."""
+        total = sum(int(v or 0) for v in login_hours.values())
+        if total <= 0:
+            # Degenerate baseline (all counts zero) -- treat as
+            # insufficient data and let the caller fall through to
+            # the fixed window.
+            return False
+        count = int(login_hours.get(str(hour)) or 0)
+        if count == 0:
+            return True
+        return (count / total) < cls.RARE_THRESHOLD
 
     def evaluate(
         self,
@@ -1141,6 +1179,14 @@ class OffHoursLoginRule(CorrelationRule):
                 pass
             return miss
 
+        # Decide which check mode to use for this user based on the
+        # richness of their login_hours baseline.
+        login_hours = user_profile.get("login_hours") or {}
+        if not isinstance(login_hours, dict):
+            login_hours = {}
+        baseline_hours_count = len(login_hours)
+        use_personal = baseline_hours_count >= self.MIN_BASELINE_HOURS
+
         # First off-hours login wins. We take the earliest qualifying
         # login so the evidence's ``login_time`` is deterministic and
         # reproducible across repeated cycles.
@@ -1148,17 +1194,23 @@ class OffHoursLoginRule(CorrelationRule):
             if not isinstance(ts, datetime):
                 continue
             hour = int(ts.hour)
-            if not self._is_off_hours(hour):
+            if use_personal:
+                flagged = self._is_off_hours_personal(hour, login_hours)
+            else:
+                flagged = self._is_off_hours_fixed(hour)
+            if not flagged:
                 continue
             return RuleResult(
                 rule_name=self.rule_name,
                 score_delta=self.SCORE_DELTA,
                 fired=True,
                 evidence={
-                    "user":       user_id,
-                    "login_time": ts.isoformat(),
-                    "hour":       hour,
-                    "client_ip":  client_ip,
+                    "user":                 user_id,
+                    "login_time":           ts.isoformat(),
+                    "hour":                 hour,
+                    "client_ip":            client_ip,
+                    "baseline_hours_count": baseline_hours_count,
+                    "mode":                 "personal" if use_personal else "fixed",
                 },
             )
 
