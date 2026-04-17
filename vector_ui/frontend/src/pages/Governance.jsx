@@ -10,6 +10,7 @@ import { filenameFromObjectId, fmtNumber, fmtRelative, fmtTime } from "../utils/
 
 const DEFAULT_TENANT = "GameChange Solar";
 const DEFAULT_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6";
+let _currentTenantId = DEFAULT_TENANT_ID;
 
 // Each tab owns its own endpoint, its default severity pill, and an
 // intrinsic severity (what the empty-vs-finding story looks like).
@@ -124,6 +125,7 @@ export default function Governance() {
             if (t) {
               setSelectedTenant(t.client_name);
               setSelectedTenantId(t.tenant_id || DEFAULT_TENANT_ID);
+              _currentTenantId = t.tenant_id || DEFAULT_TENANT_ID;
               setData({});
             }
           }}
@@ -1154,7 +1156,7 @@ function AiCopilotSection({ rows, tenantId }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row) => {
-                const entityKey = `${tenantId}::${row.user_id}`;
+                const entityKey = `${_currentTenantId}::${row.user_id}`;
                 const types = Array.isArray(row.event_types) ? row.event_types : [];
                 return (
                   <tr key={row.user_id} className="hover:bg-white/[0.03]">
@@ -1250,7 +1252,7 @@ function AiExternalSection({ rows, error, tenantId }) {
             <tbody className="divide-y divide-white/5">
               {rows.map((row, i) => {
                 const entityKey = row.user
-                  ? `${tenantId}::${row.user}`
+                  ? `${_currentTenantId}::${row.user}`
                   : null;
                 const { label: toolLabel, host } = aiToolDisplay(row.tool);
                 const devices = Array.isArray(row.devices) ? row.devices : [];
@@ -1533,7 +1535,7 @@ function IntuneDevicesTable({ rows }) {
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
             const isOpen = expanded === row.user;
-            const entityKey = `${tenantId}::${row.user}`;
+            const entityKey = `${_currentTenantId}::${row.user}`;
             return (
               <Fragment key={row.user}>
                 <tr
