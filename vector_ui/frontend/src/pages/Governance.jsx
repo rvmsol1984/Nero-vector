@@ -320,7 +320,7 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
     case "privilegedRoles":   return <PrivilegedRolesTable rows={rows} />;
     case "guestUsers":        return <GuestUsersTable rows={rows} />;
     case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} tenantId={tenantId} tenantName={tenantName} />;
-    case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
+    case "intuneDevices":     return <IntuneDevicesTable rows={rows} tenantId={tenantId} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
     case "threatLocker":      return <ThreatLockerTable rows={rows} />;
     case "iocMatches":        return <IocMatchesTable rows={rows} />;
@@ -1514,7 +1514,7 @@ function intuneDeviceStatus(device) {
   return { noncompliant, unencrypted, stale, dot };
 }
 
-function IntuneDevicesTable({ rows }) {
+function IntuneDevicesTable({ rows, tenantId }) {
   const [expanded, setExpanded] = useState(null);
 
   function toggle(user) {
