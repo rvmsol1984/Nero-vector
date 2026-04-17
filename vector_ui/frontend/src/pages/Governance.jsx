@@ -156,7 +156,11 @@ export default function Governance({ pageTitle, subtitle, tabIds } = {}) {
       <div
         className="flex flex-wrap gap-1 border-b border-white/5 mb-4"
       >
-        {activeTabs.filter(t => t.id !== "threatLocker" || selectedTenant === DEFAULT_TENANT).map((t) => {
+        {activeTabs.filter(t => {
+          if (t.id === "threatLocker" && selectedTenant !== DEFAULT_TENANT) return false;
+          if (t.id === "mfaMethods" && selectedTenant === DEFAULT_TENANT) return false;
+          return true;
+        }).map((t) => {
           const rows = data[t.id];
           const visited = rows !== undefined;
           const isLoading = loadingTabs.has(t.id);
