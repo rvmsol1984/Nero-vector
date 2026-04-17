@@ -9,6 +9,11 @@ import Users from "./pages/Users.jsx";
 import UserDetail from "./pages/UserDetail.jsx";
 import Baseline from "./pages/Baseline.jsx";
 import Governance from "./pages/Governance.jsx";
+import IdentityAccess from "./pages/IdentityAccess.jsx";
+import DataSharing from "./pages/DataSharing.jsx";
+import Devices from "./pages/Devices.jsx";
+import ThreatIntelligence from "./pages/ThreatIntelligence.jsx";
+import AiShadowIt from "./pages/AiShadowIt.jsx";
 import Sources from "./pages/Sources.jsx";
 import Incidents from "./pages/Incidents.jsx";
 import Watchlist from "./pages/Watchlist.jsx";
@@ -33,6 +38,11 @@ export default function App() {
             element={<Baseline />}
           />
           <Route path="/governance"       element={<Governance />} />
+          <Route path="/identity"         element={<IdentityAccess />} />
+          <Route path="/data"             element={<DataSharing />} />
+          <Route path="/devices"          element={<Devices />} />
+          <Route path="/threats"          element={<ThreatIntelligence />} />
+          <Route path="/ai"               element={<AiShadowIt />} />
           <Route path="/sources"          element={<Sources />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>

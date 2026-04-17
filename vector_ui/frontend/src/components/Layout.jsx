@@ -18,7 +18,11 @@ const SIDEBAR_ITEMS = [
   { to: "/events",     label: "Events",     icon: "events"     },
   { to: "/users",      label: "Users",      icon: "users"      },
   { to: "/baseline",   label: "Baseline",   icon: "activity", phase2: true },
-  { to: "/governance", label: "Governance", icon: "governance" },
+  { to: "/identity",   label: "Identity & Access",   icon: "identity"  },
+  { to: "/data",       label: "Data & Sharing",      icon: "data"      },
+  { to: "/devices",    label: "Devices",             icon: "devices"   },
+  { to: "/threats",    label: "Threat Intelligence", icon: "threats"   },
+  { to: "/ai",         label: "AI & Shadow IT",      icon: "ai"        },
   { to: "/sources",    label: "Sources",    icon: "sources"    },
 ];
 
@@ -26,7 +30,11 @@ const BOTTOM_TABS = [
   { to: "/dashboard",  label: "Dashboard",  icon: "dashboard"  },
   { to: "/events",     label: "Events",     icon: "events"     },
   { to: "/users",      label: "Users",      icon: "users"      },
-  { to: "/governance", label: "Governance", icon: "governance" },
+  { to: "/identity",   label: "Identity & Access",   icon: "identity"  },
+  { to: "/data",       label: "Data & Sharing",      icon: "data"      },
+  { to: "/devices",    label: "Devices",             icon: "devices"   },
+  { to: "/threats",    label: "Threat Intelligence", icon: "threats"   },
+  { to: "/ai",         label: "AI & Shadow IT",      icon: "ai"        },
   { to: "/sources",    label: "Sources",    icon: "sources"    },
 ];
 

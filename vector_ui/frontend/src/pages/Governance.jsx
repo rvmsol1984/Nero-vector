@@ -39,10 +39,11 @@ const TABS = [
 
 // ---------------------------------------------------------------------------
 
-export default function Governance() {
+export default function Governance({ pageTitle, subtitle, tabIds } = {}) {
   // Per-tab cache. data[tabId] === undefined means "never fetched";
   // data[tabId] === [] is a real empty result. That distinction is
   // what drives CountBadge's "unvisited" vs "no findings" states.
+  const activeTabs = tabIds ? TABS.filter(t => tabIds.includes(t.id)) : TABS;
   const [data, setData] = useState({});
   const [errors, setErrors] = useState({});
   const [loadingTabs, setLoadingTabs] = useState(() => new Set());
@@ -117,7 +118,7 @@ export default function Governance() {
     <div className="space-y-5 animate-fade-in">
       {/* ----- header ----- */}
       <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold">Governance</h1>
+        <h1 className="text-2xl font-bold">{pageTitle || "Governance"}</h1>
         <select
           value={selectedTenant}
           onChange={(e) => {
@@ -147,14 +148,14 @@ export default function Governance() {
         </select>
       </div>
       <p className="text-white/50 text-sm -mt-3">
-        UAL-derived policy findings and identity hygiene signals.
+        {subtitle || "UAL-derived policy findings and identity hygiene signals."}
       </p>
 
       {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
       <div
         className="flex flex-wrap gap-1 border-b border-white/5 mb-4"
       >
-        {TABS.filter(t => t.id !== "threatLocker" || selectedTenant === DEFAULT_TENANT).map((t) => {
+        {activeTabs.filter(t => t.id !== "threatLocker" || selectedTenant === DEFAULT_TENANT).map((t) => {
           const rows = data[t.id];
           const visited = rows !== undefined;
           const isLoading = loadingTabs.has(t.id);
