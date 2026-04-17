@@ -1362,7 +1362,7 @@ def incidents_impact(incident_id: str) -> dict:
                        recipient_address, subject, received, status,
                        size_bytes, direction
                 FROM vector_message_trace
-                WHERE sender_address = %s
+                WHERE LOWER(sender_address) = LOWER(%s)
                   AND received BETWEEN %s AND %s
                   AND COALESCE(direction, '') <> 'ACTIVITY'
                 ORDER BY received DESC
