@@ -168,7 +168,7 @@ export default function Governance() {
               if (t.id === "aiActivity") {
                 count =
                   (rows.copilot?.length || 0) +
-                  (rows.external_ai?.length || 0);
+                  (selectedTenant === DEFAULT_TENANT ? (rows.external_ai?.length || 0) : 0);
               } else if (Array.isArray(rows.rows)) {
                 count = rows.rows.length;
               }
