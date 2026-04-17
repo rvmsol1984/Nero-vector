@@ -238,6 +238,16 @@ def _classify_string(raw: str) -> tuple[str, str] | None:
     if _EMAIL_RE.match(value):
         return ("email", value.lower())
     if _URL_RE.match(value):
+        # Skip Microsoft-internal URLs — they're never IOCs
+        _MS_URL_SKIP = (
+            "sharepoint.com", "1drv.ms", "onedrive.live.com",
+            "office.com", "microsoft.com", "microsoftonline.com",
+            "outlook.com", "live.com", "bing.com", "azure.com",
+            "azurewebsites.net", "msftauth.net", "msauth.net",
+        )
+        lower_val = value.lower()
+        if any(skip in lower_val for skip in _MS_URL_SKIP):
+            return None
         return ("url", value)
     if _DOMAIN_RE.match(value) and "." in value:
         return ("domain", value.lower())
