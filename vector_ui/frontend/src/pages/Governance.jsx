@@ -2239,6 +2239,24 @@ function IocMatchesTable({ rows }) {
                         </div>
                       </div>
                       <JsonBlock data={row.raw_json} />
+                      <div className="mt-3 flex gap-2">
+                        <Link
+                          to={`/events?ip=${encodeURIComponent(row.ioc_value)}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="inline-flex items-center px-3 py-1.5 rounded-lg text-[11px] font-semibold border border-critical/40 bg-critical/10 text-critical hover:bg-critical/20 transition-colors"
+                        >
+                          View Events for {row.ioc_value}
+                        </Link>
+                        {row.entity_key && (
+                          <Link
+                            to={`/users/${encodeURIComponent(row.entity_key)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center px-3 py-1.5 rounded-lg text-[11px] font-semibold border border-primary/40 bg-primary/10 text-primary-light hover:bg-primary/20 transition-colors"
+                          >
+                            View User Profile
+                          </Link>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 )}
