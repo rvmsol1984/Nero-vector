@@ -13,22 +13,34 @@ import { fmtNumber, initialsFrom } from "../utils/format.js";
 // Top bar is shared by both breakpoints.
 
 const SIDEBAR_ITEMS = [
-  { to: "/dashboard",  label: "Dashboard",  icon: "dashboard"  },
-  { to: "/incidents",  label: "Incidents",  icon: "alert"                       },
-  { to: "/watchlist",  label: "Watchlist",  icon: "eye",     phase2: true },
-  { to: "/events",     label: "Events",     icon: "events"     },
-  { to: "/users",      label: "Users",      icon: "users"      },
-  { to: "/baseline",   label: "Baseline",   icon: "activity", phase2: true },
-  { to: "/governance", label: "Governance", icon: "governance" },
-  { to: "/sources",    label: "Sources",    icon: "sources"    },
+  { to: "/dashboard",  label: "Dashboard",           icon: "dashboard"  },
+  { to: "/incidents",  label: "Incidents",           icon: "alert"      },
+  { to: "/watchlist",  label: "Watchlist",           icon: "eye",      phase2: true },
+  { to: "/events",     label: "Events",              icon: "events"     },
+  { to: "/users",      label: "Users",               icon: "users"      },
+  { to: "/baseline",   label: "Baseline",            icon: "activity", phase2: true },
+  // Governance split into 5 focused boards. Ordered so the
+  // operator-facing pages (identity, data, devices, threats) come
+  // before the forward-looking AI / Shadow-IT view.
+  { to: "/identity",   label: "Identity & Access",   icon: "identity"   },
+  { to: "/data",       label: "Data & Sharing",      icon: "data"       },
+  { to: "/devices",    label: "Devices",             icon: "devices"    },
+  { to: "/threats",    label: "Threat Intelligence", icon: "threats"    },
+  { to: "/ai",         label: "AI & Shadow IT",      icon: "ai"         },
+  { to: "/sources",    label: "Sources",             icon: "sources"    },
 ];
 
 const BOTTOM_TABS = [
-  { to: "/dashboard",  label: "Dashboard",  icon: "dashboard"  },
-  { to: "/events",     label: "Events",     icon: "events"     },
-  { to: "/users",      label: "Users",      icon: "users"      },
-  { to: "/governance", label: "Governance", icon: "governance" },
-  { to: "/sources",    label: "Sources",    icon: "sources"    },
+  // The mobile bottom bar only fits 5 items, so it gets the high-
+  // traffic pages: dashboard + events + users, plus identity +
+  // threats as the two most operator-clicked split-governance
+  // boards. Data / Devices / AI are still reachable via the slide-
+  // out drawer on mobile.
+  { to: "/dashboard",  label: "Dashboard",  icon: "dashboard" },
+  { to: "/events",     label: "Events",     icon: "events"    },
+  { to: "/users",      label: "Users",      icon: "users"     },
+  { to: "/identity",   label: "Identity",   icon: "identity"  },
+  { to: "/threats",    label: "Threats",    icon: "threats"   },
 ];
 
 // ---------------------------------------------------------------------------
@@ -102,6 +114,53 @@ function Icon({ name, size = 18 }) {
         <svg {...p}>
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
           <path d="M9 12l2 2 4-4" />
+        </svg>
+      );
+    case "identity":
+      // Person silhouette inside a shield -- "identity + access".
+      return (
+        <svg {...p}>
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          <circle cx="12" cy="10" r="2.4" />
+          <path d="M7.8 17c.6-2 2.3-3 4.2-3s3.6 1 4.2 3" />
+        </svg>
+      );
+    case "data":
+      // Folder with a horizontal ruling line -- "data / sharing".
+      return (
+        <svg {...p}>
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          <line x1="6" y1="13" x2="18" y2="13" />
+        </svg>
+      );
+    case "devices":
+      // Laptop + phone glyph so the icon still reads well at 16px.
+      return (
+        <svg {...p}>
+          <rect x="2"  y="6"  width="13" height="9" rx="1" />
+          <line x1="1" y1="18" x2="16" y2="18" />
+          <rect x="17" y="9"  width="5"  height="10" rx="1" />
+          <line x1="19" y1="17" x2="20" y2="17" />
+        </svg>
+      );
+    case "threats":
+      // Crosshair / target reticle -- "threat intelligence".
+      return (
+        <svg {...p}>
+          <circle cx="12" cy="12" r="9" />
+          <circle cx="12" cy="12" r="4" />
+          <line x1="12" y1="2"  x2="12" y2="6" />
+          <line x1="12" y1="18" x2="12" y2="22" />
+          <line x1="2"  y1="12" x2="6"  y2="12" />
+          <line x1="18" y1="12" x2="22" y2="12" />
+        </svg>
+      );
+    case "ai":
+      // Four-point sparkle + smaller sparkle -- the gen-AI convention.
+      return (
+        <svg {...p}>
+          <path d="M12 3 l1.6 4.4 L18 9 l-4.4 1.6 L12 15 l-1.6-4.4 L6 9 l4.4-1.6 z" />
+          <path d="M18 15 l0.7 1.9 L21 18 l-2.3 0.6 L18 21 l-0.7-2.3 L15 18 l2.3-0.6 z" />
         </svg>
       );
     case "sources":

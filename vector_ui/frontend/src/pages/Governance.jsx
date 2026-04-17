@@ -65,14 +65,46 @@ function TenantPill({ active, onClick, children }) {
 
 // ---------------------------------------------------------------------------
 
-export default function Governance() {
+export default function Governance({
+  pageTitle,
+  subtitle,
+  tabIds,
+} = {}) {
+  // ``tabIds`` lets each of the 5 "split governance" pages show only
+  // its subset of TABS while reusing every other piece of the engine
+  // (tenant selector, per-tab cache, tenant_id resolution, table
+  // components, etc.). When omitted, all tabs are shown -- the
+  // legacy /governance route still works as a single unified board.
+  const visibleTabs = useMemo(
+    () =>
+      Array.isArray(tabIds) && tabIds.length
+        ? TABS.filter((t) => tabIds.includes(t.id))
+        : TABS,
+    [tabIds],
+  );
+  const resolvedTitle = pageTitle || "Governance";
+  const resolvedSubtitle =
+    subtitle ||
+    "UAL-derived policy findings and identity hygiene signals.";
+
   // Per-tab cache. data[tabId] === undefined means "never fetched";
   // data[tabId] === [] is a real empty result. That distinction is
   // what drives CountBadge's "unvisited" vs "no findings" states.
   const [data, setData] = useState({});
   const [errors, setErrors] = useState({});
   const [loadingTabs, setLoadingTabs] = useState(() => new Set());
-  const [activeTab, setActiveTab] = useState("dlp");
+  const [activeTab, setActiveTab] = useState(() =>
+    visibleTabs.length ? visibleTabs[0].id : "dlp",
+  );
+
+  // If the visible-tabs list changes between renders (e.g. the page
+  // first mounts before the upstream component injects its tabIds),
+  // snap the active tab to something that's actually in the list.
+  useEffect(() => {
+    if (!visibleTabs.some((t) => t.id === activeTab) && visibleTabs.length) {
+      setActiveTab(visibleTabs[0].id);
+    }
+  }, [visibleTabs, activeTab]);
 
   // ----- tenant selector state ---------------------------------------
   //
@@ -221,11 +253,11 @@ export default function Governance() {
     <div className="space-y-5 animate-fade-in">
       {/* ----- header ----- */}
       <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold">Governance</h1>
+        <h1 className="text-2xl font-bold">{resolvedTitle}</h1>
         {selectedTenantName && <TenantBadge name={selectedTenantName} />}
       </div>
       <p className="text-white/50 text-sm -mt-3">
-        UAL-derived policy findings and identity hygiene signals.
+        {resolvedSubtitle}
       </p>
 
       {/* ----- tenant selector ----- */}
@@ -250,7 +282,7 @@ export default function Governance() {
       <div
         className="flex flex-wrap gap-1 border-b border-white/5 mb-4"
       >
-        {TABS.map((t) => {
+        {visibleTabs.map((t) => {
           const rows = data[t.id];
           const visited = rows !== undefined;
           const isLoading = loadingTabs.has(t.id);
@@ -1863,6 +1895,11 @@ function AiActivityTab({ copilot, external, externalError }) {
   const SUB_TABS = [
     { id: "copilot",  label: "Microsoft Copilot", count: copilot.length },
     { id: "external", label: "External AI Tools", count: external.length },
+    // Claude Connector lands as a Phase 2 placeholder: the tab is
+    // visible so operators know the integration is on the roadmap,
+    // but there's no telemetry stream yet so the panel just shows
+    // the "pending" empty state.
+    { id: "claude",   label: "Claude Connector",  count: 0,            phase2: true },
   ];
   return (
     <div className="space-y-4">
@@ -1900,11 +1937,48 @@ function AiActivityTab({ copilot, external, externalError }) {
         })}
       </div>
 
-      {subTab === "copilot" ? (
-        <AiCopilotSection rows={copilot} />
-      ) : (
+      {subTab === "copilot" && <AiCopilotSection rows={copilot} />}
+      {subTab === "external" && (
         <AiExternalSection rows={external} error={externalError} />
       )}
+      {subTab === "claude" && <AiClaudeConnectorSection />}
+    </div>
+  );
+}
+
+function AiClaudeConnectorSection() {
+  // Phase-2 placeholder. The Claude Connector will stream prompt /
+  // response telemetry (message counts, token volume, tool calls)
+  // out of the Anthropic workspace audit feed once the integration
+  // ships. Until then the section is deliberately empty so the
+  // sub-tab is visible in the nav without fabricating any data.
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
+        <div>
+          <div className="text-base font-bold">Claude Connector</div>
+          <div className="text-[11px] text-white/50 mt-0.5">
+            Anthropic workspace audit telemetry (message counts,
+            tool use, connector invocations).
+          </div>
+        </div>
+        <span
+          className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-semibold"
+          style={{
+            color: "#3B82F6",
+            backgroundColor: "rgba(37,99,235,0.15)",
+            border: "1px solid rgba(37,99,235,0.35)",
+          }}
+        >
+          Pending Integration
+        </span>
+      </div>
+      <div className="px-5 py-12 text-white/50 text-sm text-center">
+        Claude Connector telemetry is not yet wired. Once the
+        Anthropic workspace audit feed is connected, prompt and
+        tool-use counts will appear here next to the Microsoft
+        Copilot and External AI Tools sub-tabs.
+      </div>
     </div>
   );
 }
