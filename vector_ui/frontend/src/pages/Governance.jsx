@@ -318,7 +318,7 @@ function TabPanel({ tabId, rows: raw, loading, error, tenantId, tenantName }) {
     case "mfaChanges":        return <MfaChangesTable rows={rows} />;
     case "privilegedRoles":   return <PrivilegedRolesTable rows={rows} />;
     case "guestUsers":        return <GuestUsersTable rows={rows} />;
-    case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} />;
+    case "unmanagedDevices":  return <UnmanagedDevicesTable rows={rows} tenantId={tenantId} />;
     case "intuneDevices":     return <IntuneDevicesTable rows={rows} />;
     case "edrAlerts":         return <EdrAlertsTable rows={rows} />;
     case "threatLocker":      return <ThreatLockerTable rows={rows} />;
@@ -1156,7 +1156,7 @@ function AiCopilotSection({ rows, tenantId }) {
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map((row) => {
-                const entityKey = `${_currentTenantId}::${row.user_id}`;
+                const entityKey = `${tenantId}::${row.user_id}`;
                 const types = Array.isArray(row.event_types) ? row.event_types : [];
                 return (
                   <tr key={row.user_id} className="hover:bg-white/[0.03]">
@@ -1252,7 +1252,7 @@ function AiExternalSection({ rows, error, tenantId }) {
             <tbody className="divide-y divide-white/5">
               {rows.map((row, i) => {
                 const entityKey = row.user
-                  ? `${_currentTenantId}::${row.user}`
+                  ? `${tenantId}::${row.user}`
                   : null;
                 const { label: toolLabel, host } = aiToolDisplay(row.tool);
                 const devices = Array.isArray(row.devices) ? row.devices : [];
@@ -1535,7 +1535,7 @@ function IntuneDevicesTable({ rows }) {
         <tbody className="divide-y divide-white/5">
           {rows.map((row) => {
             const isOpen = expanded === row.user;
-            const entityKey = `${_currentTenantId}::${row.user}`;
+            const entityKey = `${tenantId}::${row.user}`;
             return (
               <Fragment key={row.user}>
                 <tr
