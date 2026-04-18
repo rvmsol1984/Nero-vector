@@ -10,16 +10,21 @@ const PAGE = 50;
 // Workload → accent color mapping shared by the filter pills and
 // the event card left-border tint.
 const WORKLOAD_COLORS = {
-  exchange:              "#e3b341",
-  sharepoint:            "#39d353",
-  onedrive:              "#39d353",
-  onedriveforbusiness:   "#39d353",
-  azureactivedirectory:  "#58a6ff",
-  microsoftteams:        "#bc8cff",
-  threatintelligence:    "#f85149",
-  inky:                  "#f85149",
-  edr:                   "#64748B",
-  defender:              "#64748B",
+  exchange:              "#F97316",
+  mailitemsaccessed:     "#F97316",
+  sharepoint:            "#14B8A6",
+  onedrive:              "#14B8A6",
+  onedriveforbusiness:   "#14B8A6",
+  fileaccessed:          "#14B8A6",
+  azureactivedirectory:  "#3B82F6",
+  aad:                   "#3B82F6",
+  microsoftgraphactivitylogs: "#3B82F6",
+  microsoftteams:        "#8B5CF6",
+  teams:                 "#8B5CF6",
+  threatintelligence:    "#EF4444",
+  inky:                  "#EF4444",
+  edr:                   "#EF4444",
+  defender:              "#EF4444",
   copilot:               "#79c0ff",
 };
 
