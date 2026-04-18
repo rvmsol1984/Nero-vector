@@ -128,9 +128,9 @@ export const api = {
   govClaudeConnector: () => get("/api/governance/claude-connector"),
   incidentStats:    () => get("/api/incidents/stats"),
   incidentList:     ({ limit = 50, status = "" } = {}) =>
-                      get(`/api/incidents/list${qs({ limit, status })}`),
+                      get(`/api/incidents${qs({ limit, status })}`),
   incidents:        ({ limit = 50, status = "" } = {}) =>
-                      get(`/api/incidents/list${qs({ limit, status })}`),
+                      get(`/api/incidents${qs({ limit, status })}`),
   updateIncidentStatus: (id, status) => post(`/api/incidents/${id}/status`, { status }),
   incidentDetail:   (id) => get(`/api/incidents/${id}`),
   incidentUpdate:   (id, data) => post(`/api/incidents/${id}`, data),
