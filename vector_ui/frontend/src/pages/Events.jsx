@@ -90,9 +90,11 @@ export default function Events() {
   const eventType = searchParams.get("event_type") || "";
   const workload  = searchParams.get("workload")   || "";
   const userQuery = searchParams.get("user")       || "";
+  const ipQuery   = searchParams.get("ip")         || "";
   const offset    = Number(searchParams.get("offset") || 0);
 
   const [userInput, setUserInput] = useState(userQuery);
+  const [ipInput, setIpInput]     = useState(ipQuery);
   useEffect(() => {
     const h = setTimeout(() => {
       updateFilter("user", userInput);
@@ -100,6 +102,12 @@ export default function Events() {
     return () => clearTimeout(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userInput]);
+  useEffect(() => {
+    const h = setTimeout(() => {
+      updateFilter("ip", ipInput);
+    }, 300);
+    return () => clearTimeout(h);
+  }, [ipInput]);
 
   function updateFilter(key, value) {
     const p = new URLSearchParams(searchParams);
@@ -142,6 +150,7 @@ export default function Events() {
         event_type: eventType || undefined,
         workload: workload || undefined,
         user: userQuery || undefined,
+        ip:   ipQuery   || undefined,
       })
       .then((r) => {
         if (!cancel) setRows(r);
@@ -155,9 +164,9 @@ export default function Events() {
     return () => {
       cancel = true;
     };
-  }, [offset, tenant, eventType, workload, userQuery]);
+  }, [offset, tenant, eventType, workload, userQuery, ipQuery]);
 
-  const activeCount = [tenant, eventType, workload, userQuery].filter(Boolean).length;
+  const activeCount = [tenant, eventType, workload, userQuery, ipQuery].filter(Boolean).length;
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -242,6 +251,13 @@ export default function Events() {
             value={userInput}
             onChange={(e) => setUserInput(e.target.value)}
             className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-primary-light w-64"
+          />
+          <input
+            type="search"
+            placeholder="search IP…"
+            value={ipInput}
+            onChange={(e) => setIpInput(e.target.value)}
+            className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-primary-light w-40"
           />
         </div>
       </div>
