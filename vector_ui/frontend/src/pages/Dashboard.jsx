@@ -22,6 +22,7 @@ export default function Dashboard() {
   const [byType, setByType] = useState([]);
   const [recent, setRecent] = useState([]);
   const [iocMatches, setIocMatches] = useState([]);
+  const [heroStats, setHeroStats] = useState(null);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("feed");
 
@@ -30,12 +31,13 @@ export default function Dashboard() {
 
     async function load() {
       try {
-        const [s, bt, by, r, ioc] = await Promise.all([
+        const [s, bt, by, r, ioc, incStats] = await Promise.all([
           api.stats(),
           api.byTenant(),
           api.byType(),
           api.dashboardFeed({ ual_limit: 50, inky_limit: 20 }),
           api.iocMatches(10).catch(() => []),
+          api.incidentStats().catch(() => ({})),
         ]);
         if (cancelled) return;
         setStats(s);
@@ -43,6 +45,7 @@ export default function Dashboard() {
         setByType(by);
         setRecent(r);
         setIocMatches(ioc || []);
+        setHeroStats(incStats || {});
         setErr(null);
       } catch (e) {
         if (!cancelled) setErr(e.message);
@@ -74,6 +77,34 @@ export default function Dashboard() {
           load error: {err}
         </div>
       )}
+
+      {/* ----- hero stat cards ----- */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <HeroCard
+          label="Active Incidents"
+          value={heroStats?.open}
+          accent="#DC2626"
+          loading={heroStats == null}
+        />
+        <HeroCard
+          label="IOC Matches Today"
+          value={iocMatches?.length}
+          accent="#F97316"
+          loading={heroStats == null}
+        />
+        <HeroCard
+          label="Users at Risk"
+          value={heroStats?.critical != null ? (heroStats.critical + (heroStats.high || 0)) : undefined}
+          accent="#EAB308"
+          loading={heroStats == null}
+        />
+        <HeroCard
+          label="Tenants Monitored"
+          value={stats?.unique_tenants}
+          accent="#3B82F6"
+          loading={stats == null}
+        />
+      </div>
 
       {/* ----- tenant bubbles row ----- */}
       <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
@@ -378,6 +409,31 @@ function IocMatchesAlert({ matches }) {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// hero stat card -- dark card with colored top-border accent
+// ---------------------------------------------------------------------------
+
+function HeroCard({ label, value, accent, loading }) {
+  return (
+    <div
+      className="bg-surface border border-white/5 rounded-card overflow-hidden"
+      style={{ borderTop: `3px solid ${accent}` }}
+    >
+      <div className="px-4 py-3">
+        <div className="text-[10px] uppercase tracking-wider text-white/40">
+          {label}
+        </div>
+        <div
+          className="text-2xl font-bold mt-1 tabular-nums leading-none"
+          style={{ color: accent }}
+        >
+          {loading ? "—" : fmtNumber(value ?? 0)}
+        </div>
       </div>
     </div>
   );

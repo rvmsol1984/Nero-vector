@@ -17,7 +17,7 @@ import { fmtNumber, initialsFrom } from "../utils/format.js";
 // (``{ divider: true, label: "INVESTIGATE" }``). The SidebarBody
 // renderer checks the shape and emits the right markup.
 const SIDEBAR_ITEMS = [
-  // --- top (no label) ---
+  { divider: true, label: "DETECTION" },
   { to: "/dashboard",  label: "Dashboard",           icon: "dashboard"  },
   { to: "/incidents",  label: "Incidents",           icon: "alert"      },
   { to: "/watchlist",  label: "Watchlist",           icon: "eye",      phase2: true },

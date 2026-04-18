@@ -227,22 +227,46 @@ export default function UserDetail() {
 
       <IocMatchBanner matches={iocMatches} />
 
-      {/* ---- tabs ---------------------------------------------------- */}
+      {/* ---- tabs (with optional count badges) ------------------------ */}
       <div className="border-b border-white/5 flex items-center gap-1 flex-wrap overflow-x-auto">
         {TABS.map((t) => {
           const active = tab === t.id;
+          // Derive count from already-loaded data so we don't add
+          // new API calls. Only specific tabs get a badge; the rest
+          // render just the label.
+          let count = null;
+          if (t.id === "email" && ep.email_count > 0) count = ep.email_count;
+          else if (t.id === "files" && ep.file_count_30d > 0) count = ep.file_count_30d;
+          else if (t.id === "timeline" && profile?.total_events > 0) count = profile.total_events;
+          else if (t.id === "logins" && ep.login_total_30d > 0) count = ep.login_total_30d;
           return (
             <button
               key={t.id}
               type="button"
               onClick={() => setTab(t.id)}
-              className={`px-4 py-2 text-xs font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${
+              className={`px-4 py-2 text-xs font-medium border-b-2 -mb-px whitespace-nowrap transition-colors flex items-center gap-1.5 ${
                 active
                   ? "border-primary text-primary-light"
                   : "border-transparent text-white/50 hover:text-white"
               }`}
             >
               {t.label}
+              {count != null && (
+                <span
+                  className="inline-flex items-center justify-center tabular-nums font-bold"
+                  style={{
+                    fontSize: "10px",
+                    padding: "1px 6px",
+                    borderRadius: "10px",
+                    minWidth: "18px",
+                    ...(active
+                      ? { background: "rgba(37,99,235,0.2)", color: "#2563EB" }
+                      : { background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.6)" }),
+                  }}
+                >
+                  {count > 999 ? `${Math.round(count / 1000)}k` : count}
+                </span>
+              )}
             </button>
           );
         })}

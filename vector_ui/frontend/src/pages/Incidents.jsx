@@ -11,7 +11,7 @@ import { fmtNumber, fmtRelative, fmtTime } from "../utils/format.js";
 // ---------------------------------------------------------------------------
 
 const SEVERITY_STYLE = {
-  critical: { label: "CRITICAL", color: "#EF4444" },
+  critical: { label: "CRITICAL", color: "#DC2626", solid: true },
   high:     { label: "HIGH",     color: "#F97316" },
   medium:   { label: "MEDIUM",   color: "#EAB308" },
   low:      { label: "LOW",      color: "#64748B" },
@@ -43,6 +43,23 @@ function SeverityPill({ severity }) {
     label: String(severity || "—").toUpperCase(),
     color: "rgba(255,255,255,0.5)",
   };
+  // Critical gets a solid red bg with white text + subtle pulse so
+  // it jumps out of the row even at a glance.
+  if (cfg.solid) {
+    return (
+      <span
+        className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border whitespace-nowrap animate-pulse"
+        style={{
+          color: "#fff",
+          backgroundColor: cfg.color,
+          borderColor: cfg.color,
+          animationDuration: "2s",
+        }}
+      >
+        {cfg.label}
+      </span>
+    );
+  }
   return (
     <span
       className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border whitespace-nowrap"
@@ -346,6 +363,7 @@ function IncidentsTable({ rows, openId, setOpenId, onStatusChange }) {
             <tr>
               <Th>Severity</Th>
               <Th>Type</Th>
+              <Th>Tenant</Th>
               <Th>User</Th>
               <Th>Title</Th>
               <Th align="right">Score</Th>
@@ -368,6 +386,13 @@ function IncidentsTable({ rows, openId, setOpenId, onStatusChange }) {
                     </td>
                     <td className="px-4 py-2.5">
                       <IncidentTypeBadge incidentType={row.incident_type} />
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {row.client_name ? (
+                        <TenantBadge name={row.client_name} />
+                      ) : (
+                        <span className="text-white/30">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5">
                       {row.entity_key ? (
@@ -421,7 +446,7 @@ function IncidentsTable({ rows, openId, setOpenId, onStatusChange }) {
                   {isOpen && (
                     <tr>
                       <td
-                        colSpan={8}
+                        colSpan={9}
                         className="p-0 border-t border-white/5"
                         style={{ backgroundColor: "#0D1428" }}
                       >
