@@ -83,12 +83,13 @@ INSERT_MESSAGE_TRACE_SQL = """
 INSERT INTO vector_message_trace (
     tenant_id, client_name, message_id, sender_address, recipient_address,
     subject, received, status, size_bytes, direction, original_client_ip,
-    has_attachments
+    has_attachments, internet_message_id
 ) VALUES (
     %(tenant_id)s, %(client_name)s, %(message_id)s, %(sender_address)s,
     %(recipient_address)s, %(subject)s, %(received)s, %(status)s,
     %(size_bytes)s, %(direction)s, %(original_client_ip)s,
-    COALESCE(%(has_attachments)s, FALSE)
+    COALESCE(%(has_attachments)s, FALSE),
+    %(internet_message_id)s
 )
 ON CONFLICT (message_id) DO NOTHING
 """

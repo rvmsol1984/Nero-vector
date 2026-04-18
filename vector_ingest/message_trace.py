@@ -257,10 +257,12 @@ class MessageTraceIngestor:
             row = self._normalize_hunting(r)
             if not row:
                 continue
-            # The InternetMessageId only matters for the backfill; pop
-            # it off so the insert helper sees a clean row that lines
-            # up with INSERT_MESSAGE_TRACE_SQL's parameter names.
+            # Rename the underscore-prefixed key so it lines up with the
+            # %(internet_message_id)s parameter in INSERT_MESSAGE_TRACE_SQL.
+            # The column is now persisted so the backend can look up
+            # Graph messages reliably for the attachment endpoint.
             internet_message_id = row.pop("_internet_message_id", None)
+            row["internet_message_id"] = internet_message_id
             try:
                 if self.db.insert_message_trace(row):
                     written += 1
@@ -502,11 +504,10 @@ class MessageTraceIngestor:
             "direction":         "Inbound",
             "original_client_ip": None,
             "has_attachments":   has_attachments,
-            # ``_internet_message_id`` is NOT persisted by the INSERT
-            # statement -- the db helper only reads keys named in
-            # INSERT_MESSAGE_TRACE_SQL. The poll loop pops this key
-            # off before calling insert_message_trace and uses it to
-            # drive the attachment-names backfill.
+            # The poll loop renames this to ``internet_message_id``
+            # before calling insert_message_trace so it persists in
+            # the new column. Kept underscore-prefixed here so
+            # _normalize_hunting callers know the name will change.
             "_internet_message_id": internet_message_id or None,
         }
 
@@ -639,7 +640,8 @@ class MessageTraceIngestor:
             "original_client_ip": None,
             # Activity-report rows are synthetic rollups with no real
             # message behind them, so they never have attachments.
-            "has_attachments":   False,
+            "has_attachments":      False,
+            "internet_message_id":  None,
         }
 
     # ------------------------------------------------------------------ orchestration

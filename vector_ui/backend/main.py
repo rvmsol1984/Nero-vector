@@ -757,7 +757,8 @@ def user_emails(
             size_bytes,
             direction,
             has_attachments,
-            attachment_names
+            attachment_names,
+            internet_message_id
         FROM vector_message_trace
         WHERE (sender_address = %s OR recipient_address = %s)
           AND (%s::text IS NULL OR direction = %s)
@@ -787,22 +788,43 @@ def user_emails(
 def user_email_attachments(entity_key: str, message_id: str) -> list[dict]:
     """Fetch attachment metadata for a single email via Microsoft Graph.
 
-    ``message_id`` is the RFC-2822 ``Message-ID`` header stored in
-    vector_message_trace (what Exchange calls ``InternetMessageId``).
-    Graph doesn't expose a direct lookup on that field, so we first
-    search for the matching message via ``/users/{email}/messages``
-    with a ``$filter``, then pull its ``/attachments`` list if
-    ``hasAttachments`` is true.
+    ``message_id`` is the vector_message_trace ``message_id`` (the
+    Defender-assigned ``NetworkMessageId`` or a synthetic composite).
+    We first look up the stored ``internet_message_id`` column which
+    the MessageTraceIngestor persists from the Defender
+    ``InternetMessageId`` KQL field — that's the RFC-2822 header
+    Graph needs for its ``$filter``. This avoids the old unreliable
+    subject-based search that caused 21k rows to show "no
+    attachments found" despite ``has_attachments = true``.
 
     Returns ``[]`` on any error (Graph unavailable, message not
-    found, no attachments) so the frontend can degrade gracefully.
+    found, no attachments, no internet_message_id stored) so the
+    frontend can degrade gracefully.
     """
     user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
     if not user_email or not message_id:
         return []
 
+    # Look up the stored internet_message_id from vector_message_trace.
+    # This was persisted by the MessageTraceIngestor from the Defender
+    # EmailEvents InternetMessageId KQL column.
+    stored = db.fetch_one(
+        """
+        SELECT internet_message_id
+        FROM vector_message_trace
+        WHERE message_id = %s
+        """,
+        (message_id.strip(),),
+    )
+    mid_raw = (stored or {}).get("internet_message_id") or ""
+    if not mid_raw:
+        # No internet_message_id stored — fall back to message_id
+        # itself in case the caller passed the RFC-2822 header
+        # directly (e.g. from a non-Defender source).
+        mid_raw = message_id.strip()
+
     # Graph's $filter on internetMessageId needs angle brackets.
-    mid = message_id.strip()
+    mid = mid_raw.strip()
     if not mid.startswith("<"):
         mid = f"<{mid}>"
     if not mid.endswith(">"):

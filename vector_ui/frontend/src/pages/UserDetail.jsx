@@ -1036,12 +1036,15 @@ function EmailTraceTab({ entityKey }) {
             <tbody className="divide-y divide-white/5">
               {rows.map((r) => {
                 const isOpen = expandedId === r.id;
-                // Prefer the authoritative has_attachments flag populated
-                // by the MessageTraceIngestor's Defender/Graph backfill.
-                // Fall back to a size-based heuristic for legacy rows
-                // that pre-date the column.
+                // Show paperclip when:
+                // 1. attachment_names is populated (best signal), OR
+                // 2. has_attachments is true AND internet_message_id is
+                //    stored (meaning the expand panel can actually fetch
+                //    the names via Graph), OR
+                // 3. Legacy fallback: pre-migration rows with large size
                 const hasAttachment =
-                  r.has_attachments === true ||
+                  (Array.isArray(r.attachment_names) && r.attachment_names.length > 0) ||
+                  (r.has_attachments === true && r.internet_message_id) ||
                   (r.has_attachments == null && Number(r.size_bytes) > 50000);
                 return (
                   <Fragment key={r.id}>
