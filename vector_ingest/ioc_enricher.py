@@ -552,9 +552,9 @@ class IocEnricher:
                 if best and confidence <= (best.get("confidence") or 0):
                     continue
                 labels = [
-                    e["node"]["value"]
-                    for e in ((inner.get("objectLabel") or {}).get("edges") or [])
-                    if isinstance(e.get("node"), dict) and e["node"].get("value")
+                    e["value"]
+                    for e in (inner.get("objectLabel") or [])
+                    if isinstance(e, dict) and e.get("value")
                 ]
                 best = {
                     "opencti_id":     inner.get("id") or observable_id,
