@@ -260,6 +260,9 @@ class ScoringEngine:
                 VPNLoginRule(),
                 ImpossibleTravelRule(),
                 InboxRuleCreatedRule(),
+                MassEmailDeleteRule(),
+                NewDeviceLoginRule(),
+                PrivilegedRoleAssignedRule(),
             ]
         for r in rules:
             self.register_rule(r)
@@ -2902,6 +2905,536 @@ class InboxRuleCreatedRule(CorrelationRule):
                 return f"forward:{target}" if target else "forward"
             if matched == "deletemessage":
                 return "delete"
+        return None
+
+
+class MassEmailDeleteRule(CorrelationRule):
+    """Fires when a user produced more than 50 mailbox-delete events
+    inside a rolling 1-hour window.
+
+    We match the UAL event types ``HardDelete`` and ``SoftDelete`` --
+    HardDelete is mailbox purge (cannot be recovered by the user),
+    SoftDelete is deletion-to-Deleted-Items. Either one at volume is
+    a strong post-compromise tell: an attacker who has read a
+    mailbox often purges evidence of their reads, or deletes threads
+    matching a keyword list ("invoice", "wire", etc.) before the
+    real owner logs back in.
+
+    The count comes from a single COUNT(*) against ``vector_events``
+    with the matching event types inside ``LOOKBACK``. We return the
+    earliest and latest event timestamps so the Incidents UI can
+    plot the delete burst on the evidence timeline.
+
+    Score: 40 points. Meaningful on its own but still below the 80-
+    point incident threshold so a genuine mailbox-cleanup day (rare
+    but it happens) doesn't auto-page operators. Stacks cleanly
+    with new-country / off-hours / VPN co-signals.
+    """
+
+    name = "MassEmailDelete"
+    SCORE_DELTA = 40
+    LOOKBACK = timedelta(hours=1)
+    THRESHOLD = 50
+
+    MATCHED_EVENT_TYPES = ("HardDelete", "SoftDelete")
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[mass_email_delete] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            count, first_ts, last_ts = self._fetch_delete_stats(
+                tenant_id, user_id,
+            )
+        except Exception:
+            logger.exception(
+                "[mass_email_delete] stats fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if count <= self.THRESHOLD:
+            return miss
+
+        return RuleResult(
+            rule_name=self.rule_name,
+            score_delta=self.SCORE_DELTA,
+            fired=True,
+            evidence={
+                "user":         user_id,
+                "delete_count": int(count),
+                "window_start": first_ts.isoformat() if isinstance(first_ts, datetime) else None,
+                "window_end":   last_ts.isoformat() if isinstance(last_ts, datetime) else None,
+            },
+        )
+
+    def _fetch_delete_stats(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> tuple[int, datetime | None, datetime | None]:
+        """Return ``(count, first_ts, last_ts)`` for the user's
+        HardDelete/SoftDelete events inside the lookback window."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*)::bigint,
+                    MIN(timestamp),
+                    MAX(timestamp)
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = ANY(%s)
+                  AND timestamp > NOW() - %s
+                """,
+                (
+                    tenant_id,
+                    user_id,
+                    list(self.MATCHED_EVENT_TYPES),
+                    self.LOOKBACK,
+                ),
+            )
+            row = cur.fetchone()
+        if not row:
+            return (0, None, None)
+        return (int(row[0] or 0), row[1], row[2])
+
+
+class NewDeviceLoginRule(CorrelationRule):
+    """Fires when a user logged in from a device that does not
+    appear in their baseline device profile.
+
+    The baseline is read from ``vector_user_baselines`` -- the
+    profile dict passed into ``evaluate`` exposes ``known_devices``
+    today. We also peek at ``known_device_ids`` so a future schema
+    rename doesn't silently regress this rule. Each baseline device
+    list is a flat array of device-id strings (typically the Azure
+    AD ``DeviceId`` GUID or a Defender device token).
+
+    We extract the current session's device-id from the raw UAL
+    row. UAL stores device identity in a few shapes depending on
+    the connector; this rule tolerates all of them:
+
+    * ``raw_json.DeviceProperties`` array containing a dict with
+      ``Name == 'DeviceId'`` / ``Name == 'Id'`` (Graph / UAL shape)
+    * ``raw_json.DeviceId`` (top-level, Defender shape)
+    * ``raw_json.ExtendedProperties`` array with ``Name``
+      matching any of the above (ECS shape)
+
+    Fail-open contract (per spec): if the baseline is empty, the
+    baseline has no device list, or the event has no parsable
+    device id, the rule returns a clean miss. This avoids paging
+    on a user's very first login (no baseline yet) or on event
+    sources that don't carry a device identifier at all.
+
+    Score: 25 points. Intended to stack with NewCountryLogin (+25)
+    or OffHoursLogin (+15) to cross the 80-point incident threshold
+    without being noisy on its own when a user legitimately buys
+    a new laptop.
+    """
+
+    name = "NewDeviceLogin"
+    SCORE_DELTA = 25
+    LOOKBACK = timedelta(hours=24)
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[new_device] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        # Fail-open when no baseline device list exists yet.
+        known = self._known_device_set(user_profile)
+        if not known:
+            return miss
+
+        try:
+            rows = self._fetch_login_events(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[new_device] login fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        for ts, raw in rows:
+            device_id = self._extract_device_id(raw)
+            if not device_id:
+                # Fail-open per spec: events without a device_id
+                # field are skipped silently, not forced to fire.
+                continue
+            if device_id in known:
+                continue
+            if self.is_excepted(tenant_id, {"device": device_id}):
+                continue
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":       user_id,
+                    "device_id":  device_id,
+                    "first_seen": ts.isoformat() if isinstance(ts, datetime) else None,
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_login_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple[datetime, Any]]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, raw_json
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp ASC
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+    # ----- helpers --------------------------------------------------------
+
+    @staticmethod
+    def _known_device_set(user_profile: dict) -> set[str]:
+        """Flat string set of every known device id across both the
+        current schema (``known_devices``) and the forward-compatible
+        ``known_device_ids`` key the spec calls out."""
+        if not user_profile:
+            return set()
+        out: set[str] = set()
+        for key in ("known_device_ids", "known_devices"):
+            raw = user_profile.get(key)
+            if not raw:
+                continue
+            if isinstance(raw, dict):
+                for k in raw.keys():
+                    if k:
+                        out.add(str(k).strip())
+                continue
+            if isinstance(raw, (list, tuple, set)):
+                for v in raw:
+                    if v:
+                        out.add(str(v).strip())
+        return out
+
+    @staticmethod
+    def _extract_device_id(raw: Any) -> str | None:
+        """Walk the known UAL shapes for a device identifier.
+        Returns the first non-empty value found, else None."""
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+        if not isinstance(raw, dict):
+            return None
+
+        # Shape 1: top-level DeviceId / deviceId
+        for key in ("DeviceId", "deviceId", "device_id"):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+        # Shape 2: DeviceProperties / ExtendedProperties arrays
+        for array_key in ("DeviceProperties", "ExtendedProperties"):
+            block = raw.get(array_key)
+            if not isinstance(block, list):
+                continue
+            for entry in block:
+                if not isinstance(entry, dict):
+                    continue
+                name = (entry.get("Name") or entry.get("name") or "").lower()
+                if name not in ("deviceid", "id", "device_id"):
+                    continue
+                val = entry.get("Value") or entry.get("value")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        return None
+
+
+class PrivilegedRoleAssignedRule(CorrelationRule):
+    """Fires when a user was assigned a high-privilege directory
+    role in the last 24 hours.
+
+    The UAL operation is ``Add member to role.`` (note the trailing
+    period; that's the actual string Azure AD emits). The role name
+    is carried in ``raw_json.ModifiedProperties`` under the
+    ``Role.DisplayName`` key. The assignee's identity lives in the
+    ``Target`` array; the admin who performed the assignment lives
+    in either ``UserId`` at the top level or the ``Actor`` array.
+
+    The rule only fires for the highest-risk roles -- assigning a
+    low-privilege role like ``Directory Readers`` is routine and
+    should not page. We match these as case-insensitive substrings
+    against the role display name:
+
+    * Global Admin / Global Administrator
+    * Security Admin / Security Administrator
+    * Exchange Admin / Exchange Administrator
+    * SharePoint Admin / SharePoint Administrator
+    * User Admin / User Administrator
+
+    Score: 45 points. High because privileged-role assignment is
+    one of the sharper post-compromise escalation signals. Still
+    below the 80-point threshold on its own so a legitimate admin
+    promoting a new hire doesn't auto-page in isolation -- one
+    co-signal (new country, VPN, off-hours) is the gate.
+    """
+
+    name = "PrivilegedRoleAssigned"
+    SCORE_DELTA = 45
+    LOOKBACK = timedelta(hours=24)
+
+    MATCHED_EVENT_TYPES = ("Add member to role.", "AddMemberToRole")
+
+    # Case-insensitive substrings matched against the role display
+    # name from ModifiedProperties. The base word ("Global Admin")
+    # also matches the long form ("Global Administrator") so we
+    # don't need both variants.
+    HIGH_RISK_ROLE_MARKERS: tuple[str, ...] = (
+        "global admin",
+        "security admin",
+        "exchange admin",
+        "sharepoint admin",
+        "user admin",
+    )
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[privileged_role] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            rows = self._fetch_role_events(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[privileged_role] fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        for ts, raw in rows:
+            role_name = self._extract_role_name(raw)
+            if not role_name:
+                continue
+            if not self._is_privileged(role_name):
+                continue
+            assigned_by = self._extract_actor(raw)
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":        user_id,
+                    "role_name":   role_name,
+                    "assigned_by": assigned_by,
+                    "timestamp":   ts.isoformat() if isinstance(ts, datetime) else None,
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_role_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple[datetime, Any]]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, raw_json
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = ANY(%s)
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp ASC
+                """,
+                (
+                    tenant_id,
+                    user_id,
+                    list(self.MATCHED_EVENT_TYPES),
+                    self.LOOKBACK,
+                ),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+    # ----- raw_json parsing ----------------------------------------------
+
+    @classmethod
+    def _is_privileged(cls, role_name: str) -> bool:
+        lower = role_name.lower()
+        return any(m in lower for m in cls.HIGH_RISK_ROLE_MARKERS)
+
+    @staticmethod
+    def _coerce_dict(raw: Any) -> dict | None:
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+        return raw if isinstance(raw, dict) else None
+
+    @classmethod
+    def _extract_role_name(cls, raw: Any) -> str | None:
+        """Walk ``ModifiedProperties`` for the ``Role.DisplayName``
+        entry. Tolerates both UAL shapes (``NewValue`` as a quoted
+        JSON array string and as a plain string)."""
+        data = cls._coerce_dict(raw)
+        if data is None:
+            return None
+        mods = data.get("ModifiedProperties")
+        if not isinstance(mods, list):
+            return None
+        for entry in mods:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("Name") or "").strip()
+            if name not in ("Role.DisplayName", "RoleName", "Role.Name"):
+                continue
+            new_val = entry.get("NewValue")
+            parsed = cls._unquote_ual_value(new_val)
+            if parsed:
+                return parsed
+        return None
+
+    @classmethod
+    def _extract_actor(cls, raw: Any) -> str | None:
+        data = cls._coerce_dict(raw)
+        if data is None:
+            return None
+        # Top-level UserId is the most common for "Add member to role."
+        uid = data.get("UserId")
+        if isinstance(uid, str) and uid.strip():
+            return uid.strip()
+        actor = data.get("Actor")
+        if isinstance(actor, list):
+            for entry in actor:
+                if not isinstance(entry, dict):
+                    continue
+                aid = entry.get("ID") or entry.get("Id") or entry.get("id")
+                if isinstance(aid, str) and aid.strip():
+                    return aid.strip()
+        return None
+
+    @staticmethod
+    def _unquote_ual_value(val: Any) -> str | None:
+        """UAL sometimes stores display names as a JSON-encoded
+        string containing a single-element array -- e.g. the raw
+        value is literally ``'["Global Administrator"]'``. Handle
+        both that shape and the plain-string shape without double-
+        decoding."""
+        if val is None:
+            return None
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+            return None
+        if isinstance(val, str):
+            stripped = val.strip()
+            if not stripped:
+                return None
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                except (ValueError, TypeError):
+                    return stripped
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, str) and item.strip():
+                            return item.strip()
+                    return None
+                if isinstance(parsed, str):
+                    return parsed.strip() or None
+                return None
+            return stripped
         return None
 
 
