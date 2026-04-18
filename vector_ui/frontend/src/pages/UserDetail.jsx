@@ -228,7 +228,7 @@ export default function UserDetail() {
       <IocMatchBanner matches={iocMatches} />
 
       {/* ---- tabs (with optional count badges) ------------------------ */}
-      <div className="border-b border-white/5 flex items-center gap-1 flex-wrap overflow-x-auto">
+      <div className="border-b border-white/5 flex items-center gap-1 flex-wrap overflow-x-hidden">
         {TABS.map((t) => {
           const active = tab === t.id;
           // Derive count from already-loaded data so we don't add
@@ -411,8 +411,8 @@ function AuthMethodsTab({ enriched }) {
   const methods = enriched?.mfa_methods || [];
   return (
     <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Method</th>
@@ -480,8 +480,8 @@ function PermissionsTab({ entityKey }) {
 
   return (
     <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Name</th>
@@ -1021,8 +1021,8 @@ function EmailTraceTab({ entityKey }) {
 
       {/* table */}
       <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-[11px]">
+        <div className="overflow-x-hidden">
+          <table className="w-full table-fixed text-[11px]">
             <thead>
               <tr>
                 <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
@@ -1182,8 +1182,8 @@ function EmailAttachmentPanel({ entityKey, messageId }) {
           no attachments found
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-white/5">
-          <table className="min-w-full text-[10px]">
+        <div className="overflow-x-hidden rounded-lg border border-white/5">
+          <table className="w-full table-fixed text-[10px]">
             <thead>
               <tr className="bg-white/[0.02]">
                 <th className="text-left px-2 py-1.5 text-[9px] uppercase tracking-wider text-white/40 font-semibold">
@@ -1350,8 +1350,8 @@ function EndpointTab({ entityKey }) {
 
   return (
     <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
@@ -1504,8 +1504,8 @@ function ThreatLockerTab({ entityKey }) {
 
   return (
     <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>

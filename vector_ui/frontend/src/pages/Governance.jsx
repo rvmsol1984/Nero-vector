@@ -280,7 +280,7 @@ export default function Governance({
 
       {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
       <div
-        className="flex gap-1 border-b border-white/5 mb-4 overflow-x-auto"
+        className="flex gap-1 border-b border-white/5 mb-4 overflow-x-hidden"
         style={{ scrollbarWidth: "none", msOverflowStyle: "none", WebkitOverflowScrolling: "touch" }}
       >
         {visibleTabs.map((t) => {
@@ -589,7 +589,7 @@ function InsufficientDataCard({ meta }) {
 function TableCard({ children }) {
   return (
     <div className="card overflow-hidden">
-      <div className="overflow-x-auto">{children}</div>
+      <div className="overflow-x-hidden">{children}</div>
     </div>
   );
 }
@@ -668,7 +668,7 @@ function DlpTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -767,7 +767,7 @@ function SharingTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -848,7 +848,7 @@ function DownloadsTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -944,7 +944,7 @@ function BrokenInheritanceTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -1013,7 +1013,7 @@ function OauthAppsTable({ rows }) {
   const [open, setOpen] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Application</Th>
@@ -1132,7 +1132,7 @@ function PasswordSprayTable({ rows }) {
   const [open, setOpen] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Client IP</Th>
@@ -1236,7 +1236,7 @@ function StaleAccountsTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -1318,7 +1318,7 @@ function MfaChangesTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -1422,7 +1422,7 @@ function PrivilegedRolesTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>When</Th>
@@ -1511,7 +1511,7 @@ function GuestUsersTable({ rows }) {
   const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Display Name</Th>
@@ -1681,8 +1681,8 @@ function InnerEventsTable({ rows, columns, emptyMessage = "no matching events" }
     return <div className="text-white/40 text-[11px] py-2">{emptyMessage}</div>;
   }
   return (
-    <div className="overflow-x-auto rounded-lg border border-white/5">
-      <table className="min-w-full text-[10px]">
+    <div className="overflow-x-hidden rounded-lg border border-white/5">
+      <table className="w-full table-fixed text-[10px]">
         <thead>
           <tr>
             {columns.map((c) => (
@@ -2004,8 +2004,8 @@ function AiCopilotSection({ rows }) {
           No Copilot activity detected
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-[11px]">
+        <div className="overflow-x-hidden">
+          <table className="w-full table-fixed text-[11px]">
             <thead>
               <tr>
                 <Th>User</Th>
@@ -2101,8 +2101,8 @@ function AiExternalSection({ rows, error }) {
           No external AI tool access detected on managed devices in the last 7 days
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-[11px]">
+        <div className="overflow-x-hidden">
+          <table className="w-full table-fixed text-[11px]">
             <thead>
               <tr>
                 <Th>User</Th>
@@ -2209,7 +2209,7 @@ function UnmanagedDevicesTable({ rows }) {
 
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -2333,7 +2333,7 @@ function IntuneDevicesTable({ rows }) {
 
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -2428,8 +2428,8 @@ function IntuneDeviceDetailTable({ devices }) {
       <div className="text-[10px] uppercase tracking-[0.15em] text-white/40 mb-2">
         Intune Devices
       </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="w-5"></th>
@@ -2572,8 +2572,8 @@ function DeviceDetailTable({ detail, loading }) {
           </span>
         )}
       </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="w-5"></th>
@@ -2763,7 +2763,7 @@ function EdrAlertsTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Host</Th>
@@ -2952,7 +2952,7 @@ function ThreatLockerTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Host</Th>
@@ -3080,7 +3080,7 @@ function IocMatchesTable({ rows }) {
   const [open, setOpen] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>IOC Value</Th>

@@ -253,12 +253,13 @@ export default function Events() {
       )}
 
       {/* ----- event cards ----- */}
-      <div className="space-y-3">
+      <div className="space-y-3 min-w-0 overflow-hidden">
         {rows.map((r) => {
           const accent = workloadAccent(r.workload || r.source);
           return (
             <div
               key={r.id}
+              className="min-w-0 overflow-hidden"
               style={accent ? { borderLeft: `3px solid ${accent}`, borderRadius: 12 } : undefined}
             >
               <EventCard event={r} />

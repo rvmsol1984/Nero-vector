@@ -357,8 +357,19 @@ function EmptyState() {
 function IncidentsTable({ rows, openId, setOpenId, onStatusChange }) {
   return (
     <div className="card overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
+          <colgroup>
+            <col style={{ width: "100px" }} />  {/* Severity */}
+            <col style={{ width: "110px" }} />  {/* Type */}
+            <col style={{ width: "130px" }} />  {/* Tenant */}
+            <col style={{ width: "180px" }} />  {/* User */}
+            <col />                              {/* Title — fills remaining */}
+            <col style={{ width: "80px" }} />   {/* Score */}
+            <col style={{ width: "100px" }} />  {/* First Seen */}
+            <col style={{ width: "110px" }} />  {/* Status */}
+            <col style={{ width: "32px" }} />   {/* Chevron */}
+          </colgroup>
           <thead>
             <tr>
               <Th>Severity</Th>
@@ -425,7 +436,7 @@ function IncidentsTable({ rows, openId, setOpenId, onStatusChange }) {
                       )}
                     </td>
                     <td
-                      className="px-4 py-2.5 text-white/80 truncate max-w-[360px]"
+                      className="px-4 py-2.5 text-white/80 truncate"
                       title={row.title || ""}
                     >
                       {row.title || <span className="text-white/30">—</span>}
@@ -764,8 +775,8 @@ function TimelineTab({ incident }) {
       className="rounded-lg border border-white/5 overflow-hidden"
       style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
     >
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[10px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[10px]">
           <thead>
             <tr>
               <Th11>Time</Th11>
@@ -946,8 +957,8 @@ function ImpactEventsTable({ data }) {
       className="rounded-lg border border-white/5 overflow-hidden"
       style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
     >
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[10px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[10px]">
           <thead>
             <tr>
               <Th11>Time</Th11>

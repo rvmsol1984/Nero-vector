@@ -489,7 +489,7 @@ export default function Layout() {
       </header>
 
       {/* -------- desktop sidebar + main -------- */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden min-w-0">
         <aside
           className="hidden md:flex flex-col w-[220px] shrink-0"
           style={{
@@ -500,8 +500,8 @@ export default function Layout() {
           <SidebarBody openIncidents={openIncidents} />
         </aside>
 
-        <main className="flex-1 overflow-auto pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-0">
-          <div className="max-w-6xl mx-auto px-4 md:px-6 py-5">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-0 min-w-0">
+          <div className="max-w-6xl mx-auto px-4 md:px-6 py-5 min-w-0">
             <Outlet />
           </div>
         </main>
