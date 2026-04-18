@@ -1082,6 +1082,7 @@ def ioc_matches(limit: int = Query(50, ge=1, le=500)) -> list[dict]:
             m.tenant_id,
             m.matched_at,
             m.matched_event_id::text,
+            m.labels,
             m.raw_json,
             ve.user_id,
             ve.entity_key,

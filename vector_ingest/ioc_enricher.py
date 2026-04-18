@@ -122,6 +122,14 @@ query VectorIocLookup($value: String!) {
               pattern
               valid_from
               valid_until
+              objectLabel {
+                edges {
+                  node {
+                    value
+                    color
+                  }
+                }
+              }
             }
           }
         }
@@ -543,10 +551,16 @@ class IocEnricher:
                     continue
                 if best and confidence <= (best.get("confidence") or 0):
                     continue
+                labels = [
+                    e["node"]["value"]
+                    for e in ((inner.get("objectLabel") or {}).get("edges") or [])
+                    if isinstance(e.get("node"), dict) and e["node"].get("value")
+                ]
                 best = {
                     "opencti_id":     inner.get("id") or observable_id,
                     "indicator_name": inner.get("name"),
                     "confidence":     confidence,
+                    "labels":         labels,
                     "raw":            {"observable": node, "indicator": inner},
                 }
         return best
@@ -609,11 +623,11 @@ class IocEnricher:
                     INSERT INTO vector_ioc_matches (
                         tenant_id, client_name, ioc_type, ioc_value,
                         opencti_id, indicator_name, confidence,
-                        matched_event_id, raw_json
+                        matched_event_id, labels, raw_json
                     ) VALUES (
                         %(tenant_id)s, %(client_name)s, %(ioc_type)s,
                         %(ioc_value)s, %(opencti_id)s, %(indicator_name)s,
-                        %(confidence)s, %(matched_event_id)s, %(raw_json)s
+                        %(confidence)s, %(matched_event_id)s, %(labels)s, %(raw_json)s
                     )
                     ON CONFLICT (ioc_value, matched_event_id) DO NOTHING
                     RETURNING id
