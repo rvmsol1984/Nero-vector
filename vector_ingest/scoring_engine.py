@@ -30,6 +30,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import math
 import os
 import time
 from abc import ABC, abstractmethod
@@ -256,6 +257,9 @@ class ScoringEngine:
                 MalwareDetectedRule(),
                 IOCMatchRule(),
                 HighRiskCountryLoginRule(),
+                VPNLoginRule(),
+                ImpossibleTravelRule(),
+                InboxRuleCreatedRule(),
             ]
         for r in rules:
             self.register_rule(r)
@@ -2145,6 +2149,760 @@ class HighRiskCountryLoginRule(CorrelationRule):
         country = (data.get("country") or "").strip() or None
         self._cache_put(ip, country)
         return country
+
+
+class VPNLoginRule(CorrelationRule):
+    """Fires when a user's recent login originated from an IP whose
+    ASN is a commercial VPN exit or a hosting/cloud provider.
+
+    Commodity VPN traffic is a strong pre-compromise tell: attackers
+    routinely route credential-stuffing and session-replay attempts
+    through NordVPN / ExpressVPN / Mullvad / ProtonVPN / PIA /
+    Surfshark so their true origin doesn't land in ``vector_events``.
+    Hosting ASNs (``asn.type == "hosting"``) catch the "bot traffic
+    bounced off a rented VPS" variant of the same pattern.
+
+    Score: 20 points. Deliberately low on its own -- many legitimate
+    employees use a personal VPN, and some tenants require one for
+    remote work. The rule is intended to stack with NewCountryLogin
+    (+25), OffHoursLogin (+15), or HighRiskCountry (+40) to push a
+    suspicious session over the 80-point incident threshold.
+
+    IP resolution reuses the ``ipinfo.io`` pattern already in
+    ``NewCountryLoginRule`` / ``HighRiskCountryLoginRule`` -- same
+    timeout, rate-limit, and private-IP-skip logic. A single rule
+    instance shares a per-cycle cache so multiple users hitting the
+    same VPN exit only produce one outbound lookup.
+
+    When ipinfo.io returns a paid-tier ``asn`` sub-object, the rule
+    uses ``asn.type`` / ``asn.name`` directly. On the free tier the
+    ``asn`` block is absent and we fall back to parsing the free
+    ``org`` field (format: ``"AS15169 Google LLC"``) -- ``asn_type``
+    is then ``None`` and detection relies solely on the VPN-provider
+    name match.
+    """
+
+    name = "VPNLogin"
+    SCORE_DELTA = 20
+    LOOKBACK = timedelta(hours=24)
+
+    # Case-insensitive substrings matched against the ASN org name.
+    # Covers the six operators the spec calls out plus obvious
+    # aliases so tenants that resolve ProtonVPN as "Proton AG" or
+    # PIA as "Private Internet Access" still fire cleanly.
+    VPN_PROVIDER_MARKERS: tuple[str, ...] = (
+        "nordvpn",
+        "expressvpn",
+        "mullvad",
+        "protonvpn",
+        "proton ag",
+        "private internet access",
+        "surfshark",
+    )
+
+    IPINFO_URL_TEMPLATE = "https://ipinfo.io/{ip}/json"
+    IPINFO_TIMEOUT = 5
+    IPINFO_RATE_LIMIT_SEC = 1.0
+    CACHE_TTL = timedelta(hours=24)
+
+    def __init__(self) -> None:
+        super().__init__()
+        # ip -> (expires_at, {asn_name, asn_type} | None)
+        self._cache: dict[str, tuple[datetime, dict | None]] = {}
+        self._last_call_at: float = 0.0
+        self._session: requests.Session | None = None
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[vpn_login] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            login_ips = self._fetch_login_ips(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[vpn_login] login IP fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if not login_ips:
+            return miss
+
+        for ip in login_ips:
+            if self.is_excepted(tenant_id, {"ip": ip}):
+                continue
+            info = self._resolve_asn(ip)
+            if not info:
+                continue
+            asn_name = info.get("asn_name") or ""
+            asn_type = (info.get("asn_type") or "").lower()
+            name_lower = asn_name.lower()
+            is_hosting = asn_type == "hosting"
+            matched_provider = next(
+                (
+                    p for p in self.VPN_PROVIDER_MARKERS
+                    if p in name_lower
+                ),
+                None,
+            )
+            if not is_hosting and matched_provider is None:
+                continue
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":     user_id,
+                    "ip":       ip,
+                    "asn_name": asn_name or None,
+                    "asn_type": info.get("asn_type"),
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_login_ips(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[str]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT client_ip
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND client_ip IS NOT NULL
+                  AND timestamp > NOW() - %s
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+            return [row[0] for row in cur.fetchall() if row[0]]
+
+    # ----- ipinfo resolver ------------------------------------------------
+
+    @staticmethod
+    def _is_skippable_ip(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(str(ip).strip())
+        except (ValueError, TypeError):
+            return True
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.is_reserved
+        )
+
+    def _cache_get(self, ip: str) -> tuple[bool, dict | None]:
+        entry = self._cache.get(ip)
+        if not entry:
+            return (False, None)
+        expires_at, info = entry
+        if datetime.now(timezone.utc) > expires_at:
+            self._cache.pop(ip, None)
+            return (False, None)
+        return (True, info)
+
+    def _cache_put(self, ip: str, info: dict | None) -> None:
+        self._cache[ip] = (
+            datetime.now(timezone.utc) + self.CACHE_TTL,
+            info,
+        )
+
+    def _rate_limit(self) -> None:
+        elapsed = time.monotonic() - self._last_call_at
+        if elapsed < self.IPINFO_RATE_LIMIT_SEC:
+            time.sleep(self.IPINFO_RATE_LIMIT_SEC - elapsed)
+        self._last_call_at = time.monotonic()
+
+    def _resolve_asn(self, ip: str) -> dict | None:
+        """Return ``{asn_name, asn_type}`` for ``ip``.
+
+        Prefers the paid-tier ``asn`` sub-object; falls back to
+        parsing the free-tier ``org`` field (``"AS15169 Google LLC"``
+        shape) in which case ``asn_type`` is ``None``. Returns
+        ``None`` when the IP is private / unresolved / the network
+        call fails.
+        """
+        if self._is_skippable_ip(ip):
+            return None
+
+        hit, cached = self._cache_get(ip)
+        if hit:
+            return cached
+
+        self._rate_limit()
+        if self._session is None:
+            self._session = requests.Session()
+        url = self.IPINFO_URL_TEMPLATE.format(ip=ip)
+        try:
+            resp = self._session.get(url, timeout=self.IPINFO_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.debug("[vpn_login] ipinfo failed ip=%s err=%s", ip, exc)
+            return None
+
+        if not resp.ok:
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                self._cache_put(ip, None)
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            self._cache_put(ip, None)
+            return None
+
+        info = self._extract_asn(data)
+        self._cache_put(ip, info)
+        return info
+
+    @staticmethod
+    def _extract_asn(data: dict) -> dict | None:
+        asn_block = data.get("asn") if isinstance(data, dict) else None
+        if isinstance(asn_block, dict):
+            return {
+                "asn_name": (asn_block.get("name") or "").strip() or None,
+                "asn_type": (asn_block.get("type") or "").strip() or None,
+            }
+        # Free-tier fallback: parse "AS15169 Google LLC" out of org.
+        org = (data.get("org") or "").strip() if isinstance(data, dict) else ""
+        if not org:
+            return None
+        parts = org.split(" ", 1)
+        name = parts[1].strip() if len(parts) > 1 else org
+        return {"asn_name": name or None, "asn_type": None}
+
+
+class ImpossibleTravelRule(CorrelationRule):
+    """Fires when two of a user's logins happen in different countries
+    inside a 2-hour window and the physical distance between the two
+    IPs exceeds 500 km -- i.e. the user would need to move faster
+    than any commercial flight to have been at both endpoints.
+
+    The check:
+
+    1. Pull every ``UserLoggedIn`` row with a ``client_ip`` in the
+       lookback window, earliest-first.
+    2. Geolocate each IP via ``ipinfo.io`` (country + ``loc``
+       ``"lat,lng"`` string).
+    3. Scan consecutive pairs; fire on the first pair that satisfies
+       ``different countries AND distance > 500 km AND time_delta <
+       2h``.
+
+    Distance uses the haversine formula on the ``loc`` coordinates.
+    An IP without a ``loc`` is skipped (country-only ipinfo responses
+    are rare but do happen for anycast prefixes). The earliest
+    qualifying pair wins so evidence is deterministic across cycles.
+
+    Score: 50 points. High-confidence on its own -- there are very
+    few false-positive paths once the geo + time check both pass.
+    Still below the 80-point incident threshold by design so a
+    mobile-data reroute followed by a desktop login doesn't auto-
+    page; one co-signal (new country, off-hours, VPN) confirms.
+    """
+
+    name = "ImpossibleTravel"
+    SCORE_DELTA = 50
+    LOOKBACK = timedelta(hours=24)
+    MAX_WINDOW = timedelta(hours=2)
+    MIN_DISTANCE_KM = 500.0
+
+    IPINFO_URL_TEMPLATE = "https://ipinfo.io/{ip}/json"
+    IPINFO_TIMEOUT = 5
+    IPINFO_RATE_LIMIT_SEC = 1.0
+    CACHE_TTL = timedelta(hours=24)
+    EARTH_RADIUS_KM = 6371.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        # ip -> (expires_at, {country, lat, lng} | None)
+        self._cache: dict[str, tuple[datetime, dict | None]] = {}
+        self._last_call_at: float = 0.0
+        self._session: requests.Session | None = None
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[impossible_travel] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            logins = self._fetch_logins(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[impossible_travel] login fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        # Resolve each login's IP once, preserving chronological order.
+        resolved: list[tuple[datetime, str, dict]] = []
+        for ts, ip in logins:
+            if not isinstance(ts, datetime) or not ip:
+                continue
+            info = self._resolve_geo(ip)
+            if not info or not info.get("country"):
+                continue
+            if info.get("lat") is None or info.get("lng") is None:
+                continue
+            resolved.append((ts, ip, info))
+
+        if len(resolved) < 2:
+            return miss
+
+        for i in range(1, len(resolved)):
+            ts_b, ip_b, info_b = resolved[i]
+            ts_a, ip_a, info_a = resolved[i - 1]
+            country_a = (info_a.get("country") or "").upper()
+            country_b = (info_b.get("country") or "").upper()
+            if not country_a or not country_b:
+                continue
+            if country_a == country_b:
+                continue
+            time_delta = ts_b - ts_a
+            if time_delta <= timedelta(0) or time_delta > self.MAX_WINDOW:
+                continue
+            distance_km = self._haversine_km(
+                info_a["lat"], info_a["lng"],
+                info_b["lat"], info_b["lng"],
+            )
+            if distance_km <= self.MIN_DISTANCE_KM:
+                continue
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":               user_id,
+                    "country_a":          country_a,
+                    "country_b":          country_b,
+                    "ip_a":               ip_a,
+                    "ip_b":               ip_b,
+                    "distance_km":        round(distance_km, 1),
+                    "time_delta_minutes": int(time_delta.total_seconds() // 60),
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_logins(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple[datetime, str]]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, client_ip
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND client_ip IS NOT NULL
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp ASC
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+    # ----- math -----------------------------------------------------------
+
+    @classmethod
+    def _haversine_km(
+        cls,
+        lat1: float,
+        lng1: float,
+        lat2: float,
+        lng2: float,
+    ) -> float:
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        d_phi = math.radians(lat2 - lat1)
+        d_lambda = math.radians(lng2 - lng1)
+        a = (
+            math.sin(d_phi / 2) ** 2
+            + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+        )
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return cls.EARTH_RADIUS_KM * c
+
+    # ----- ipinfo resolver ------------------------------------------------
+
+    @staticmethod
+    def _is_skippable_ip(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(str(ip).strip())
+        except (ValueError, TypeError):
+            return True
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.is_reserved
+        )
+
+    def _cache_get(self, ip: str) -> tuple[bool, dict | None]:
+        entry = self._cache.get(ip)
+        if not entry:
+            return (False, None)
+        expires_at, info = entry
+        if datetime.now(timezone.utc) > expires_at:
+            self._cache.pop(ip, None)
+            return (False, None)
+        return (True, info)
+
+    def _cache_put(self, ip: str, info: dict | None) -> None:
+        self._cache[ip] = (
+            datetime.now(timezone.utc) + self.CACHE_TTL,
+            info,
+        )
+
+    def _rate_limit(self) -> None:
+        elapsed = time.monotonic() - self._last_call_at
+        if elapsed < self.IPINFO_RATE_LIMIT_SEC:
+            time.sleep(self.IPINFO_RATE_LIMIT_SEC - elapsed)
+        self._last_call_at = time.monotonic()
+
+    def _resolve_geo(self, ip: str) -> dict | None:
+        """Return ``{country, lat, lng}`` for ``ip`` or ``None``.
+
+        The ``loc`` field from ipinfo.io is a ``"lat,lng"`` string;
+        we split and parse once, stashing floats in the cache so
+        subsequent pair comparisons don't re-parse.
+        """
+        if self._is_skippable_ip(ip):
+            return None
+
+        hit, cached = self._cache_get(ip)
+        if hit:
+            return cached
+
+        self._rate_limit()
+        if self._session is None:
+            self._session = requests.Session()
+        url = self.IPINFO_URL_TEMPLATE.format(ip=ip)
+        try:
+            resp = self._session.get(url, timeout=self.IPINFO_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.debug("[impossible_travel] ipinfo failed ip=%s err=%s", ip, exc)
+            return None
+
+        if not resp.ok:
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                self._cache_put(ip, None)
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            self._cache_put(ip, None)
+            return None
+
+        country = (data.get("country") or "").strip() or None
+        lat: float | None = None
+        lng: float | None = None
+        loc = (data.get("loc") or "").strip()
+        if loc:
+            parts = loc.split(",", 1)
+            if len(parts) == 2:
+                try:
+                    lat = float(parts[0])
+                    lng = float(parts[1])
+                except ValueError:
+                    lat = None
+                    lng = None
+        info = {"country": country, "lat": lat, "lng": lng}
+        self._cache_put(ip, info)
+        return info
+
+
+class InboxRuleCreatedRule(CorrelationRule):
+    """Fires when the user created (or modified) an Exchange inbox
+    rule in the last 24 hours whose action pattern matches known BEC
+    tradecraft: forwarding to an external address, deleting matched
+    messages, or moving them to low-visibility folders like RSS or
+    Deleted Items.
+
+    Inbox rules are the textbook BEC persistence mechanism. Once an
+    attacker phishes credentials, step one is almost always an inbox
+    rule that:
+
+    * forwards incoming mail to a throwaway external mailbox so the
+      attacker sees password-reset confirmations without being
+      logged in, or
+    * moves mail matching keywords like "invoice", "wire", "bank"
+      into ``RSS Feeds`` or ``Deleted Items`` so the victim never
+      sees finance threads while the attacker manipulates them.
+
+    We match the UAL event type ``New-InboxRule`` (and
+    ``NewInboxRule``, which Graph sometimes uses). The action payload
+    lives in ``raw_json.Parameters`` as an array of
+    ``{Name, Value}`` pairs -- we scan those for the suspicious
+    action keywords and only fire when at least one matches. Benign
+    inbox rules (e.g. "move Slack digests to a folder") therefore
+    don't produce noise.
+
+    Score: 35 points. Strong-enough on its own to stack with a
+    single co-signal (new country, off-hours, VPN) and cross the 80-
+    point incident threshold. Low enough that a legitimate user
+    creating an auto-forward to a partner domain doesn't auto-page
+    in isolation -- a second anomaly is still required.
+    """
+
+    name = "InboxRuleCreated"
+    SCORE_DELTA = 35
+    LOOKBACK = timedelta(hours=24)
+
+    MATCHED_EVENT_TYPES = ("New-InboxRule", "NewInboxRule", "Set-InboxRule")
+
+    # Case-insensitive substrings on the *parameter name* side of
+    # the UAL Parameters array that indicate suspicious actions.
+    # These line up with the Exchange cmdlet parameter names
+    # ``ForwardTo`` / ``ForwardAsAttachmentTo`` / ``RedirectTo`` /
+    # ``DeleteMessage`` / ``MoveToFolder``.
+    SUSPICIOUS_PARAM_MARKERS: tuple[str, ...] = (
+        "forwardto",
+        "forwardasattachmentto",
+        "redirectto",
+        "deletemessage",
+        "movetofolder",
+    )
+
+    # Case-insensitive substrings on the *parameter value* side that
+    # indicate a hide-messages destination. Applied only when the
+    # parameter name is ``MoveToFolder`` so we don't over-match.
+    # "Archive" deliberately isn't here -- users routinely create
+    # rules that move old mail to "2024 Archive" or similar and we
+    # don't want to page on legitimate housekeeping.
+    HIDING_FOLDER_MARKERS: tuple[str, ...] = (
+        "rss",
+        "deleted items",
+        "junk",
+        "conversation history",
+    )
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(
+            rule_name=self.rule_name, score_delta=0, fired=False,
+        )
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[inbox_rule] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            rows = self._fetch_inbox_rule_events(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[inbox_rule] fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if not rows:
+            return miss
+
+        for ts, raw in rows:
+            params = self._parameters(raw)
+            if not params:
+                continue
+            rule_name = self._rule_name_from_params(params, raw)
+            action = self._suspicious_action(params)
+            if action is None:
+                continue
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":        user_id,
+                    "rule_name":   rule_name,
+                    "rule_action": action,
+                    "timestamp":   ts.isoformat() if isinstance(ts, datetime) else str(ts),
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_inbox_rule_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple[datetime, Any]]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, raw_json
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = ANY(%s)
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp ASC
+                """,
+                (
+                    tenant_id,
+                    user_id,
+                    list(self.MATCHED_EVENT_TYPES),
+                    self.LOOKBACK,
+                ),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+    # ----- raw_json parsing ----------------------------------------------
+
+    @staticmethod
+    def _parameters(raw: Any) -> list[dict]:
+        """UAL rows store the cmdlet arguments in
+        ``raw_json.Parameters`` as an array of ``{Name, Value}``.
+        Tolerate both a dict (already parsed JSON) and a JSON string,
+        and return a flat list of param dicts."""
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return []
+        if not isinstance(raw, dict):
+            return []
+        params = raw.get("Parameters")
+        if not isinstance(params, list):
+            return []
+        return [p for p in params if isinstance(p, dict)]
+
+    @staticmethod
+    def _rule_name_from_params(params: list[dict], raw: Any) -> str | None:
+        for p in params:
+            name = (p.get("Name") or "").lower()
+            if name == "name":
+                val = p.get("Value")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        if isinstance(raw, dict):
+            obj_id = raw.get("ObjectId")
+            if isinstance(obj_id, str) and obj_id.strip():
+                return obj_id.strip()
+        return None
+
+    @classmethod
+    def _suspicious_action(cls, params: list[dict]) -> str | None:
+        """Return a short action label if ``params`` contains a
+        suspicious cmdlet argument, else ``None``.
+
+        The label is what we surface on the Incidents UI so
+        operators can triage without clicking into the raw event:
+        ``"forward"`` / ``"delete"`` / ``"move:RSS Feeds"`` etc.
+        """
+        for p in params:
+            name = (p.get("Name") or "").lower()
+            if not name:
+                continue
+            matched = next(
+                (m for m in cls.SUSPICIOUS_PARAM_MARKERS if m in name),
+                None,
+            )
+            if matched is None:
+                continue
+            if matched == "movetofolder":
+                value = p.get("Value")
+                value_str = value if isinstance(value, str) else ""
+                value_lower = value_str.lower()
+                hiding = next(
+                    (h for h in cls.HIDING_FOLDER_MARKERS if h in value_lower),
+                    None,
+                )
+                if hiding is None:
+                    # MoveToFolder to a non-hiding destination is
+                    # legitimate (e.g. "move to 2024 Archive"); skip.
+                    continue
+                return f"move:{value_str or hiding}"
+            if matched in ("forwardto", "forwardasattachmentto", "redirectto"):
+                value = p.get("Value")
+                target = value if isinstance(value, str) else ""
+                return f"forward:{target}" if target else "forward"
+            if matched == "deletemessage":
+                return "delete"
+        return None
 
 
 class ThreatIntelMonitor:
