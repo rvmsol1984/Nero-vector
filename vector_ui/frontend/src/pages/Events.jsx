@@ -7,6 +7,27 @@ import { getEventLabel } from "../utils/eventLabels.js";
 
 const PAGE = 50;
 
+// Workload → accent color mapping shared by the filter pills and
+// the event card left-border tint.
+const WORKLOAD_COLORS = {
+  exchange:              "#e3b341",
+  sharepoint:            "#39d353",
+  onedrive:              "#39d353",
+  onedriveforbusiness:   "#39d353",
+  azureactivedirectory:  "#58a6ff",
+  microsoftteams:        "#bc8cff",
+  threatintelligence:    "#f85149",
+  inky:                  "#f85149",
+  edr:                   "#64748B",
+  defender:              "#64748B",
+  copilot:               "#79c0ff",
+};
+
+function workloadAccent(wl) {
+  if (!wl) return null;
+  return WORKLOAD_COLORS[wl.toLowerCase().replace(/\s/g, "")] || null;
+}
+
 function Pill({ active, onClick, children }) {
   return (
     <button
@@ -23,6 +44,40 @@ function Pill({ active, onClick, children }) {
   );
 }
 
+function WorkloadPill({ wl, active, onClick }) {
+  const color = workloadAccent(wl);
+  const label = wl || "(none)";
+  if (!color) {
+    return (
+      <Pill active={active} onClick={onClick}>
+        {label}
+      </Pill>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all duration-200 active:scale-95 border"
+      style={
+        active
+          ? {
+              color: "#fff",
+              backgroundColor: color,
+              borderColor: color,
+            }
+          : {
+              color,
+              backgroundColor: color + "18",
+              borderColor: color + "44",
+            }
+      }
+    >
+      {label}
+    </button>
+  );
+}
+
 export default function Events() {
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -30,7 +85,6 @@ export default function Events() {
   const eventType = searchParams.get("event_type") || "";
   const workload  = searchParams.get("workload")   || "";
   const userQuery = searchParams.get("user")       || "";
-  const ipQuery   = searchParams.get("ip")         || "";
   const offset    = Number(searchParams.get("offset") || 0);
 
   const [userInput, setUserInput] = useState(userQuery);
@@ -83,7 +137,6 @@ export default function Events() {
         event_type: eventType || undefined,
         workload: workload || undefined,
         user: userQuery || undefined,
-        ip: ipQuery || undefined,
       })
       .then((r) => {
         if (!cancel) setRows(r);
@@ -97,9 +150,9 @@ export default function Events() {
     return () => {
       cancel = true;
     };
-  }, [offset, tenant, eventType, workload, userQuery, ipQuery]);
+  }, [offset, tenant, eventType, workload, userQuery]);
 
-  const activeCount = [tenant, eventType, workload, userQuery, ipQuery].filter(Boolean).length;
+  const activeCount = [tenant, eventType, workload, userQuery].filter(Boolean).length;
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -152,13 +205,12 @@ export default function Events() {
             all
           </Pill>
           {byWorkload.map((t) => (
-            <Pill
+            <WorkloadPill
               key={t.workload ?? ""}
+              wl={t.workload}
               active={workload === (t.workload ?? "")}
               onClick={() => updateFilter("workload", t.workload ?? "")}
-            >
-              {t.workload ?? "(none)"}
-            </Pill>
+            />
           ))}
         </div>
 
@@ -180,18 +232,11 @@ export default function Events() {
           </select>
 
           <input
-            className="flex-1 min-w-[160px] bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-blue-500"
             type="search"
             placeholder="search user email…"
-            value={userQuery}
-            onChange={e => { const p = new URLSearchParams(searchParams); e.target.value ? p.set("user", e.target.value) : p.delete("user"); p.delete("offset"); setSearchParams(p); }}
-          />
-          <input
-            className="flex-1 min-w-[160px] bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-blue-500"
-            type="search"
-            placeholder="search IP address…"
-            value={ipQuery}
-            onChange={e => { const p = new URLSearchParams(searchParams); e.target.value ? p.set("ip", e.target.value) : p.delete("ip"); p.delete("offset"); setSearchParams(p); }}
+            value={userInput}
+            onChange={(e) => setUserInput(e.target.value)}
+            className="bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-primary-light w-64"
           />
         </div>
       </div>
@@ -204,9 +249,17 @@ export default function Events() {
 
       {/* ----- event cards ----- */}
       <div className="space-y-3">
-        {rows.map((r) => (
-          <EventCard key={r.id} event={r} />
-        ))}
+        {rows.map((r) => {
+          const accent = workloadAccent(r.workload || r.source);
+          return (
+            <div
+              key={r.id}
+              style={accent ? { borderLeft: `3px solid ${accent}`, borderRadius: 12 } : undefined}
+            >
+              <EventCard event={r} />
+            </div>
+          );
+        })}
         {!loading && rows.length === 0 && (
           <div className="card text-white/50 text-sm text-center py-10">
             no events match current filter
