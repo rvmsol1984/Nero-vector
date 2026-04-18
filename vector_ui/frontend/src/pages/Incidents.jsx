@@ -1195,9 +1195,30 @@ function Th11({ children }) {
 // dict; normalize a few common field names so we can render the row
 // regardless of which signal type produced it.
 
+// Per-rule icon + border color so the evidence timeline looks
+// visually scannable at a glance. Rules that aren't in the map
+// get a generic lightning bolt + grey border.
+const RULE_STYLE = {
+  NewCountryLogin:        { icon: "🌍", color: "#3B82F6" },
+  NewCountryLoginRule:    { icon: "🌍", color: "#3B82F6" },
+  OffHoursLogin:          { icon: "🕐", color: "#8B5CF6" },
+  OffHoursLoginRule:      { icon: "🕐", color: "#8B5CF6" },
+  HighVolumeFileAccess:   { icon: "📁", color: "#14B8A6" },
+  HighVolumeFileAccessRule: { icon: "📁", color: "#14B8A6" },
+  SuspiciousMailbox:      { icon: "📧", color: "#F97316" },
+  SuspiciousMailboxRule:  { icon: "📧", color: "#F97316" },
+  MalwareDetected:        { icon: "☠️", color: "#DC2626" },
+  MalwareDetectedRule:    { icon: "☠️", color: "#DC2626" },
+  IOCMatch:               { icon: "🎯", color: "#EF4444" },
+  IOCMatchRule:           { icon: "🎯", color: "#EF4444" },
+  HighRiskCountryLogin:   { icon: "⚠", color: "#DC2626" },
+  HighRiskCountryLoginRule: { icon: "⚠", color: "#DC2626" },
+};
+const DEFAULT_RULE_STYLE = { icon: "⚡", color: "#6B7280" };
+
 function EvidenceRow({ signal }) {
   if (!signal || typeof signal !== "object") return null;
-  const source = signal.source || signal.event_source || signal.kind || null;
+  const ruleName = signal.rule || signal.name || signal.event_type || "";
   const score = Number(signal.score ?? signal.weight ?? signal.points ?? 0);
   const description =
     signal.description ||
@@ -1207,12 +1228,22 @@ function EvidenceRow({ signal }) {
     signal.event_type ||
     "signal";
   const ts = signal.timestamp || signal.time || signal.event_time || signal.added_at;
+  const style = RULE_STYLE[ruleName] || DEFAULT_RULE_STYLE;
+
   return (
-    <div className="px-3 py-2 flex items-start gap-3 text-[11px]">
-      <SourceBadge source={source} />
+    <div
+      className="px-3 py-2 flex items-start gap-3 text-[11px]"
+      style={{ borderLeft: `3px solid ${style.color}` }}
+    >
+      <span className="text-base leading-none shrink-0 mt-px" aria-hidden="true">
+        {style.icon}
+      </span>
       <div className="flex-1 min-w-0">
-        <div className="text-white/80 truncate" title={description}>
-          {description}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-white/80 font-semibold truncate" title={ruleName}>
+            {ruleName || description}
+          </span>
+          <SourceBadge source={signal.source || signal.event_source || signal.kind} />
         </div>
         {signal.detail && (
           <div
@@ -1226,7 +1257,7 @@ function EvidenceRow({ signal }) {
       {score > 0 && (
         <div
           className="font-bold tabular-nums whitespace-nowrap"
-          style={{ color: "#EF4444" }}
+          style={{ color: style.color }}
         >
           +{score}
         </div>
