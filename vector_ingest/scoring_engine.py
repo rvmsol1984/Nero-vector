@@ -263,6 +263,9 @@ class ScoringEngine:
                 MassEmailDeleteRule(),
                 NewDeviceLoginRule(),
                 PrivilegedRoleAssignedRule(),
+                MFAMethodChangedRule(),
+                ServicePrincipalLoginRule(),
+                PasswordSprayRule(),
             ]
         for r in rules:
             self.register_rule(r)
@@ -3436,6 +3439,503 @@ class PrivilegedRoleAssignedRule(CorrelationRule):
                 return None
             return stripped
         return None
+
+
+class MFAMethodChangedRule(CorrelationRule):
+    """Fires when a user's MFA method was changed inside the lookback window.
+
+    Monitors UAL "Update user." events whose ModifiedProperties list
+    contains a StrongAuthenticationMethod entry. MFA method changes are
+    a reliable post-compromise signal: an attacker who has obtained
+    initial access will reset the victim's MFA to one they control so
+    they can maintain persistence even after the password is rotated.
+
+    Score: 40 points. High enough that a second co-signal (new country,
+    VPN, off-hours) immediately clears the incident threshold.
+    """
+
+    name = "MFAMethodChanged"
+    SCORE_DELTA = 40
+    LOOKBACK = timedelta(hours=24)
+
+    MFA_PROP_KEY = "StrongAuthenticationMethod"
+    EVENT_TYPE = "Update user."
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(rule_name=self.rule_name, score_delta=0, fired=False)
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[mfa_changed] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            rows = self._fetch_mfa_events(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[mfa_changed] fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        for ts, raw in rows:
+            old_method, new_method = self._extract_methods(raw)
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":       user_id,
+                    "old_method": old_method,
+                    "new_method": new_method,
+                    "timestamp":  ts.isoformat() if isinstance(ts, datetime) else None,
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_mfa_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, raw_json
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = %s
+                  AND raw_json::text ILIKE %s
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp DESC
+                """,
+                (
+                    tenant_id,
+                    user_id,
+                    self.EVENT_TYPE,
+                    f"%{self.MFA_PROP_KEY}%",
+                    self.LOOKBACK,
+                ),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+    # ----- raw_json parsing -----------------------------------------------
+
+    @classmethod
+    def _extract_methods(cls, raw: Any) -> tuple[str | None, str | None]:
+        """Return (old_method, new_method) from ModifiedProperties."""
+        if raw is None:
+            return (None, None)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return (None, None)
+        if not isinstance(raw, dict):
+            return (None, None)
+        mods = raw.get("ModifiedProperties")
+        if not isinstance(mods, list):
+            return (None, None)
+        for entry in mods:
+            if not isinstance(entry, dict):
+                continue
+            if cls.MFA_PROP_KEY not in (entry.get("Name") or ""):
+                continue
+            old_val = entry.get("OldValue") or entry.get("old_value")
+            new_val = entry.get("NewValue") or entry.get("new_value")
+            return (
+                cls._parse_method_value(old_val),
+                cls._parse_method_value(new_val),
+            )
+        return (None, None)
+
+    @staticmethod
+    def _parse_method_value(val: Any) -> str | None:
+        """Normalise UAL's many shapes for a StrongAuthenticationMethod
+        value into a human-readable string."""
+        if val is None:
+            return None
+        if isinstance(val, list) and val:
+            entry = val[0]
+            if isinstance(entry, dict):
+                return (
+                    entry.get("MethodType")
+                    or entry.get("methodType")
+                    or str(entry)
+                )
+            return str(entry)
+        if isinstance(val, str):
+            stripped = val.strip()
+            if not stripped:
+                return None
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                return stripped
+            if isinstance(parsed, list) and parsed:
+                entry = parsed[0]
+                if isinstance(entry, dict):
+                    return (
+                        entry.get("MethodType")
+                        or entry.get("methodType")
+                        or str(entry)
+                    )
+                return str(entry)
+            if isinstance(parsed, str):
+                return parsed.strip() or None
+            return stripped
+        return str(val) if val else None
+
+
+class ServicePrincipalLoginRule(CorrelationRule):
+    """Fires when a UserLoggedIn event comes from an unknown client app.
+
+    Azure AD records the client application ID (AppId) on every
+    sign-in. A curated list of known-safe Microsoft first-party app IDs
+    covers Office, Teams, SharePoint, and common admin portals. Any
+    authentication that uses an app ID outside this list indicates a
+    non-standard client -- which can be a legitimate third-party
+    integration, but is also a common vector for token-theft replays and
+    OAuth abuse.
+
+    Score: 30 points. Designed to combine with other signals (new
+    country, off-hours, impossible travel) rather than fire alone.
+    """
+
+    name = "ServicePrincipalLogin"
+    SCORE_DELTA = 30
+    LOOKBACK = timedelta(hours=24)
+
+    # Well-known Microsoft first-party app IDs that are safe to skip.
+    # GUIDs are stored lowercase-normalised.
+    KNOWN_SAFE_APP_IDS: frozenset[str] = frozenset({
+        "d3590ed6-52b3-4102-aeff-aad2292ab01c",  # Microsoft Office
+        "00000002-0000-0ff1-ce00-000000000000",  # Office 365 Exchange Online
+        "00000003-0000-0ff1-ce00-000000000000",  # SharePoint Online
+        "00000004-0000-0ff1-ce00-000000000000",  # Skype for Business
+        "1fec8e78-bce4-4aaf-ab1b-5451cc387264",  # Microsoft Teams
+        "5e3ce6c0-2b1f-4285-8d4b-75ee78787346",  # Teams Web Client
+        "4765445b-32c6-49b0-83e6-1d93765276ca",  # Office Online
+        "cc15fd57-2c6c-4117-a88c-83b1d56b4bbe",  # Teams Desktop
+        "57fb890c-0dab-4253-a5e0-7188c88b2bb4",  # SharePoint Online Client
+        "b26aadf8-566f-4478-926f-589f601d9c74",  # OneDrive SyncEngine
+        "ab9b8c07-8f02-4f72-87fa-80105867a763",  # OneDrive for Business
+        "00000006-0000-0ff1-ce00-000000000000",  # Office 365 Portal
+        "89bee1f7-5e6e-4d8a-9f3d-ecd601259da7",  # Office 365 Management APIs
+        "797f4846-ba00-4fd7-ba43-dac1f8f63013",  # Azure AD Joined Devices
+        "a0c73c16-a7e3-4564-9a95-2bdf47383716",  # Exchange ActiveSync
+        "04b07795-8ddb-461a-bbee-02f9e1bf7b46",  # Microsoft Azure CLI
+        "1950a258-227b-4e31-a9cf-717495945fc2",  # Microsoft Azure PowerShell
+        "26a7ee05-5602-4d76-a7ba-eae8b7b67941",  # Windows Sign In
+        "27922004-5251-4030-b22d-91ecd9a37ea4",  # Outlook Mobile
+        "4e291c71-d680-4d0e-9640-0a3358e31177",  # PowerApps
+        "cf36b471-5b44-428c-9ce7-313bf84528de",  # Microsoft Authenticator
+        "fc0f3af4-6835-4174-b806-f7db311fd2f3",  # Microsoft Intune
+    })
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(rule_name=self.rule_name, score_delta=0, fired=False)
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[sp_login] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            rows = self._fetch_login_events(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[sp_login] fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        for ts, raw in rows:
+            app_id, app_name = self._extract_app(raw)
+            if not app_id:
+                continue
+            if app_id.lower() in self.KNOWN_SAFE_APP_IDS:
+                continue
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":      user_id,
+                    "app_id":    app_id,
+                    "app_name":  app_name,
+                    "timestamp": ts.isoformat() if isinstance(ts, datetime) else None,
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_login_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, raw_json
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp DESC
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]
+
+    # ----- raw_json parsing -----------------------------------------------
+
+    @staticmethod
+    def _extract_app(raw: Any) -> tuple[str | None, str | None]:
+        """Return (app_id, app_name) from a login event's raw_json."""
+        if raw is None:
+            return (None, None)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return (None, None)
+        if not isinstance(raw, dict):
+            return (None, None)
+        app_id = (
+            raw.get("ApplicationId")
+            or raw.get("AppId")
+            or raw.get("ClientAppId")
+            or raw.get("client_app_id")
+        )
+        app_name = (
+            raw.get("ApplicationName")
+            or raw.get("AppName")
+            or raw.get("AppDisplayName")
+            or raw.get("app_name")
+        )
+        return (
+            str(app_id).strip() if app_id else None,
+            str(app_name).strip() if app_name else None,
+        )
+
+
+class PasswordSprayRule(CorrelationRule):
+    """Fires when 5+ failed logins come from one IP across 3+ user accounts.
+
+    Password-spray attacks try a single common password against many
+    accounts from one source IP to stay below per-account lockout
+    thresholds. The pattern is: one IP, many distinct targets, many
+    failures, all within a short window.
+
+    For each user's failed-login source IPs, this rule queries across
+    all users in the tenant to count total attempts and distinct targets
+    from that IP in the last 10 minutes. When attempt_count >=
+    ATTEMPT_THRESHOLD and distinct users >= USER_THRESHOLD the rule
+    fires against the user being evaluated.
+
+    Known office IPs are excluded. The exclusion list is loaded once
+    from ``vector_known_ips`` (fail-open: if the table is absent all
+    IPs are evaluated).
+
+    Score: 55 points.
+    """
+
+    name = "PasswordSpray"
+    SCORE_DELTA = 55
+    WINDOW = timedelta(minutes=10)
+    ATTEMPT_THRESHOLD = 5
+    USER_THRESHOLD = 3
+
+    FAILED_STATUSES: frozenset[str] = frozenset({"failed", "failure", "0"})
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._known_office_ips: set[str] = set()
+        self._office_ips_loaded: bool = False
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(rule_name=self.rule_name, score_delta=0, fired=False)
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[password_spray] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        if not self._office_ips_loaded:
+            self._load_known_ips()
+
+        failed_ips = self._extract_failed_ips(events)
+        if not failed_ips:
+            return miss
+
+        for ip in failed_ips:
+            if ip in self._known_office_ips:
+                continue
+            try:
+                attempt_count, affected_users = self._query_spray(tenant_id, ip)
+            except Exception:
+                logger.exception(
+                    "[password_spray] spray query failed",
+                    extra={"tenant_id": tenant_id, "ip": ip},
+                )
+                try:
+                    self._db.conn.rollback()
+                except Exception:
+                    pass
+                continue
+
+            if (
+                attempt_count >= self.ATTEMPT_THRESHOLD
+                and len(affected_users) >= self.USER_THRESHOLD
+            ):
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=self.SCORE_DELTA,
+                    fired=True,
+                    evidence={
+                        "source_ip":      ip,
+                        "affected_users": sorted(affected_users),
+                        "attempt_count":  attempt_count,
+                        "window_minutes": int(self.WINDOW.total_seconds() // 60),
+                    },
+                )
+
+        return miss
+
+    # ----- office IP exclusion --------------------------------------------
+
+    def _load_known_ips(self) -> None:
+        """Load office IPs from vector_known_ips. Fails open (empty set)
+        when the table doesn't exist or the query errors."""
+        self._office_ips_loaded = True
+        if self._db is None:
+            return
+        try:
+            with self._db.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ip_address FROM vector_known_ips
+                    WHERE ip_type = 'office' OR ip_type IS NULL
+                    """
+                )
+                self._known_office_ips = {
+                    row[0] for row in cur.fetchall() if row[0]
+                }
+        except Exception:
+            logger.debug(
+                "[password_spray] vector_known_ips unavailable, fail-open",
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            self._known_office_ips = set()
+
+    # ----- helpers --------------------------------------------------------
+
+    def _extract_failed_ips(self, events: list[dict]) -> set[str]:
+        """Return distinct source IPs from this user's failed logins."""
+        ips: set[str] = set()
+        for ev in events:
+            if ev.get("event_type") != "UserLoggedIn":
+                continue
+            status = (ev.get("result_status") or "").lower()
+            if status not in self.FAILED_STATUSES:
+                continue
+            ip = ev.get("client_ip")
+            if ip:
+                ips.add(str(ip))
+        return ips
+
+    def _query_spray(
+        self,
+        tenant_id: str,
+        ip: str,
+    ) -> tuple[int, set[str]]:
+        """Return (total_attempt_count, distinct_user_set) for failed
+        logins from this IP within WINDOW across all users."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id, COUNT(*) AS attempts
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND client_ip = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND LOWER(result_status) = ANY(%s)
+                  AND timestamp > NOW() - %s
+                GROUP BY user_id
+                """,
+                (
+                    tenant_id,
+                    ip,
+                    list(self.FAILED_STATUSES),
+                    self.WINDOW,
+                ),
+            )
+            rows = cur.fetchall()
+        user_set = {row[0] for row in rows if row[0]}
+        total = sum(int(row[1] or 0) for row in rows)
+        return (total, user_set)
 
 
 class ThreatIntelMonitor:
