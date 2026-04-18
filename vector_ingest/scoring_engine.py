@@ -266,6 +266,8 @@ class ScoringEngine:
                 MFAMethodChangedRule(),
                 ServicePrincipalLoginRule(),
                 PasswordSprayRule(),
+                AttachmentOpenedPostLoginRule(),
+                ExternalSharingSpikeRule(),
             ]
         for r in rules:
             self.register_rule(r)
@@ -3936,6 +3938,359 @@ class PasswordSprayRule(CorrelationRule):
         user_set = {row[0] for row in rows if row[0]}
         total = sum(int(row[1] or 0) for row in rows)
         return (total, user_set)
+
+
+class AttachmentOpenedPostLoginRule(CorrelationRule):
+    """Fires when a login from a new country or outside normal hours is
+    followed within 30 minutes by a file-download or file-preview event.
+
+    The sequence — authenticate from an unusual context, immediately
+    pull an attachment — is a reliable business-email-compromise pattern.
+    Legitimate travellers occasionally trigger it, but the combination
+    with ExternalSharingSpike or ImpossibleTravel quickly raises the
+    aggregate score above the incident threshold.
+
+    Detection window: the login must have occurred within the last 30
+    minutes, and the file event must follow the login within 30 minutes.
+
+    Score: 30 points.
+    """
+
+    name = "AttachmentOpenedPostLogin"
+    SCORE_DELTA = 30
+    WINDOW = timedelta(minutes=30)
+
+    LOGIN_EVENT_TYPE = "UserLoggedIn"
+    FILE_EVENT_TYPES: frozenset[str] = frozenset({
+        "FileDownloaded", "FilePreviewed", "FileAccessed",
+    })
+
+    # Country codes considered high-risk for the "new country" half of
+    # the trigger. The rule also fires when the login is off-hours even
+    # if the country is baseline-normal -- the country is included in
+    # evidence regardless.
+    HIGH_RISK_COUNTRIES: frozenset[str] = frozenset({
+        "CN", "RU", "KP", "IR", "SY", "CU",
+    })
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(rule_name=self.rule_name, score_delta=0, fired=False)
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[attach_post_login] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        known_countries: set[str] = set()
+        raw_countries = user_profile.get("login_countries") or {}
+        if isinstance(raw_countries, dict):
+            known_countries = {k for k in raw_countries if k}
+        elif isinstance(raw_countries, (list, tuple, set)):
+            known_countries = {str(v) for v in raw_countries if v}
+
+        login_hours: dict = {}
+        raw_hours = user_profile.get("login_hours") or {}
+        if isinstance(raw_hours, dict):
+            login_hours = raw_hours
+
+        try:
+            login_rows = self._fetch_logins(tenant_id, user_id)
+            file_rows = self._fetch_file_events(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[attach_post_login] fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if not login_rows or not file_rows:
+            return miss
+
+        for login_ts, login_country, login_ip in login_rows:
+            if not isinstance(login_ts, datetime):
+                continue
+
+            unusual = self._is_unusual_login(
+                login_ts, login_country, known_countries, login_hours,
+            )
+            if not unusual:
+                continue
+
+            for file_ts, file_name, file_size in file_rows:
+                if not isinstance(file_ts, datetime):
+                    continue
+                if file_ts < login_ts:
+                    continue
+                delta = file_ts - login_ts
+                if delta > self.WINDOW:
+                    continue
+
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=self.SCORE_DELTA,
+                    fired=True,
+                    evidence={
+                        "user":               user_id,
+                        "login_country":      login_country,
+                        "file_name":          file_name,
+                        "file_size":          file_size,
+                        "time_delta_minutes": round(
+                            delta.total_seconds() / 60, 1
+                        ),
+                    },
+                )
+
+        return miss
+
+    # ----- helpers --------------------------------------------------------
+
+    @staticmethod
+    def _is_unusual_login(
+        ts: datetime,
+        country: str | None,
+        known_countries: set[str],
+        login_hours: dict,
+    ) -> bool:
+        """Return True when the login country is new/high-risk OR the
+        hour is outside the user's baseline login hours."""
+        if country and known_countries and country not in known_countries:
+            return True
+        if country and country in AttachmentOpenedPostLoginRule.HIGH_RISK_COUNTRIES:
+            return True
+        if login_hours:
+            hour_key = str(ts.hour)
+            if hour_key not in login_hours:
+                return True
+        return False
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_logins(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp,
+                       raw_json->>'Country' AS country,
+                       client_ip
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = %s
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp DESC
+                """,
+                (tenant_id, user_id, self.LOGIN_EVENT_TYPE, self.WINDOW),
+            )
+            return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+    def _fetch_file_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp,
+                       COALESCE(
+                           raw_json->>'SourceFileName',
+                           raw_json->>'ObjectId',
+                           entity_key
+                       ) AS file_name,
+                       (raw_json->>'FileSize')::bigint AS file_size
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = ANY(%s)
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp ASC
+                """,
+                (
+                    tenant_id,
+                    user_id,
+                    list(self.FILE_EVENT_TYPES),
+                    self.WINDOW * 2,
+                ),
+            )
+            return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+
+class ExternalSharingSpikeRule(CorrelationRule):
+    """Fires when a user creates 3+ external shares within one hour.
+
+    ``SharingInvitationCreated`` and ``AnonymousLinkCreated`` are the
+    UAL events emitted when a user shares a file or folder externally.
+    Three or more such events inside a one-hour rolling window is
+    anomalous for most users and is a reliable data-exfiltration
+    precursor in BEC and insider-threat scenarios.
+
+    The rule collects distinct external recipient addresses from the
+    event payloads for the evidence dict so analysts can immediately
+    see who received access without pivoting to a second query.
+
+    Score: 35 points.
+    """
+
+    name = "ExternalSharingSpike"
+    SCORE_DELTA = 35
+    WINDOW = timedelta(hours=1)
+    SHARE_THRESHOLD = 3
+
+    SHARING_EVENT_TYPES: frozenset[str] = frozenset({
+        "SharingInvitationCreated",
+        "AnonymousLinkCreated",
+        "AddedToSecureLink",
+    })
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(rule_name=self.rule_name, score_delta=0, fired=False)
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[ext_sharing_spike] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            rows = self._fetch_sharing_events(tenant_id, user_id)
+        except Exception:
+            logger.exception(
+                "[ext_sharing_spike] fetch failed",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+            return miss
+
+        if len(rows) < self.SHARE_THRESHOLD:
+            return miss
+
+        # Slide a 1-hour window over the sorted events.
+        rows_sorted = sorted(rows, key=lambda r: r[0] or datetime.min)
+        for i, (ts_start, _, _) in enumerate(rows_sorted):
+            if not isinstance(ts_start, datetime):
+                continue
+            window_end = ts_start + self.WINDOW
+            bucket = [
+                r for r in rows_sorted[i:]
+                if isinstance(r[0], datetime) and r[0] <= window_end
+            ]
+            if len(bucket) < self.SHARE_THRESHOLD:
+                continue
+
+            recipients: list[str] = []
+            for _, raw, _ in bucket:
+                rcpt = self._extract_recipient(raw)
+                if rcpt and rcpt not in recipients:
+                    recipients.append(rcpt)
+
+            last_ts = bucket[-1][0]
+            return RuleResult(
+                rule_name=self.rule_name,
+                score_delta=self.SCORE_DELTA,
+                fired=True,
+                evidence={
+                    "user":               user_id,
+                    "share_count":        len(bucket),
+                    "external_recipients": recipients,
+                    "window_start":       ts_start.isoformat(),
+                    "window_end":         last_ts.isoformat()
+                                          if isinstance(last_ts, datetime)
+                                          else None,
+                },
+            )
+
+        return miss
+
+    # ----- database -------------------------------------------------------
+
+    def _fetch_sharing_events(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[tuple]:
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT timestamp, raw_json, event_type
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND event_type = ANY(%s)
+                  AND timestamp > NOW() - %s
+                ORDER BY timestamp ASC
+                """,
+                (
+                    tenant_id,
+                    user_id,
+                    list(self.SHARING_EVENT_TYPES),
+                    self.WINDOW,
+                ),
+            )
+            return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+    # ----- raw_json parsing -----------------------------------------------
+
+    @staticmethod
+    def _extract_recipient(raw: Any) -> str | None:
+        """Pull the external recipient from a sharing event payload."""
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+        if not isinstance(raw, dict):
+            return None
+        for key in (
+            "TargetUserOrGroupName",
+            "InviteeEmail",
+            "RecipientAddress",
+            "SharedWith",
+            "TargetUserOrGroupType",
+        ):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return None
 
 
 class ThreatIntelMonitor:
