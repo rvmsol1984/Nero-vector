@@ -5,6 +5,7 @@ import Layout from "./components/Layout.jsx";
 import AiShadowIt from "./pages/AiShadowIt.jsx";
 import Baseline from "./pages/Baseline.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
+import Exceptions from "./pages/Exceptions.jsx";
 import DataSharing from "./pages/DataSharing.jsx";
 import Devices from "./pages/Devices.jsx";
 import Events from "./pages/Events.jsx";
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="/ai"               element={<AiShadowIt />} />
           <Route path="/governance"       element={<Governance />} />
           <Route path="/sources"          element={<Sources />} />
+          <Route path="/exceptions"       element={<Exceptions />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>
       </Routes>
