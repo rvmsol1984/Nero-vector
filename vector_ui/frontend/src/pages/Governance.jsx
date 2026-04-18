@@ -8,6 +8,77 @@ import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
 import { filenameFromObjectId, fmtNumber, fmtRelative, fmtTime } from "../utils/format.js";
 
+// ⚠️ POSITION-CRITICAL: _ipCell and UAL_COL_* must stay here — they are referenced by column definitions above. Do NOT move these constants.
+const _ipCell = (r) =>
+  r.client_ip ? (
+    <span className="font-mono tabular-nums">{r.client_ip}</span>
+  ) : (
+    <span className="text-white/30">—</span>
+  );
+
+const _fileCell = (r) => {
+  const fn = filenameFromObjectId(r.raw_json?.ObjectId);
+  return fn || <span className="text-white/30">—</span>;
+};
+
+const UAL_COL_TIMESTAMP = {
+  key: "timestamp",
+  label: "Time",
+  render: (r) => (
+    <span className="text-white/60 whitespace-nowrap tabular-nums">
+      {fmtTime(r.timestamp)}
+    </span>
+  ),
+};
+const UAL_COL_IP = { key: "client_ip", label: "IP", render: _ipCell };
+const UAL_COL_EVENT_TYPE = {
+  key: "event_type",
+  label: "Type",
+  render: (r) => (
+    <span className="truncate max-w-[200px] inline-block align-middle" title={r.event_type}>
+      {getEventLabel(r.event_type) || "—"}
+    </span>
+  ),
+};
+const UAL_COL_WORKLOAD = {
+  key: "workload",
+  label: "Workload",
+  render: (r) => r.workload || <span className="text-white/30">—</span>,
+};
+const UAL_COL_USER = {
+  key: "user_id",
+  label: "User",
+  render: (r) => (
+    <span className="truncate max-w-[200px] inline-block align-middle" title={r.user_id}>
+      {r.user_id || <span className="text-white/30">—</span>}
+    </span>
+  ),
+};
+
+// ---- AI Activity tab -------------------------------------------------------
+
+// Friendly names for the AI tool domains the Defender KQL query filters on.
+// Keys are the hostnames we expect RemoteUrl to resolve to; anything not in
+// the map falls back to the raw hostname.
+const AI_TOOL_NAMES = {
+  "chat.openai.com":      "ChatGPT",
+  "chatgpt.com":          "ChatGPT",
+  "api.openai.com":       "ChatGPT (API)",
+  "claude.ai":            "Claude",
+  "anthropic.com":        "Anthropic",
+  "gemini.google.com":    "Gemini",
+  "bard.google.com":      "Bard",
+  "deepseek.com":         "DeepSeek",
+  "perplexity.ai":        "Perplexity",
+  "copilot.microsoft.com":"Copilot",
+  "huggingface.co":       "HuggingFace",
+  "mistral.ai":           "Mistral",
+  "grok.x.ai":            "Grok",
+  "you.com":              "You.com",
+  "poe.com":              "Poe",
+};
+
+
 // Each tab owns its own endpoint, its default severity pill, and an
 // intrinsic severity (what the empty-vs-finding story looks like).
 const TABS = [
@@ -1798,74 +1869,6 @@ function AsyncEventsExpand({
 
 // Shorthand helpers for some very common UAL event shapes so each
 // table can reuse the same column specs.
-const _ipCell = (r) =>
-  r.client_ip ? (
-    <span className="font-mono tabular-nums">{r.client_ip}</span>
-  ) : (
-    <span className="text-white/30">—</span>
-  );
-
-const _fileCell = (r) => {
-  const fn = filenameFromObjectId(r.raw_json?.ObjectId);
-  return fn || <span className="text-white/30">—</span>;
-};
-
-const UAL_COL_TIMESTAMP = {
-  key: "timestamp",
-  label: "Time",
-  render: (r) => (
-    <span className="text-white/60 whitespace-nowrap tabular-nums">
-      {fmtTime(r.timestamp)}
-    </span>
-  ),
-};
-const UAL_COL_IP = { key: "client_ip", label: "IP", render: _ipCell };
-const UAL_COL_EVENT_TYPE = {
-  key: "event_type",
-  label: "Type",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.event_type}>
-      {getEventLabel(r.event_type) || "—"}
-    </span>
-  ),
-};
-const UAL_COL_WORKLOAD = {
-  key: "workload",
-  label: "Workload",
-  render: (r) => r.workload || <span className="text-white/30">—</span>,
-};
-const UAL_COL_USER = {
-  key: "user_id",
-  label: "User",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.user_id}>
-      {r.user_id || <span className="text-white/30">—</span>}
-    </span>
-  ),
-};
-
-// ---- AI Activity tab -------------------------------------------------------
-
-// Friendly names for the AI tool domains the Defender KQL query filters on.
-// Keys are the hostnames we expect RemoteUrl to resolve to; anything not in
-// the map falls back to the raw hostname.
-const AI_TOOL_NAMES = {
-  "chat.openai.com":      "ChatGPT",
-  "chatgpt.com":          "ChatGPT",
-  "api.openai.com":       "ChatGPT (API)",
-  "claude.ai":            "Claude",
-  "anthropic.com":        "Anthropic",
-  "gemini.google.com":    "Gemini",
-  "bard.google.com":      "Bard",
-  "deepseek.com":         "DeepSeek",
-  "perplexity.ai":        "Perplexity",
-  "copilot.microsoft.com":"Copilot",
-  "huggingface.co":       "HuggingFace",
-  "mistral.ai":           "Mistral",
-  "grok.x.ai":            "Grok",
-  "you.com":              "You.com",
-  "poe.com":              "Poe",
-};
 
 function aiToolDisplay(remoteUrl) {
   if (!remoteUrl) return { label: "—", host: "" };

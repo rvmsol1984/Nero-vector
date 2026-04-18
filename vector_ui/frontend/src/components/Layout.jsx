@@ -36,6 +36,7 @@ const SIDEBAR_ITEMS = [
 
   { divider: true, label: "SYSTEM" },
   { to: "/sources",    label: "Sources",             icon: "sources"    },
+  { to: "/exceptions", label: "Exceptions",          icon: "exceptions" },
 ];
 
 const BOTTOM_TABS = [
@@ -169,6 +170,13 @@ function Icon({ name, size = 18 }) {
         <svg {...p}>
           <path d="M12 3 l1.6 4.4 L18 9 l-4.4 1.6 L12 15 l-1.6-4.4 L6 9 l4.4-1.6 z" />
           <path d="M18 15 l0.7 1.9 L21 18 l-2.3 0.6 L18 21 l-0.7-2.3 L15 18 l2.3-0.6 z" />
+        </svg>
+      );
+    case "exceptions":
+      // Funnel / filter icon — "rule exceptions / allowlist".
+      return (
+        <svg {...p}>
+          <polygon points="2 4 22 4 14 14 14 20 10 22 10 14" />
         </svg>
       );
     case "sources":

@@ -1632,6 +1632,98 @@ def baseline_detail(entity_key: str) -> dict:
 
 
 # ============================================================================
+# rule exception / allowlist CRUD
+# ============================================================================
+
+@app.get("/api/exceptions")
+def exceptions_list(
+    tenant: str | None = Query(None),
+    rule: str | None = Query(None),
+) -> list[dict]:
+    """List rule exceptions with optional tenant + rule filters."""
+    return db.fetch_all(
+        """
+        SELECT
+            id::text,
+            tenant_id::text,
+            client_name,
+            rule_name,
+            exception_type,
+            exception_value,
+            note,
+            created_by,
+            created_at
+        FROM vector_rule_exceptions
+        WHERE (%s::text IS NULL OR client_name = %s)
+          AND (%s::text IS NULL OR rule_name   = %s)
+        ORDER BY created_at DESC
+        """,
+        (tenant, tenant, rule, rule),
+    )
+
+
+@app.post("/api/exceptions")
+def exceptions_create(payload: dict = Body(...)) -> dict:
+    """Create a new rule exception. ``tenant_id`` must be a UUID
+    string, ``rule_name`` must be a known rule class name."""
+    required = ("tenant_id", "client_name", "rule_name",
+                "exception_type", "exception_value")
+    for key in required:
+        if not (payload or {}).get(key):
+            raise HTTPException(status_code=400, detail=f"missing {key}")
+    exc_type = str(payload["exception_type"]).strip().lower()
+    if exc_type not in ("country", "ip", "user", "domain", "any"):
+        raise HTTPException(
+            status_code=400,
+            detail="exception_type must be country|ip|user|domain|any",
+        )
+    row = db.execute_returning(
+        """
+        INSERT INTO vector_rule_exceptions (
+            tenant_id, client_name, rule_name,
+            exception_type, exception_value, note, created_by
+        ) VALUES (
+            %s::uuid, %s, %s,
+            %s, %s, %s, %s
+        )
+        ON CONFLICT (tenant_id, rule_name, exception_type, exception_value)
+            DO NOTHING
+        RETURNING id::text, tenant_id::text, client_name, rule_name,
+                  exception_type, exception_value, note, created_by,
+                  created_at
+        """,
+        (
+            str(payload["tenant_id"]),
+            str(payload["client_name"]),
+            str(payload["rule_name"]),
+            exc_type,
+            str(payload["exception_value"]).strip(),
+            (payload.get("note") or "").strip() or None,
+            (payload.get("created_by") or "").strip() or None,
+        ),
+    )
+    if not row:
+        raise HTTPException(status_code=409, detail="exception already exists")
+    return row
+
+
+@app.delete("/api/exceptions/{exception_id}")
+def exceptions_delete(exception_id: str) -> dict:
+    """Delete a rule exception by id."""
+    row = db.execute_returning(
+        """
+        DELETE FROM vector_rule_exceptions
+        WHERE id = %s
+        RETURNING id::text
+        """,
+        (exception_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="exception not found")
+    return {"deleted": row.get("id")}
+
+
+# ============================================================================
 # watchlist (active INKY correlation pins)
 # ============================================================================
 

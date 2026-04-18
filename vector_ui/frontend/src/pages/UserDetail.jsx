@@ -179,12 +179,12 @@ export default function UserDetail() {
               value={ep.mobile_phone || "—"}
             />
             <InfoPill
-              label="Member since"
+              label="Account Created"
               value={
                 ep.created_datetime
-                  ? fmtRelative(ep.created_datetime)
+                  ? new Date(ep.created_datetime).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" })
                   : profile.first_seen
-                  ? fmtRelative(profile.first_seen)
+                  ? new Date(profile.first_seen).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" })
                   : "—"
               }
             />

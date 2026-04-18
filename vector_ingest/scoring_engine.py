@@ -147,11 +147,30 @@ class CorrelationRule(ABC):
         # should check for None before issuing queries so they
         # degrade to fired=False when unbound (e.g. in unit tests).
         self._db: Database | None = None
+        # Set by register_rule so rules can call
+        # self._engine._is_excepted() for the allowlist check.
+        self._engine: Any = None
 
     def bind_db(self, db: Database) -> None:
         """Called by the engine during registration to wire the
         shared DB handle into the rule. Idempotent."""
         self._db = db
+
+    def bind_engine(self, engine: Any) -> None:
+        """Called by the engine during registration so rules can
+        access the exception allowlist via ``_engine._is_excepted``."""
+        self._engine = engine
+
+    def is_excepted(
+        self,
+        tenant_id: str,
+        facts: dict[str, str | None],
+    ) -> bool:
+        """Convenience wrapper for the engine's allowlist check.
+        Returns False when the engine isn't wired (unit tests)."""
+        if self._engine is None:
+            return False
+        return self._engine._is_excepted(tenant_id, self.rule_name, facts)
 
     @property
     def rule_name(self) -> str:
@@ -256,6 +275,7 @@ class ScoringEngine:
                 f"instance, got {type(rule).__name__}"
             )
         rule.bind_db(self._db)
+        rule.bind_engine(self)
         self._rules.append(rule)
         logger.info(
             "[scoring] registered rule", extra={"rule": rule.rule_name},
@@ -285,6 +305,8 @@ class ScoringEngine:
         if not self._rules:
             logger.info("[scoring] no rules registered, skipping cycle")
             return
+
+        self._load_exceptions()
 
         active = self._active_users()
         if not active:
@@ -612,6 +634,89 @@ class ScoringEngine:
             )
             return cur.fetchone() is not None
 
+    # ----- rule exception / allowlist ------------------------------------
+    #
+    # Operators can suppress specific rule triggers per tenant by
+    # inserting rows into ``vector_rule_exceptions``.  The full set is
+    # loaded once per scoring cycle (via _load_exceptions at the top of
+    # run_scoring_cycle) and cached for EXCEPTION_CACHE_TTL so a mid-
+    # cycle DB outage doesn't re-enable suppressed alerts.
+    #
+    # Shape:
+    #   _exceptions_cache = {
+    #     (tenant_id, rule_name): [
+    #       {"type": "country", "value": "CN"},
+    #       {"type": "ip",      "value": "1.2.3.4"},
+    #       {"type": "any",     "value": "*"},
+    #       ...
+    #     ]
+    #   }
+    #
+    # ``_is_excepted`` checks whether a particular (tenant, rule, facts)
+    # triple matches any stored exception. ``facts`` is a dict like
+    # ``{"country": "CN", "ip": "1.2.3.4", "user": "alice@example.com"}``
+    # — each key is matched against exceptions of the corresponding
+    # ``exception_type``.
+
+    EXCEPTION_CACHE_TTL = timedelta(minutes=5)
+
+    def _load_exceptions(self) -> None:
+        """Refresh the exception cache from Postgres. Called once at
+        the top of ``run_scoring_cycle``; any DB error is swallowed so
+        the previous cache survives."""
+        now = datetime.now(timezone.utc)
+        if (
+            hasattr(self, "_exceptions_loaded_at")
+            and self._exceptions_loaded_at
+            and now - self._exceptions_loaded_at < self.EXCEPTION_CACHE_TTL
+        ):
+            return
+        try:
+            with self._db.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tenant_id::text, rule_name,
+                           exception_type, exception_value
+                    FROM vector_rule_exceptions
+                    """
+                )
+                rows = cur.fetchall()
+        except Exception:
+            logger.debug("[scoring] exception cache refresh failed", exc_info=True)
+            return
+        cache: dict[tuple[str, str], list[dict]] = {}
+        for tenant_id, rule_name, exc_type, exc_value in rows:
+            key = (str(tenant_id), rule_name)
+            cache.setdefault(key, []).append({
+                "type":  exc_type,
+                "value": (exc_value or "").strip().lower(),
+            })
+        self._exceptions_cache = cache
+        self._exceptions_loaded_at = now
+
+    def _is_excepted(
+        self,
+        tenant_id: str,
+        rule_name: str,
+        facts: dict[str, str | None],
+    ) -> bool:
+        """Return True if any stored exception matches the given
+        (tenant, rule, facts) triple. ``facts`` keys are exception
+        types; values are the runtime values to compare against.
+
+        An exception with ``type='any'`` matches unconditionally
+        (i.e. the rule is fully disabled for that tenant).
+        """
+        cache = getattr(self, "_exceptions_cache", None) or {}
+        entries = cache.get((str(tenant_id), rule_name), [])
+        for entry in entries:
+            if entry["type"] == "any":
+                return True
+            fact_value = (facts.get(entry["type"]) or "").strip().lower()
+            if fact_value and fact_value == entry["value"]:
+                return True
+        return False
+
     # ----- VPN detection -------------------------------------------------
 
     # Instance-level cache: ip -> (expires_at, result_dict | None).
@@ -869,6 +974,9 @@ class NewCountryLoginRule(CorrelationRule):
             logger.debug(
                 "[new_country] rule has no DB handle, skipping",
             )
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
             return miss
 
         # 1. unique login IPs in the last 24h
@@ -1166,6 +1274,9 @@ class OffHoursLoginRule(CorrelationRule):
             )
             return miss
 
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
         try:
             logins = self._fetch_logins(tenant_id, user_id)
         except Exception:
@@ -1289,6 +1400,9 @@ class HighVolumeFileAccessRule(CorrelationRule):
             )
             return miss
 
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
         try:
             count = self._fetch_event_count(tenant_id, user_id)
         except Exception:
@@ -1403,6 +1517,9 @@ class SuspiciousMailboxRule(CorrelationRule):
             logger.debug(
                 "[suspicious_mailbox] rule has no DB handle, skipping",
             )
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
             return miss
 
         try:
@@ -1531,6 +1648,9 @@ class MalwareDetectedRule(CorrelationRule):
             logger.debug(
                 "[malware] rule has no DB handle, skipping",
             )
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
             return miss
 
         try:
@@ -1662,6 +1782,9 @@ class IOCMatchRule(CorrelationRule):
             logger.debug(
                 "[ioc_match] rule has no DB handle, skipping",
             )
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
             return miss
 
         try:
@@ -1857,6 +1980,9 @@ class HighRiskCountryLoginRule(CorrelationRule):
 
         if self._db is None:
             logger.debug("[high_risk_country] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
             return miss
 
         try:
