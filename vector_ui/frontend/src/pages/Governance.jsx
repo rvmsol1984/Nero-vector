@@ -8,77 +8,6 @@ import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
 import { filenameFromObjectId, fmtNumber, fmtRelative, fmtTime } from "../utils/format.js";
 
-const _fileCell = (r) => {
-  const fn = filenameFromObjectId(r.raw_json?.ObjectId);
-  return fn || <span className="text-white/30">—</span>;
-};
-
-const UAL_COL_TIMESTAMP = {
-  key: "timestamp",
-  label: "Time",
-  render: (r) => (
-    <span className="text-white/60 whitespace-nowrap tabular-nums">
-      {fmtTime(r.timestamp)}
-    </span>
-  ),
-};
-const _ipCell = (r) =>
-  r.client_ip ? (
-    <span className="font-mono tabular-nums">{r.client_ip}</span>
-  ) : (
-    <span className="text-white/30">—</span>
-  );
-
-
-const UAL_COL_IP = { key: "client_ip", label: "IP", render: _ipCell };
-const UAL_COL_EVENT_TYPE = {
-  key: "event_type",
-  label: "Type",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.event_type}>
-      {getEventLabel(r.event_type) || "—"}
-    </span>
-  ),
-};
-const UAL_COL_WORKLOAD = {
-  key: "workload",
-  label: "Workload",
-  render: (r) => r.workload || <span className="text-white/30">—</span>,
-};
-const UAL_COL_USER = {
-  key: "user_id",
-  label: "User",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.user_id}>
-      {r.user_id || <span className="text-white/30">—</span>}
-    </span>
-  ),
-};
-
-// ---- AI Activity tab -------------------------------------------------------
-
-// Friendly names for the AI tool domains the Defender KQL query filters on.
-// Keys are the hostnames we expect RemoteUrl to resolve to; anything not in
-// the map falls back to the raw hostname.
-const AI_TOOL_NAMES = {
-  "chat.openai.com":      "ChatGPT",
-  "chatgpt.com":          "ChatGPT",
-  "api.openai.com":       "ChatGPT (API)",
-  "claude.ai":            "Claude",
-  "anthropic.com":        "Anthropic",
-  "gemini.google.com":    "Gemini",
-  "bard.google.com":      "Bard",
-  "deepseek.com":         "DeepSeek",
-  "perplexity.ai":        "Perplexity",
-  "copilot.microsoft.com":"Copilot",
-  "huggingface.co":       "HuggingFace",
-  "mistral.ai":           "Mistral",
-  "grok.x.ai":            "Grok",
-  "you.com":              "You.com",
-  "poe.com":              "Poe",
-};
-
-
 // Each tab owns its own endpoint, its default severity pill, and an
 // intrinsic severity (what the empty-vs-finding story looks like).
 const TABS = [
@@ -351,7 +280,7 @@ export default function Governance({
 
       {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
       <div
-        className="flex gap-1 border-b border-white/5 mb-4 overflow-x-auto"
+        className="flex gap-1 border-b border-white/5 mb-4 overflow-x-hidden"
         style={{ scrollbarWidth: "none", msOverflowStyle: "none", WebkitOverflowScrolling: "touch" }}
       >
         {visibleTabs.map((t) => {
@@ -660,7 +589,7 @@ function InsufficientDataCard({ meta }) {
 function TableCard({ children }) {
   return (
     <div className="card overflow-hidden">
-      <div className="overflow-x-auto">{children}</div>
+      <div className="overflow-x-hidden">{children}</div>
     </div>
   );
 }
@@ -739,7 +668,7 @@ function DlpTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -838,7 +767,7 @@ function SharingTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -919,7 +848,7 @@ function DownloadsTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -1015,7 +944,7 @@ function BrokenInheritanceTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -1084,7 +1013,7 @@ function OauthAppsTable({ rows }) {
   const [open, setOpen] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Application</Th>
@@ -1203,7 +1132,7 @@ function PasswordSprayTable({ rows }) {
   const [open, setOpen] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Client IP</Th>
@@ -1307,7 +1236,7 @@ function StaleAccountsTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -1389,7 +1318,7 @@ function MfaChangesTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -1493,7 +1422,7 @@ function PrivilegedRolesTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>When</Th>
@@ -1582,7 +1511,7 @@ function GuestUsersTable({ rows }) {
   const { clientName: ctxClient, tenantId: ctxTenantId } = useContext(TenantContext);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Display Name</Th>
@@ -1752,8 +1681,8 @@ function InnerEventsTable({ rows, columns, emptyMessage = "no matching events" }
     return <div className="text-white/40 text-[11px] py-2">{emptyMessage}</div>;
   }
   return (
-    <div className="overflow-x-auto rounded-lg border border-white/5">
-      <table className="min-w-full text-[10px]">
+    <div className="overflow-x-hidden rounded-lg border border-white/5">
+      <table className="w-full table-fixed text-[10px]">
         <thead>
           <tr>
             {columns.map((c) => (
@@ -1869,6 +1798,75 @@ function AsyncEventsExpand({
 
 // Shorthand helpers for some very common UAL event shapes so each
 // table can reuse the same column specs.
+const _ipCell = (r) =>
+  r.client_ip ? (
+    <span className="font-mono tabular-nums">{r.client_ip}</span>
+  ) : (
+    <span className="text-white/30">—</span>
+  );
+
+const _fileCell = (r) => {
+  const fn = filenameFromObjectId(r.raw_json?.ObjectId);
+  return fn || <span className="text-white/30">—</span>;
+};
+
+const UAL_COL_TIMESTAMP = {
+  key: "timestamp",
+  label: "Time",
+  render: (r) => (
+    <span className="text-white/60 whitespace-nowrap tabular-nums">
+      {fmtTime(r.timestamp)}
+    </span>
+  ),
+};
+const UAL_COL_IP = { key: "client_ip", label: "IP", render: _ipCell };
+const UAL_COL_EVENT_TYPE = {
+  key: "event_type",
+  label: "Type",
+  render: (r) => (
+    <span className="truncate max-w-[200px] inline-block align-middle" title={r.event_type}>
+      {getEventLabel(r.event_type) || "—"}
+    </span>
+  ),
+};
+const UAL_COL_WORKLOAD = {
+  key: "workload",
+  label: "Workload",
+  render: (r) => r.workload || <span className="text-white/30">—</span>,
+};
+const UAL_COL_USER = {
+  key: "user_id",
+  label: "User",
+  render: (r) => (
+    <span className="truncate max-w-[200px] inline-block align-middle" title={r.user_id}>
+      {r.user_id || <span className="text-white/30">—</span>}
+    </span>
+  ),
+};
+
+// ---- AI Activity tab -------------------------------------------------------
+
+// Friendly names for the AI tool domains the Defender KQL query filters on.
+// Keys are the hostnames we expect RemoteUrl to resolve to; anything not in
+// the map falls back to the raw hostname.
+const AI_TOOL_NAMES = {
+  "chat.openai.com":      "ChatGPT",
+  "chatgpt.com":          "ChatGPT",
+  "api.openai.com":       "ChatGPT (API)",
+  "claude.ai":            "Claude",
+  "anthropic.com":        "Anthropic",
+  "gemini.google.com":    "Gemini",
+  "bard.google.com":      "Bard",
+  "deepseek.com":         "DeepSeek",
+  "perplexity.ai":        "Perplexity",
+  "copilot.microsoft.com":"Copilot",
+  "huggingface.co":       "HuggingFace",
+  "mistral.ai":           "Mistral",
+  "grok.x.ai":            "Grok",
+  "you.com":              "You.com",
+  "poe.com":              "Poe",
+};
+
 function aiToolDisplay(remoteUrl) {
   if (!remoteUrl) return { label: "—", host: "" };
   const raw = String(remoteUrl).trim();
@@ -2006,8 +2004,8 @@ function AiCopilotSection({ rows }) {
           No Copilot activity detected
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-[11px]">
+        <div className="overflow-x-hidden">
+          <table className="w-full table-fixed text-[11px]">
             <thead>
               <tr>
                 <Th>User</Th>
@@ -2103,8 +2101,8 @@ function AiExternalSection({ rows, error }) {
           No external AI tool access detected on managed devices in the last 7 days
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-[11px]">
+        <div className="overflow-x-hidden">
+          <table className="w-full table-fixed text-[11px]">
             <thead>
               <tr>
                 <Th>User</Th>
@@ -2211,7 +2209,7 @@ function UnmanagedDevicesTable({ rows }) {
 
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -2335,7 +2333,7 @@ function IntuneDevicesTable({ rows }) {
 
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>User</Th>
@@ -2430,8 +2428,8 @@ function IntuneDeviceDetailTable({ devices }) {
       <div className="text-[10px] uppercase tracking-[0.15em] text-white/40 mb-2">
         Intune Devices
       </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="w-5"></th>
@@ -2574,8 +2572,8 @@ function DeviceDetailTable({ detail, loading }) {
           </span>
         )}
       </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-[11px]">
+      <div className="overflow-x-hidden">
+        <table className="w-full table-fixed text-[11px]">
           <thead>
             <tr>
               <th className="w-5"></th>
@@ -2765,7 +2763,7 @@ function EdrAlertsTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Host</Th>
@@ -2954,7 +2952,7 @@ function ThreatLockerTable({ rows }) {
   const [openId, setOpenId] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>Host</Th>
@@ -3082,7 +3080,7 @@ function IocMatchesTable({ rows }) {
   const [open, setOpen] = useState(null);
   return (
     <TableCard>
-      <table className="min-w-full text-[11px]">
+      <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
             <Th>IOC Value</Th>
@@ -3268,25 +3266,6 @@ function IocExpandCard({ row }) {
       {description && (
         <div className="text-[11px] text-white/60 leading-relaxed">
           {description}
-        </div>
-      )}
-
-      {/* labels from OpenCTI */}
-      {Array.isArray(row.labels) && row.labels.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {row.labels.map((lbl) => (
-            <span
-              key={lbl}
-              className="inline-flex items-center px-2 py-[3px] text-[10px] font-medium rounded-md border"
-              style={{
-                color: "#A78BFA",
-                borderColor: "#A78BFA44",
-                backgroundColor: "#A78BFA14",
-              }}
-            >
-              {lbl}
-            </span>
-          ))}
         </div>
       )}
 

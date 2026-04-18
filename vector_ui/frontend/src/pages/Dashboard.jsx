@@ -107,7 +107,7 @@ export default function Dashboard() {
       </div>
 
       {/* ----- tenant bubbles row ----- */}
-      <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
+      <div className="flex flex-wrap gap-3 pb-1">
         {byTenant.map((row) => {
           const color = tenantColor(row.client_name);
           return (
