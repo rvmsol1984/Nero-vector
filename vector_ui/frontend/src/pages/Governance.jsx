@@ -280,7 +280,8 @@ export default function Governance({
 
       {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
       <div
-        className="flex flex-wrap gap-1 border-b border-white/5 mb-4"
+        className="flex gap-1 border-b border-white/5 mb-4 overflow-x-auto"
+        style={{ scrollbarWidth: "none", msOverflowStyle: "none", WebkitOverflowScrolling: "touch" }}
       >
         {visibleTabs.map((t) => {
           const rows = data[t.id];
@@ -3148,29 +3149,8 @@ function IocMatchesTable({ rows }) {
                 </tr>
                 {isOpen && (
                   <tr className="bg-black/30">
-                    <td colSpan={7} className="px-4 py-3 border-t border-white/5">
-                      <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-                        OpenCTI indicator details
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] mb-3">
-                        <div>
-                          <div className="text-white/40 uppercase tracking-wider text-[9px]">
-                            OpenCTI id
-                          </div>
-                          <div className="font-mono text-white/80 break-all">
-                            {row.opencti_id || "—"}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-white/40 uppercase tracking-wider text-[9px]">
-                            Matched at
-                          </div>
-                          <div className="text-white/80">
-                            {fmtTime(row.matched_at)}
-                          </div>
-                        </div>
-                      </div>
-                      <JsonBlock data={row.raw_json} />
+                    <td colSpan={7} className="px-4 py-4 border-t border-white/5">
+                      <IocExpandCard row={row} />
                     </td>
                   </tr>
                 )}
@@ -3180,6 +3160,139 @@ function IocMatchesTable({ rows }) {
         </tbody>
       </table>
     </TableCard>
+  );
+}
+
+// Structured IOC expand card — replaces the raw JSON dump with a
+// human-readable layout matching the Petra IOC detail view.
+function IocExpandCard({ row }) {
+  const confidence = Number(row.confidence) || 0;
+  const confColor = confidence > 60 ? "#10B981" : confidence > 30 ? "#EAB308" : "#EF4444";
+  const iocColor = {
+    ipv4: "#3B82F6", ipv6: "#3B82F6", ip: "#3B82F6",
+    domain: "#8B5CF6",
+    sha256: "#14B8A6", hash: "#14B8A6", md5: "#14B8A6",
+    url: "#8B5CF6", email: "#F97316",
+  }[String(row.ioc_type || "").toLowerCase()] || "#6B7280";
+
+  // Parse validity + source from the raw_json indicator blob when
+  // available. The scoring engine / IOC enricher may store different
+  // shapes so we probe for common field names.
+  const raw = row.raw_json || {};
+  const indicator = raw.indicator || raw.observable || raw;
+  const validFrom = indicator.valid_from || indicator.validFrom || null;
+  const validUntil = indicator.valid_until || indicator.validUntil || null;
+  const tlp = indicator.tlp || indicator.TLP || null;
+  const description = indicator.description || indicator.desc || null;
+
+  return (
+    <div className="space-y-3">
+      {/* value + type badge */}
+      <div className="flex items-start gap-3 flex-wrap">
+        <div
+          className="font-mono text-base text-white break-all leading-tight"
+          title={row.ioc_value}
+        >
+          {row.ioc_value}
+        </div>
+        <span
+          className="inline-flex items-center px-2 py-[3px] text-[10px] font-semibold uppercase tracking-wide rounded-md border whitespace-nowrap"
+          style={{
+            color: iocColor,
+            borderColor: iocColor + "55",
+            backgroundColor: iocColor + "14",
+          }}
+        >
+          {row.ioc_type || "unknown"}
+        </span>
+        {tlp && (
+          <span
+            className="inline-flex items-center px-2 py-[3px] text-[9px] font-bold uppercase tracking-wider rounded-md border whitespace-nowrap"
+            style={{
+              color: "rgba(255,255,255,0.5)",
+              borderColor: "rgba(255,255,255,0.15)",
+              backgroundColor: "rgba(255,255,255,0.05)",
+            }}
+          >
+            TLP:{tlp}
+          </span>
+        )}
+      </div>
+
+      {/* confidence bar */}
+      <div>
+        <div className="text-[9px] uppercase tracking-wider text-white/40 mb-1">
+          Confidence
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex-1 h-2 bg-white/10 rounded-full overflow-hidden max-w-[240px]">
+            <div
+              className="h-full rounded-full transition-all"
+              style={{ width: `${Math.min(100, Math.max(0, confidence))}%`, background: confColor }}
+            />
+          </div>
+          <span className="text-[12px] font-bold tabular-nums" style={{ color: confColor }}>
+            {confidence}%
+          </span>
+        </div>
+      </div>
+
+      {/* details grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+        <div>
+          <div className="text-white/40 uppercase tracking-wider text-[9px]">Indicator</div>
+          <div className="text-white/80 mt-0.5 truncate" title={row.indicator_name}>
+            {row.indicator_name || "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-white/40 uppercase tracking-wider text-[9px]">Matched at</div>
+          <div className="text-white/80 mt-0.5 tabular-nums">{fmtTime(row.matched_at)}</div>
+        </div>
+        <div>
+          <div className="text-white/40 uppercase tracking-wider text-[9px]">Valid from</div>
+          <div className="text-white/80 mt-0.5 tabular-nums">
+            {validFrom ? fmtTime(validFrom) : "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-white/40 uppercase tracking-wider text-[9px]">Valid until</div>
+          <div className="text-white/80 mt-0.5 tabular-nums">
+            {validUntil ? fmtTime(validUntil) : "—"}
+          </div>
+        </div>
+      </div>
+
+      {description && (
+        <div className="text-[11px] text-white/60 leading-relaxed">
+          {description}
+        </div>
+      )}
+
+      <div className="text-[9px] font-mono text-white/30 break-all">
+        opencti:{row.opencti_id || "—"}
+      </div>
+
+      {/* action links */}
+      <div className="flex items-center gap-3 pt-1">
+        {row.entity_key && (
+          <Link
+            to={`/users/${encodeURIComponent(row.entity_key)}`}
+            onClick={(e) => e.stopPropagation()}
+            className="px-4 py-1.5 text-[11px] font-semibold rounded-xl bg-primary/15 border border-primary/40 text-primary-light hover:bg-primary/25 active:scale-95 transition-all"
+          >
+            View User Profile →
+          </Link>
+        )}
+        <Link
+          to={`/events?user=${encodeURIComponent(row.user_id || "")}`}
+          onClick={(e) => e.stopPropagation()}
+          className="px-4 py-1.5 text-[11px] font-semibold rounded-xl bg-primary text-white hover:bg-primary/90 active:scale-95 transition-all"
+        >
+          View Events →
+        </Link>
+      </div>
+    </div>
   );
 }
 
