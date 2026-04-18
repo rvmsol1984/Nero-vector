@@ -12,21 +12,29 @@ import { fmtNumber, initialsFrom } from "../utils/format.js";
 //                       fixed bottom tab bar with the 5 primary items
 // Top bar is shared by both breakpoints.
 
+// Sidebar items organised into visual sections. Each entry is either
+// a nav link (``{ to, label, icon, ... }``) or a section divider
+// (``{ divider: true, label: "INVESTIGATE" }``). The SidebarBody
+// renderer checks the shape and emits the right markup.
 const SIDEBAR_ITEMS = [
+  // --- top (no label) ---
   { to: "/dashboard",  label: "Dashboard",           icon: "dashboard"  },
   { to: "/incidents",  label: "Incidents",           icon: "alert"      },
   { to: "/watchlist",  label: "Watchlist",           icon: "eye",      phase2: true },
+
+  { divider: true, label: "INVESTIGATE" },
   { to: "/events",     label: "Events",              icon: "events"     },
   { to: "/users",      label: "Users",               icon: "users"      },
   { to: "/baseline",   label: "Baseline",            icon: "activity", phase2: true },
-  // Governance split into 5 focused boards. Ordered so the
-  // operator-facing pages (identity, data, devices, threats) come
-  // before the forward-looking AI / Shadow-IT view.
+
+  { divider: true, label: "GOVERNANCE" },
   { to: "/identity",   label: "Identity & Access",   icon: "identity"   },
   { to: "/data",       label: "Data & Sharing",      icon: "data"       },
   { to: "/devices",    label: "Devices",             icon: "devices"    },
   { to: "/threats",    label: "Threat Intelligence", icon: "threats"    },
   { to: "/ai",         label: "AI & Shadow IT",      icon: "ai"         },
+
+  { divider: true, label: "SYSTEM" },
   { to: "/sources",    label: "Sources",             icon: "sources"    },
 ];
 
@@ -251,7 +259,29 @@ function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
       </div>
 
       <nav className="flex-1 py-3 overflow-y-auto">
-        {SIDEBAR_ITEMS.map((item) => (
+        {SIDEBAR_ITEMS.map((item, idx) =>
+          item.divider ? (
+            <div key={`div-${item.label}`} style={{ margin: "16px 16px 8px" }}>
+              <div
+                style={{
+                  fontSize: 8,
+                  letterSpacing: "0.15em",
+                  textTransform: "uppercase",
+                  color: "#484f58",
+                  marginBottom: 6,
+                  paddingLeft: 4,
+                }}
+              >
+                {item.label}
+              </div>
+              <div
+                style={{
+                  height: 1,
+                  background: "rgba(255,255,255,0.06)",
+                }}
+              />
+            </div>
+          ) : (
           <NavLink
             key={item.to}
             to={item.to}
@@ -277,7 +307,8 @@ function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
               <P2Badge />
             ) : null}
           </NavLink>
-        ))}
+          )
+        )}
       </nav>
 
       <div className="px-5 py-4 text-[10px] text-white/30 border-t border-white/5 leading-tight">

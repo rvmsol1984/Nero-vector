@@ -7,6 +7,27 @@ import { getEventLabel } from "../utils/eventLabels.js";
 
 const PAGE = 50;
 
+// Workload → accent color mapping shared by the filter pills and
+// the event card left-border tint.
+const WORKLOAD_COLORS = {
+  exchange:              "#e3b341",
+  sharepoint:            "#39d353",
+  onedrive:              "#39d353",
+  onedriveforbusiness:   "#39d353",
+  azureactivedirectory:  "#58a6ff",
+  microsoftteams:        "#bc8cff",
+  threatintelligence:    "#f85149",
+  inky:                  "#f85149",
+  edr:                   "#64748B",
+  defender:              "#64748B",
+  copilot:               "#79c0ff",
+};
+
+function workloadAccent(wl) {
+  if (!wl) return null;
+  return WORKLOAD_COLORS[wl.toLowerCase().replace(/\s/g, "")] || null;
+}
+
 function Pill({ active, onClick, children }) {
   return (
     <button
@@ -19,6 +40,40 @@ function Pill({ active, onClick, children }) {
       }`}
     >
       {children}
+    </button>
+  );
+}
+
+function WorkloadPill({ wl, active, onClick }) {
+  const color = workloadAccent(wl);
+  const label = wl || "(none)";
+  if (!color) {
+    return (
+      <Pill active={active} onClick={onClick}>
+        {label}
+      </Pill>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all duration-200 active:scale-95 border"
+      style={
+        active
+          ? {
+              color: "#fff",
+              backgroundColor: color,
+              borderColor: color,
+            }
+          : {
+              color,
+              backgroundColor: color + "18",
+              borderColor: color + "44",
+            }
+      }
+    >
+      {label}
     </button>
   );
 }
@@ -150,13 +205,12 @@ export default function Events() {
             all
           </Pill>
           {byWorkload.map((t) => (
-            <Pill
+            <WorkloadPill
               key={t.workload ?? ""}
+              wl={t.workload}
               active={workload === (t.workload ?? "")}
               onClick={() => updateFilter("workload", t.workload ?? "")}
-            >
-              {t.workload ?? "(none)"}
-            </Pill>
+            />
           ))}
         </div>
 
@@ -195,9 +249,17 @@ export default function Events() {
 
       {/* ----- event cards ----- */}
       <div className="space-y-3">
-        {rows.map((r) => (
-          <EventCard key={r.id} event={r} />
-        ))}
+        {rows.map((r) => {
+          const accent = workloadAccent(r.workload || r.source);
+          return (
+            <div
+              key={r.id}
+              style={accent ? { borderLeft: `3px solid ${accent}`, borderRadius: 12 } : undefined}
+            >
+              <EventCard event={r} />
+            </div>
+          );
+        })}
         {!loading && rows.length === 0 && (
           <div className="card text-white/50 text-sm text-center py-10">
             no events match current filter
