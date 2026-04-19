@@ -2685,13 +2685,31 @@ def governance_privileged_roles(
 
 _GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6"
 _GRAPH_TOKEN_CACHE: dict = {"token": None, "expires_at": 0.0}
+# Per-tenant token cache for non-GCS tenants.  Keyed by tenant_id UUID.
+# Shape: { tenant_id: {"token": str, "expires_at": float} }
+_GRAPH_TOKEN_CACHE_BY_TENANT: dict[str, dict] = {}
 
 
-def _get_graph_token() -> str:
-    """Client credentials token for the GCS tenant, cached until ~1m before expiry."""
+def _get_graph_token(tenant_id: str | None = None) -> str:
+    """Client credentials token for *tenant_id*, cached until ~1 min before expiry.
+
+    When *tenant_id* is ``None`` (the default) the existing GCS-tenant token
+    cache (``_GRAPH_TOKEN_CACHE``) is used unchanged so every existing caller
+    keeps working without modification.  When a non-GCS *tenant_id* is
+    supplied the per-tenant cache (``_GRAPH_TOKEN_CACHE_BY_TENANT``) is used
+    instead so each tenant gets its own independently-expiring token.
+    """
     now = time.monotonic()
-    cached_token = _GRAPH_TOKEN_CACHE.get("token")
-    if cached_token and _GRAPH_TOKEN_CACHE.get("expires_at", 0.0) > now + 60:
+    effective_tid = tenant_id or _GCS_TENANT_ID
+
+    # Select the right cache bucket.
+    if tenant_id is None:
+        cache = _GRAPH_TOKEN_CACHE
+    else:
+        cache = _GRAPH_TOKEN_CACHE_BY_TENANT.setdefault(tenant_id, {"token": None, "expires_at": 0.0})
+
+    cached_token = cache.get("token")
+    if cached_token and cache.get("expires_at", 0.0) > now + 60:
         return cached_token
 
     client_id = os.environ.get("VECTOR_CLIENT_ID")
@@ -2702,7 +2720,7 @@ def _get_graph_token() -> str:
             detail="VECTOR_CLIENT_ID / VECTOR_CLIENT_SECRET not configured",
         )
 
-    url = f"https://login.microsoftonline.com/{_GCS_TENANT_ID}/oauth2/v2.0/token"
+    url = f"https://login.microsoftonline.com/{effective_tid}/oauth2/v2.0/token"
     body = urllib.parse.urlencode(
         {
             "client_id": client_id,
@@ -2717,16 +2735,42 @@ def _get_graph_token() -> str:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        logger.exception("graph token request failed")
+        logger.exception("graph token request failed tenant=%s", effective_tid)
         raise HTTPException(status_code=502, detail=f"graph token failed: {exc}")
 
     token = data.get("access_token")
     if not token:
         raise HTTPException(status_code=502, detail="graph token response missing access_token")
 
-    _GRAPH_TOKEN_CACHE["token"] = token
-    _GRAPH_TOKEN_CACHE["expires_at"] = now + int(data.get("expires_in", 3600))
+    cache["token"] = token
+    cache["expires_at"] = now + int(data.get("expires_in", 3600))
     return token
+
+
+def _graph_get_with_token(token: str, path_with_query: str) -> dict:
+    """Issue a Graph GET authenticated with an already-obtained *token*.
+
+    Used by the MFA-status flow so each tenant's calls use that tenant's
+    token rather than the GCS default.  All other endpoints continue to use
+    the zero-argument ``_graph_get`` wrapper below.
+    """
+    url = f"https://graph.microsoft.com/v1.0{path_with_query}"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            body = ""
+        logger.error("graph %s -> %s %s", path_with_query, exc.code, body)
+        raise HTTPException(status_code=502, detail=f"graph {exc.code}: {body}")
+    except Exception as exc:
+        logger.exception("graph request failed")
+        raise HTTPException(status_code=502, detail=f"graph failed: {exc}")
 
 
 def _graph_get(path_with_query: str) -> dict:
@@ -3175,19 +3219,25 @@ def governance_intune_devices_user(upn: str) -> dict:
     }
 
 
-# ---- MFA registration status (Graph: /users/{upn}/authentication/methods) ---
+# ---- MFA registration status (Graph: /users + /users/{upn}/authentication/methods) ---
 #
-# Enumerates all known users from vector_user_baselines (or vector_events as
-# fallback), calls Graph for each user's authentication methods, classifies
-# the primary method, masks phone numbers, and sorts with unprotected users
-# first so the operator sees the highest-risk rows immediately.
+# For each managed tenant, fetches the full list of enabled user accounts
+# directly from Graph (avoiding stale/polluted DB rows such as guests,
+# disabled accounts and service principals), then calls the authentication
+# methods endpoint per user to classify MFA posture.
 #
-# Results are cached in-process for 5 minutes. The endpoint degrades
-# gracefully per user: a Graph failure for one user produces status=NONE
-# rather than failing the whole response.
+# Results are cached in-process for 5 minutes. Per-user Graph failures
+# degrade gracefully to status=NONE rather than aborting the whole response.
 
 _MFA_STATUS_CACHE: dict = {"data": None, "fetched_at": 0.0}
 _MFA_STATUS_CACHE_TTL = 300  # seconds
+
+# Tenants to enumerate.  Each entry carries the AAD tenant_id (used to
+# obtain a scoped Graph token) and the display name surfaced in the UI.
+_MFA_TENANTS = [
+    {"tenant_id": "12077321-d5c3-4d90-ad87-d19b58b2f847", "client_name": "NERO"},
+    {"tenant_id": "4bddd2a5-8bee-46c0-968c-a7a0190e1245", "client_name": "London Fischer"},
+]
 
 
 def _mask_phone(phone: str) -> str:
@@ -3199,21 +3249,54 @@ def _mask_phone(phone: str) -> str:
     return f"{cc} ***-***-{last4}" if cc else f"***-***-{last4}"
 
 
+def _classify_methods(methods_raw: list[dict]) -> tuple[str, str, str | None]:
+    """Parse a Graph authentication/methods value list.
+
+    Returns ``(primary_method_label, status, masked_phone_or_None)``.
+    """
+    strong_labels: list[str] = []
+    weak_labels:   list[str] = []
+    phone_number:  str | None = None
+
+    for m in methods_raw:
+        odata = m.get("@odata.type", "")
+        if "microsoftAuthenticator" in odata:
+            strong_labels.append("Authenticator App")
+        elif "fido2" in odata.lower():
+            strong_labels.append("FIDO2")
+        elif "windowsHello" in odata.lower():
+            strong_labels.append("Windows Hello")
+        elif "softwareOath" in odata.lower():
+            strong_labels.append("Software OATH")
+        elif "phone" in odata.lower():
+            weak_labels.append("SMS")
+            raw_phone = m.get("phoneNumber") or ""
+            if raw_phone and phone_number is None:
+                phone_number = _mask_phone(raw_phone)
+        # password type is always present — not an MFA factor, skip
+
+    if strong_labels:
+        return ", ".join(sorted(set(strong_labels))), "STRONG", phone_number
+    if weak_labels:
+        return ", ".join(sorted(set(weak_labels))), "WEAK", phone_number
+    return "None", "NONE", None
+
+
 @app.get("/api/mfa-status")
 def mfa_status() -> list[dict]:
-    """MFA registration status for all known users across all tenants.
+    """MFA registration status for all managed tenants.
 
-    Pulls the user list from ``vector_user_baselines`` (falls back to
-    ``vector_events`` when the baselines table is empty), calls
-    ``/users/{upn}/authentication/methods`` via Graph for each user, and
-    classifies into STRONG / WEAK / NONE tiers:
+    For each tenant in ``_MFA_TENANTS``:
 
-        STRONG  -- Microsoft Authenticator, FIDO2, Windows Hello, Software OATH
-        WEAK    -- SMS / voice phone method
-        NONE    -- password only, or Graph returned no methods
+    1.  Obtains a tenant-scoped Graph token via
+        ``_get_graph_token(tenant_id)``.
+    2.  Calls ``GET /users?$filter=accountEnabled eq true&$top=999`` to
+        enumerate only real, enabled user accounts (no guests, disabled
+        accounts, or service principals slipping through from the DB).
+    3.  For each user calls ``GET /users/{upn}/authentication/methods``
+        and classifies MFA posture as STRONG / WEAK / NONE.
 
-    Results are sorted NONE -> WEAK -> STRONG so the riskiest rows appear
-    at the top of the table. The full list is cached for 5 minutes.
+    Results are sorted NONE -> WEAK -> STRONG and cached for 5 minutes.
     """
     now_mono = time.monotonic()
     cached = _MFA_STATUS_CACHE.get("data")
@@ -3223,108 +3306,66 @@ def mfa_status() -> list[dict]:
     ):
         return cached
 
-    # ---- build user list from DB -----------------------------------------
-    try:
-        db_users = db.fetch_all(
-            """
-            SELECT DISTINCT user_id,
-                            MAX(tenant_id)   AS tenant_id,
-                            MAX(client_name) AS client_name
-            FROM vector_user_baselines
-            WHERE user_id IS NOT NULL
-            GROUP BY user_id
-            ORDER BY client_name, user_id
-            LIMIT 300
-            """
-        )
-    except Exception:
-        logger.debug("mfa_status baseline fetch failed", exc_info=True)
-        db_users = []
-
-    if not db_users:
-        try:
-            db_users = db.fetch_all(
-                """
-                SELECT DISTINCT user_id,
-                                MAX(tenant_id)   AS tenant_id,
-                                MAX(client_name) AS client_name
-                FROM vector_events
-                WHERE user_id IS NOT NULL
-                  AND user_id NOT LIKE 'ServicePrincipal_%%'
-                GROUP BY user_id
-                ORDER BY client_name, user_id
-                LIMIT 300
-                """
-            )
-        except Exception:
-            logger.debug("mfa_status events fallback failed", exc_info=True)
-            db_users = []
-
-    # ---- call Graph per user ---------------------------------------------
     out: list[dict] = []
-    for row in db_users:
-        user_id     = (row.get("user_id")     or "").strip()
-        tenant_id   = (row.get("tenant_id")   or "").strip()
-        client_name = (row.get("client_name") or "").strip()
-        if not user_id:
+
+    for tenant_cfg in _MFA_TENANTS:
+        t_id   = tenant_cfg["tenant_id"]
+        t_name = tenant_cfg["client_name"]
+
+        # ---- 1. obtain tenant-scoped token ---------------------------------
+        try:
+            token = _get_graph_token(t_id)
+        except Exception:
+            logger.warning("mfa_status: token fetch failed tenant=%s", t_name, exc_info=True)
             continue
 
-        methods_raw: list[dict] = []
+        # ---- 2. list enabled users -----------------------------------------
+        filter_val = urllib.parse.quote("accountEnabled eq true", safe="")
+        users_path = (
+            f"/users?$filter={filter_val}"
+            "&$select=userPrincipalName,displayName"
+            "&$top=999"
+        )
         try:
-            upn       = urllib.parse.quote(user_id, safe="@")
-            auth_data = _graph_get(f"/users/{upn}/authentication/methods")
-            methods_raw = auth_data.get("value") or []
+            users_data = _graph_get_with_token(token, users_path)
         except Exception:
-            logger.debug("mfa auth methods failed for %s", user_id, exc_info=True)
+            logger.warning("mfa_status: user list failed tenant=%s", t_name, exc_info=True)
+            continue
 
-        strong_labels: list[str] = []
-        weak_labels:   list[str] = []
-        phone_number:  str | None = None
+        user_list = users_data.get("value") or []
+        logger.debug("mfa_status: tenant=%s users=%d", t_name, len(user_list))
 
-        for m in methods_raw:
-            odata = m.get("@odata.type", "")
-            if "microsoftAuthenticator" in odata:
-                strong_labels.append("Authenticator App")
-            elif "fido2" in odata.lower():
-                strong_labels.append("FIDO2")
-            elif "windowsHello" in odata.lower():
-                strong_labels.append("Windows Hello")
-            elif "softwareOath" in odata.lower():
-                strong_labels.append("Software OATH")
-            elif "phone" in odata.lower():
-                weak_labels.append("SMS")
-                raw_phone = m.get("phoneNumber") or ""
-                if raw_phone and phone_number is None:
-                    phone_number = _mask_phone(raw_phone)
-            # password type is always present -- not an MFA factor, skip
+        # ---- 3. auth methods per user --------------------------------------
+        for u in user_list:
+            upn          = (u.get("userPrincipalName") or "").strip()
+            display_name = (u.get("displayName") or "").strip() or None
+            if not upn:
+                continue
 
-        if strong_labels:
-            primary_method = ", ".join(sorted(set(strong_labels)))
-            status = "STRONG"
-        elif weak_labels:
-            primary_method = ", ".join(sorted(set(weak_labels)))
-            status = "WEAK"
-        else:
-            primary_method = "None"
-            status = "NONE"
+            methods_raw: list[dict] = []
+            try:
+                encoded_upn = urllib.parse.quote(upn, safe="@")
+                auth_data   = _graph_get_with_token(
+                    token, f"/users/{encoded_upn}/authentication/methods"
+                )
+                methods_raw = auth_data.get("value") or []
+            except Exception:
+                logger.debug(
+                    "mfa_status: methods failed upn=%s tenant=%s", upn, t_name,
+                    exc_info=True,
+                )
 
-        display_name: str | None = None
-        try:
-            upn = urllib.parse.quote(user_id, safe="@")
-            gu  = _graph_get(f"/users/{upn}?$select=displayName")
-            display_name = gu.get("displayName") or None
-        except Exception:
-            pass
+            primary_method, status, phone_number = _classify_methods(methods_raw)
 
-        out.append({
-            "user_id":      user_id,
-            "display_name": display_name,
-            "tenant_id":    tenant_id,
-            "client_name":  client_name,
-            "mfa_method":   primary_method,
-            "phone_number": phone_number,
-            "status":       status,
-        })
+            out.append({
+                "user_id":      upn,
+                "display_name": display_name,
+                "tenant_id":    t_id,
+                "client_name":  t_name,
+                "mfa_method":   primary_method,
+                "phone_number": phone_number,
+                "status":       status,
+            })
 
     _STATUS_ORDER = {"NONE": 0, "WEAK": 1, "STRONG": 2}
     out.sort(key=lambda r: (
