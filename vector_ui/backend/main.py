@@ -3678,8 +3678,6 @@ def _check_external_forward_rules(
 def _check_admin_no_mfa(
     token: str, admin_members: dict[str, str], tenant: str, now_str: str
 ) -> list[dict]:
-    if tenant == "GameChange Solar":
-        return []  # GCS uses Okta — Graph MFA not applicable
     findings: list[dict] = []
 
     def _check_one(upn: str, role_name: str):
@@ -4047,9 +4045,6 @@ def _check_shared_mailbox_signin_enabled(token: str, tenant: str, now_str: str) 
         upn = u.get("userPrincipalName") or ""
         if not upn:
             continue
-        upn = (u.get("userPrincipalName") or "")
-        if "#EXT#" in upn or upn.endswith(".onmicrosoft.com"):
-            continue
         if u.get("assignedLicenses"):
             continue
         findings.append({
@@ -4069,6 +4064,405 @@ def _check_shared_mailbox_signin_enabled(token: str, tenant: str, now_str: str) 
             "detected_at": now_str,
         })
 
+    return findings
+
+
+def _check_legacy_auth_logins(tenant: str, now_str: str) -> list[dict]:
+    """Flag users who authenticated via legacy protocols that bypass MFA."""
+    rows = db.fetch_all(
+        """
+        SELECT user_id,
+               raw_json->>'ClientAppUsed'  AS client_app,
+               MAX(timestamp)              AS last_seen
+        FROM vector_events
+        WHERE event_type  = 'UserLoggedIn'
+          AND client_name = %s
+          AND raw_json->>'ClientAppUsed' IN (
+                'IMAP4', 'POP3', 'MAPI over HTTP',
+                'Authenticated SMTP', 'Exchange ActiveSync'
+              )
+          AND timestamp > NOW() - INTERVAL '30 days'
+        GROUP BY user_id, raw_json->>'ClientAppUsed'
+        ORDER BY MAX(timestamp) DESC
+        LIMIT 200
+        """,
+        (tenant,),
+    )
+    findings: list[dict] = []
+    for row in rows:
+        user       = (row.get("user_id") or "").strip()
+        client_app = (row.get("client_app") or "unknown protocol").strip()
+        last_seen  = row.get("last_seen")
+        last_str   = last_seen.isoformat() if hasattr(last_seen, "isoformat") else str(last_seen or "")
+        if not user:
+            continue
+        findings.append({
+            "finding_type": "LEGACY_AUTH_LOGIN",
+            "severity":     "HIGH",
+            "title":        "Legacy authentication protocol in use",
+            "description": (
+                f"User authenticated using {client_app} which bypasses MFA and "
+                "conditional access policies."
+            ),
+            "affected":        f"{user} via {client_app} (last seen {last_str[:10]})",
+            "recommendation": (
+                "Block legacy authentication via Conditional Access. "
+                "Create a policy targeting legacy auth clients and set Grant = Block."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_impossible_travel_findings(tenant: str, now_str: str) -> list[dict]:
+    """Surface open/investigating ImpossibleTravel incidents from the last 7 days."""
+    rows = db.fetch_all(
+        """
+        SELECT entity_key, confirmed_at, evidence
+        FROM vector_incidents
+        WHERE client_name = %s
+          AND status IN ('open', 'investigating')
+          AND evidence::text LIKE '%ImpossibleTravel%'
+          AND confirmed_at > NOW() - INTERVAL '7 days'
+        ORDER BY confirmed_at DESC
+        LIMIT 50
+        """,
+        (tenant,),
+    )
+    findings: list[dict] = []
+    for row in rows:
+        entity  = (row.get("entity_key") or "").strip()
+        conf_at = row.get("confirmed_at")
+        conf_str = conf_at.isoformat() if hasattr(conf_at, "isoformat") else str(conf_at or "")
+        if not entity:
+            continue
+        findings.append({
+            "finding_type": "IMPOSSIBLE_TRAVEL",
+            "severity":     "CRITICAL",
+            "title":        "Impossible travel detected",
+            "description": (
+                "Login from two geographically impossible locations within 2 hours."
+            ),
+            "affected":        entity,
+            "recommendation": (
+                "Immediately verify with the user. "
+                "Revoke sessions and reset password if unauthorized."
+            ),
+            "tenant":      tenant,
+            "detected_at": conf_str or now_str,
+        })
+    return findings
+
+
+def _check_new_global_admin(tenant: str, now_str: str) -> list[dict]:
+    """Flag accounts newly added to the Global Administrator role in the last 30 days."""
+    rows = db.fetch_all(
+        """
+        SELECT user_id, raw_json, timestamp
+        FROM vector_events
+        WHERE event_type  = 'Add member to role.'
+          AND client_name = %s
+          AND raw_json::text ILIKE '%Global Administrator%'
+          AND timestamp > NOW() - INTERVAL '30 days'
+        ORDER BY timestamp DESC
+        LIMIT 100
+        """,
+        (tenant,),
+    )
+    findings: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        user = (row.get("user_id") or "").strip()
+        ts   = row.get("timestamp")
+        raw  = row.get("raw_json") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        if not user:
+            continue
+        if user in seen:
+            continue
+        seen.add(user)
+
+        date_str = ts.date().isoformat() if hasattr(ts, "date") else str(ts or "")[:10]
+
+        # Try to find who made the change (Actor array or ModifiedBy field).
+        added_by = ""
+        for actor in (raw.get("Actor") or []):
+            if isinstance(actor, dict):
+                actor_type = str(actor.get("Type") or "")
+                if actor_type == "5":  # UPN type in AAD audit
+                    added_by = actor.get("ID") or ""
+                    break
+        if not added_by:
+            added_by = (raw.get("ModifiedBy") or raw.get("Actor") or "")
+            if isinstance(added_by, list):
+                added_by = ""
+
+        affected = f"{user}" + (f" (added by: {added_by})" if added_by and added_by != user else "")
+        findings.append({
+            "finding_type": "NEW_GLOBAL_ADMIN",
+            "severity":     "CRITICAL",
+            "title":        "New Global Administrator added",
+            "description": (
+                f"{user} was added to the Global Administrator role on {date_str}. "
+                "This grants unrestricted tenant access."
+            ),
+            "affected":        affected,
+            "recommendation": (
+                "Verify this change was authorized. If unexpected, remove immediately "
+                "and investigate the account that made the change."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_mfa_method_changed(tenant: str, now_str: str) -> list[dict]:
+    """Flag users whose MFA methods were modified in the last 30 days."""
+    rows = db.fetch_all(
+        """
+        SELECT user_id, timestamp
+        FROM vector_events
+        WHERE event_type  = 'Update user.'
+          AND client_name = %s
+          AND raw_json::text ILIKE '%StrongAuthenticationMethod%'
+          AND timestamp > NOW() - INTERVAL '30 days'
+        ORDER BY timestamp DESC
+        LIMIT 200
+        """,
+        (tenant,),
+    )
+    findings: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        user = (row.get("user_id") or "").strip()
+        ts   = row.get("timestamp")
+        if not user or user in seen:
+            continue
+        seen.add(user)
+        date_str = ts.date().isoformat() if hasattr(ts, "date") else str(ts or "")[:10]
+        findings.append({
+            "finding_type": "MFA_METHOD_CHANGED",
+            "severity":     "HIGH",
+            "title":        "MFA method modified",
+            "description": (
+                f"{user}'s MFA methods were changed on {date_str}. "
+                "This could indicate an attacker registering their own authentication device."
+            ),
+            "affected":        user,
+            "recommendation": (
+                "Verify with the user that they made this change. "
+                "If unauthorized, immediately revoke sessions and reset MFA."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_oauth_high_permission_apps(tenant: str, now_str: str) -> list[dict]:
+    """Flag OAuth app consents that include high-risk permission scopes."""
+    rows = db.fetch_all(
+        """
+        SELECT user_id,
+               raw_json->>'ApplicationId'   AS app_id,
+               raw_json->>'ApplicationName' AS app_name,
+               raw_json->>'Scope'           AS scope,
+               timestamp
+        FROM vector_events
+        WHERE event_type IN (
+                'Add app role assignment to service principal.',
+                'Consent to application.'
+              )
+          AND client_name = %s
+          AND (
+               raw_json::text ILIKE '%%Mail.ReadWrite%%'
+               OR raw_json::text ILIKE '%%Files.ReadWrite%%'
+               OR raw_json::text ILIKE '%%Directory.ReadWrite%%'
+               OR raw_json::text ILIKE '%%full_access_as_user%%'
+              )
+          AND timestamp > NOW() - INTERVAL '90 days'
+        ORDER BY timestamp DESC
+        LIMIT 100
+        """,
+        (tenant,),
+    )
+    findings: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        user     = (row.get("user_id") or "unknown user").strip()
+        app_name = (row.get("app_name") or row.get("app_id") or "Unknown App").strip()
+        scope    = (row.get("scope") or "high-risk permissions").strip()
+        key      = f"{app_name}:{user}"
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append({
+            "finding_type": "OAUTH_HIGH_PERMISSION_APP",
+            "severity":     "HIGH",
+            "title":        "OAuth app granted high-risk permissions",
+            "description": (
+                f"App '{app_name}' was granted {scope} permissions by {user}. "
+                "These permissions allow full access to mailbox or files."
+            ),
+            "affected":        f"{app_name} (granted by {user})",
+            "recommendation": (
+                "Review this OAuth app consent. Remove via Entra ID → Enterprise Applications "
+                "if unauthorized."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_cross_tenant_ioc(tenant: str, now_str: str) -> list[dict]:
+    """Find IPs that authenticated across multiple NERO-managed tenants in 7 days.
+
+    Only surfaces under the NERO tenant to avoid duplicate findings.
+    """
+    if tenant != "NERO":
+        return []
+
+    rows = db.fetch_all(
+        """
+        SELECT client_ip,
+               COUNT(DISTINCT client_name)        AS tenant_count,
+               array_agg(DISTINCT client_name)    AS tenants,
+               array_agg(DISTINCT user_id)        AS affected_users,
+               MAX(timestamp)                     AS last_seen
+        FROM vector_events
+        WHERE event_type  = 'UserLoggedIn'
+          AND client_ip IS NOT NULL
+          AND client_ip NOT LIKE '10.%%'
+          AND client_ip NOT LIKE '192.168.%%'
+          AND client_ip NOT LIKE '172.16.%%'
+          AND timestamp > NOW() - INTERVAL '7 days'
+        GROUP BY client_ip
+        HAVING COUNT(DISTINCT client_name) >= 2
+        ORDER BY COUNT(DISTINCT client_name) DESC
+        LIMIT 50
+        """,
+        (),
+    )
+
+    # Collect IPs flagged in vector_ioc_matches for extra context.
+    ioc_ips: set[str] = set()
+    try:
+        ioc_rows = db.fetch_all(
+            """
+            SELECT DISTINCT ioc_value
+            FROM vector_ioc_matches
+            WHERE ioc_type = 'ip'
+            """,
+            (),
+        )
+        ioc_ips = {r.get("ioc_value", "") for r in ioc_rows}
+    except Exception:
+        pass
+
+    findings: list[dict] = []
+    for row in rows:
+        ip            = (row.get("client_ip") or "").strip()
+        tenant_count  = int(row.get("tenant_count") or 0)
+        tenants_list  = row.get("tenants") or []
+        users_list    = [u for u in (row.get("affected_users") or []) if u]
+        last_seen     = row.get("last_seen")
+        last_str      = last_seen.isoformat() if hasattr(last_seen, "isoformat") else str(last_seen or "")
+
+        if not ip:
+            continue
+
+        ioc_suffix = " [KNOWN IOC]" if ip in ioc_ips else ""
+        tenants_str = ", ".join(sorted(str(t) for t in tenants_list if t))
+        users_str   = ", ".join(sorted(str(u) for u in users_list[:10]))
+
+        findings.append({
+            "finding_type": "CROSS_TENANT_IOC",
+            "severity":     "CRITICAL",
+            "title":        f"IP seen across multiple tenants{ioc_suffix}",
+            "description": (
+                f"IP {ip} has authenticated against {tenant_count} NERO-managed tenants "
+                f"({tenants_str}) in the last 7 days, affecting users: {users_str}. "
+                "This may indicate a coordinated attack."
+            ),
+            "affected":        ip,
+            "recommendation": (
+                "Immediately investigate all affected accounts. "
+                "Check if the IP is associated with a VPN or known attacker infrastructure."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_patient_zero_phishing(tenant: str, now_str: str) -> list[dict]:
+    """Correlate INKY phishing events with logins that follow within 4 hours."""
+    rows = db.fetch_all(
+        """
+        SELECT e1.user_id,
+               e1.timestamp                    AS phish_time,
+               e2.timestamp                    AS login_time,
+               e2.raw_json->>'Country'         AS login_country,
+               e2.client_ip
+        FROM vector_events e1
+        JOIN vector_events e2
+          ON LOWER(e1.user_id) = LOWER(e2.user_id)
+        WHERE e1.event_type  = 'InkyPhishingDetected'
+          AND e2.event_type  = 'UserLoggedIn'
+          AND e1.client_name = %s
+          AND e2.client_name = %s
+          AND e2.timestamp   > e1.timestamp
+          AND e2.timestamp   < e1.timestamp + INTERVAL '4 hours'
+          AND e1.timestamp   > NOW() - INTERVAL '30 days'
+        ORDER BY e1.timestamp DESC
+        LIMIT 50
+        """,
+        (tenant, tenant),
+    )
+    findings: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        user         = (row.get("user_id") or "").strip()
+        phish_time   = row.get("phish_time")
+        login_time   = row.get("login_time")
+        login_country = (row.get("login_country") or "unknown").strip()
+        ip           = (row.get("client_ip") or "unknown").strip()
+
+        if not user or user in seen:
+            continue
+        seen.add(user)
+
+        phish_str = phish_time.isoformat() if hasattr(phish_time, "isoformat") else str(phish_time or "")
+        minutes   = ""
+        if hasattr(phish_time, "timestamp") and hasattr(login_time, "timestamp"):
+            diff = int((login_time.timestamp() - phish_time.timestamp()) / 60)
+            minutes = f"{diff}"
+
+        findings.append({
+            "finding_type": "PATIENT_ZERO_PHISHING",
+            "severity":     "CRITICAL",
+            "title":        "Login after phishing email",
+            "description": (
+                f"{user} received a phishing email at {phish_str[:16].replace('T', ' ')} "
+                f"and logged in from {login_country} ({ip})"
+                + (f" within {minutes} minutes" if minutes else "")
+                + ". Possible credential compromise."
+            ),
+            "affected":        user,
+            "recommendation": (
+                "Immediately revoke sessions, reset password, and investigate "
+                "all activity after the phishing event."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
     return findings
 
 
@@ -4117,6 +4511,15 @@ def security_findings(tenant: str = Query(...)) -> list[dict]:
         (_check_unregistered_device_admin,     (t_id, admin_members, tenant, now_str)),
         (_check_inactive_licensed_users,       (token, tenant, now_str)),
         (_check_shared_mailbox_signin_enabled, (token, tenant, now_str)),
+        # UAL-based checks (all tenants)
+        (_check_legacy_auth_logins,            (tenant, now_str)),
+        (_check_impossible_travel_findings,    (tenant, now_str)),
+        (_check_new_global_admin,              (tenant, now_str)),
+        (_check_mfa_method_changed,            (tenant, now_str)),
+        (_check_oauth_high_permission_apps,    (tenant, now_str)),
+        # Cross-tenant (NERO only) and correlation checks
+        (_check_cross_tenant_ioc,              (tenant, now_str)),
+        (_check_patient_zero_phishing,         (tenant, now_str)),
     ]:
         try:
             all_findings.extend(check_fn(*args))
