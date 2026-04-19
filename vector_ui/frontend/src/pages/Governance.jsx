@@ -213,7 +213,6 @@ export default function Governance({
   // 11 simultaneous queries on mount.
   useEffect(() => {
     // Already cached? nothing to do.
-    if (data[activeTab] !== undefined) return;
     // Don't fire until we know which tenant to query for.
     if (!selectedTenantName) return;
 
