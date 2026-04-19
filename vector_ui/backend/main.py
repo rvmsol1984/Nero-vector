@@ -3255,11 +3255,16 @@ def mfa_status() -> list[dict]:
                                 MAX(client_name) AS client_name
                 FROM vector_events
                 WHERE user_id IS NOT NULL
+                  AND user_id LIKE '%%@%%'
                   AND user_id NOT LIKE 'ServicePrincipal_%%'
                   AND client_name NOT IN ('GameChange Solar', 'GCS')
+                  AND (
+                    (client_name = 'London Fischer' AND user_id LIKE '%%@londonfischer.com')
+                    OR client_name = 'NERO'
+                  )
                 GROUP BY user_id
                 ORDER BY client_name, user_id
-                LIMIT 200
+                LIMIT 50
                 """
             )
         except Exception:
