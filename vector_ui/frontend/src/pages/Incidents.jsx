@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import Avatar from "../components/Avatar.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
@@ -685,7 +685,7 @@ function IncidentDetail({ incident, onStatusChange }) {
             style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
           >
             {evidence.map((sig, i) => (
-              <EvidenceRow key={sig.id || i} signal={sig} />
+              <EvidenceRow key={sig.id || i} signal={sig} userId={incident.user_id} />
             ))}
           </div>
         )}
@@ -1228,7 +1228,32 @@ const RULE_STYLE = {
 };
 const DEFAULT_RULE_STYLE = { icon: "⚡", color: "#6B7280" };
 
-function EvidenceRow({ signal }) {
+// Rule name → comma-separated event_type string sent to the Events page.
+// Lookup strips a trailing "Rule" suffix so both "IOCMatch" and
+// "IOCMatchRule" resolve correctly.
+const RULE_EVENT_TYPES = {
+  OffHoursLogin:             "UserLoggedIn",
+  IOCMatch:                  "UserLoggedIn",
+  NewCountryLogin:           "UserLoggedIn",
+  HighRiskCountryLogin:      "UserLoggedIn",
+  VPNLogin:                  "UserLoggedIn",
+  ImpossibleTravel:          "UserLoggedIn",
+  ServicePrincipalLogin:     "UserLoggedIn",
+  NewDeviceLogin:            "UserLoggedIn",
+  InboxRuleCreated:          "New-InboxRule",
+  MassEmailDelete:           "HardDelete,SoftDelete",
+  HighVolumeFileAccess:      "FileDownloaded,FilePreviewed",
+  SuspiciousMailbox:         "MailItemsAccessed",
+  MalwareDetected:           "MalwareDetected",
+  PrivilegedRoleAssigned:    "Add member to role.",
+  MFAMethodChanged:          "Update user.",
+  PasswordSpray:             "UserLoginFailed",
+  AttachmentOpenedPostLogin: "FileDownloaded,FilePreviewed",
+  ExternalSharingSpike:      "SharingInvitationCreated,AnonymousLinkCreated",
+};
+
+function EvidenceRow({ signal, userId }) {
+  const navigate = useNavigate();
   if (!signal || typeof signal !== "object") return null;
   const ruleName = signal.rule || signal.name || signal.event_type || "";
   const score = Number(signal.score ?? signal.weight ?? signal.points ?? 0);
@@ -1242,10 +1267,26 @@ function EvidenceRow({ signal }) {
   const ts = signal.timestamp || signal.time || signal.event_time || signal.added_at;
   const style = RULE_STYLE[ruleName] || DEFAULT_RULE_STYLE;
 
+  const normalised = ruleName.replace(/Rule$/, "");
+  const eventTypes = RULE_EVENT_TYPES[ruleName] || RULE_EVENT_TYPES[normalised];
+  const clickable = !!(eventTypes && userId);
+
+  function handleClick() {
+    const params = new URLSearchParams({ user: userId, event_type: eventTypes });
+    navigate(`/events?${params.toString()}`);
+  }
+
   return (
     <div
-      className="px-3 py-2 flex items-start gap-3 text-[11px]"
-      style={{ borderLeft: `3px solid ${style.color}` }}
+      className={`px-3 py-2 flex items-start gap-3 text-[11px] transition-colors${clickable ? " hover:bg-white/[0.04]" : ""}`}
+      style={{
+        borderLeft: `3px solid ${style.color}`,
+        cursor: clickable ? "pointer" : "default",
+      }}
+      onClick={clickable ? handleClick : undefined}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") handleClick(); } : undefined}
     >
       <span className="text-base leading-none shrink-0 mt-px" aria-hidden="true">
         {style.icon}
