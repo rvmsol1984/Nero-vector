@@ -878,10 +878,10 @@ function ImpactTab({ incident }) {
 
   const buckets = [
     { key: "accessed",    label: "Accessed",    color: "#3B82F6", icon: "👁" },
+    { key: "read_viewed", label: "Read/Viewed", color: "#60A5FA", icon: "👁" },
     { key: "sent",        label: "Sent",        color: "#F97316", icon: "📤" },
     { key: "modified",    label: "Modified",    color: "#EAB308", icon: "✎" },
     { key: "deleted",     label: "Deleted",     color: "#EF4444", icon: "🗑" },
-    { key: "read_viewed", label: "Read/Viewed", color: "#60A5FA", icon: "👁" },
   ];
 
   return (
@@ -935,7 +935,7 @@ function ImpactTab({ incident }) {
 
 function ImpactEventsTable({ data }) {
   const rows = [];
-  const buckets = ["accessed", "sent", "modified", "deleted", "read_viewed"];
+  const buckets = ["accessed", "read_viewed", "sent", "modified", "deleted"];
   for (const b of buckets) {
     for (const e of (data[b]?.events || [])) {
       rows.push({ ...e, _bucket: b });
