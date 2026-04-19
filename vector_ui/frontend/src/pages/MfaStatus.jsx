@@ -1,9 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import TenantBadge from "../components/TenantBadge.jsx";
 
 // ---------------------------------------------------------------------------
-// helpers
+// constants
+// ---------------------------------------------------------------------------
+
+// Tenants excluded from the selector because MFA data is not available
+// (e.g. they use a third-party IdP such as Okta).
+const EXCLUDED_TENANTS = new Set(["GameChange Solar"]);
+
+// ---------------------------------------------------------------------------
+// fetch helper
 // ---------------------------------------------------------------------------
 
 function fetchMfaStatus(signal) {
@@ -21,32 +29,25 @@ function fetchMfaStatus(signal) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// style maps
+// ---------------------------------------------------------------------------
+
 const STATUS_META = {
   STRONG: { label: "STRONG", color: "#10B981", bg: "#10B98115" },
   WEAK:   { label: "WEAK",   color: "#EAB308", bg: "#EAB30815" },
   NONE:   { label: "NONE",   color: "#EF4444", bg: "#EF444415" },
 };
 
-function StatusPill({ status }) {
-  const meta = STATUS_META[status] || STATUS_META.NONE;
-  return (
-    <span
-      className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"
-      style={{ color: meta.color, backgroundColor: meta.bg }}
-    >
-      {meta.label}
-    </span>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // page
 // ---------------------------------------------------------------------------
 
 export default function MfaStatus() {
-  const [rows, setRows]       = useState(null);
-  const [err, setErr]         = useState(null);
-  const [search, setSearch]   = useState("");
+  const [rows, setRows]         = useState(null);
+  const [err, setErr]           = useState(null);
+  const [tenant, setTenant]     = useState("All");
+  const [search, setSearch]     = useState("");
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -58,24 +59,40 @@ export default function MfaStatus() {
     return () => ctrl.abort();
   }, []);
 
-  // Summary counts (computed from full dataset, before search filter)
-  const noneCount   = rows ? rows.filter((r) => r.status === "NONE").length   : 0;
-  const weakCount   = rows ? rows.filter((r) => r.status === "WEAK").length   : 0;
-  const strongCount = rows ? rows.filter((r) => r.status === "STRONG").length : 0;
+  // Derive the ordered tenant list from data (exclude known Okta tenants).
+  const tenants = useMemo(() => {
+    if (!rows) return [];
+    const seen = new Set();
+    for (const r of rows) {
+      const name = r.client_name || "";
+      if (name && !EXCLUDED_TENANTS.has(name)) seen.add(name);
+    }
+    return Array.from(seen).sort();
+  }, [rows]);
+
+  // Apply tenant filter first, then text search.
+  const tenantFiltered = useMemo(() => {
+    if (!rows) return [];
+    if (tenant === "All") return rows.filter((r) => !EXCLUDED_TENANTS.has(r.client_name || ""));
+    return rows.filter((r) => r.client_name === tenant);
+  }, [rows, tenant]);
 
   const q = search.trim().toLowerCase();
-  const visible = rows
-    ? rows.filter((r) => {
-        if (!q) return true;
-        return (
-          (r.user_id      || "").toLowerCase().includes(q) ||
-          (r.display_name || "").toLowerCase().includes(q) ||
-          (r.client_name  || "").toLowerCase().includes(q) ||
-          (r.mfa_method   || "").toLowerCase().includes(q) ||
-          (r.status       || "").toLowerCase().includes(q)
-        );
-      })
-    : [];
+  const visible = useMemo(() => {
+    if (!q) return tenantFiltered;
+    return tenantFiltered.filter((r) =>
+      (r.user_id      || "").toLowerCase().includes(q) ||
+      (r.display_name || "").toLowerCase().includes(q) ||
+      (r.client_name  || "").toLowerCase().includes(q) ||
+      (r.mfa_method   || "").toLowerCase().includes(q) ||
+      (r.status       || "").toLowerCase().includes(q)
+    );
+  }, [tenantFiltered, q]);
+
+  // Summary counts reflect the current tenant filter (before text search).
+  const noneCount   = tenantFiltered.filter((r) => r.status === "NONE").length;
+  const weakCount   = tenantFiltered.filter((r) => r.status === "WEAK").length;
+  const strongCount = tenantFiltered.filter((r) => r.status === "STRONG").length;
 
   return (
     <div className="px-6 py-6 space-y-5 max-w-6xl mx-auto">
@@ -89,7 +106,28 @@ export default function MfaStatus() {
         </p>
       </div>
 
-      {/* summary bar */}
+      {/* tenant selector */}
+      {tenants.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] uppercase tracking-wider text-white/40 mr-1">
+            Tenant
+          </span>
+          <TenantPill active={tenant === "All"} onClick={() => setTenant("All")}>
+            All
+          </TenantPill>
+          {tenants.map((name) => (
+            <TenantPill
+              key={name}
+              active={tenant === name}
+              onClick={() => setTenant(name)}
+            >
+              {name}
+            </TenantPill>
+          ))}
+        </div>
+      )}
+
+      {/* summary bar — counts update with tenant selection */}
       {rows && (
         <div className="flex gap-4 flex-wrap">
           <SummaryChip
@@ -116,7 +154,7 @@ export default function MfaStatus() {
       {/* search */}
       <input
         type="search"
-        placeholder="Filter by user, tenant, method…"
+        placeholder="Filter by user, method, status…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="w-full max-w-sm bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-[12px] text-white placeholder-white/30 outline-none focus:border-white/30"
@@ -176,7 +214,9 @@ export default function MfaStatus() {
 
       {rows !== null && visible.length > 0 && (
         <div className="text-white/30 text-[10px]">
-          Showing {visible.length} of {rows.length} user{rows.length !== 1 ? "s" : ""}
+          Showing {visible.length} of {tenantFiltered.length} user
+          {tenantFiltered.length !== 1 ? "s" : ""}
+          {tenant !== "All" ? ` · ${tenant}` : ""}
           {q ? " (filtered)" : ""}
         </div>
       )}
@@ -187,6 +227,22 @@ export default function MfaStatus() {
 // ---------------------------------------------------------------------------
 // sub-components
 // ---------------------------------------------------------------------------
+
+function TenantPill({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all duration-200 active:scale-95 ${
+        active
+          ? "bg-primary text-white"
+          : "bg-white/10 text-white/70 hover:bg-white/15"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
 
 function SummaryChip({ count, label, color, bg }) {
   return (
@@ -253,6 +309,18 @@ function MfaRow({ row }) {
         <StatusPill status={row.status} />
       </td>
     </tr>
+  );
+}
+
+function StatusPill({ status }) {
+  const meta = STATUS_META[status] || STATUS_META.NONE;
+  return (
+    <span
+      className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"
+      style={{ color: meta.color, backgroundColor: meta.bg }}
+    >
+      {meta.label}
+    </span>
   );
 }
 

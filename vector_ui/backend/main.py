@@ -3232,9 +3232,12 @@ def mfa_status() -> list[dict]:
                             MAX(client_name) AS client_name
             FROM vector_user_baselines
             WHERE user_id IS NOT NULL
+              AND client_name NOT IN ('GameChange Solar', 'GCS')
+              AND user_id LIKE '%@%'
+              AND user_id NOT LIKE 'ServicePrincipal_%'
             GROUP BY user_id
             ORDER BY client_name, user_id
-            LIMIT 300
+            LIMIT 200
             """
         )
     except Exception:
@@ -3251,9 +3254,10 @@ def mfa_status() -> list[dict]:
                 FROM vector_events
                 WHERE user_id IS NOT NULL
                   AND user_id NOT LIKE 'ServicePrincipal_%%'
+                  AND client_name NOT IN ('GameChange Solar', 'GCS')
                 GROUP BY user_id
                 ORDER BY client_name, user_id
-                LIMIT 300
+                LIMIT 200
                 """
             )
         except Exception:
@@ -3309,12 +3313,6 @@ def mfa_status() -> list[dict]:
             status = "NONE"
 
         display_name: str | None = None
-        try:
-            upn = urllib.parse.quote(user_id, safe="@")
-            gu  = _graph_get(f"/users/{upn}?$select=displayName")
-            display_name = gu.get("displayName") or None
-        except Exception:
-            pass
 
         out.append({
             "user_id":      user_id,
