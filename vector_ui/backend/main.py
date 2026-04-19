@@ -1358,7 +1358,7 @@ def incidents_impact(incident_id: str) -> dict:
                   AND event_type = ANY(%s)
                   AND timestamp BETWEEN %s AND %s
                 ORDER BY timestamp DESC
-                LIMIT 50
+                LIMIT 500
                 """,
                 (entity_key, list(event_types), first_seen, last_seen),
             )
@@ -1388,7 +1388,7 @@ def incidents_impact(incident_id: str) -> dict:
                   AND received BETWEEN %s AND %s
                   AND COALESCE(direction, '') <> 'ACTIVITY'
                 ORDER BY received DESC
-                LIMIT 50
+                LIMIT 500
                 """,
                 (user_id, first_seen, last_seen),
             )
@@ -3264,7 +3264,7 @@ def mfa_status() -> list[dict]:
                   )
                 GROUP BY user_id
                 ORDER BY client_name, user_id
-                LIMIT 50
+                LIMIT 500
                 """
             )
         except Exception:
