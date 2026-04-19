@@ -1340,9 +1340,6 @@ def incidents_impact(incident_id: str) -> dict:
     if not first_seen or not last_seen:
         return empty
 
-    # Expand window by minimum 2 hours so zero-dwell incidents show surrounding activity.
-    first_seen = first_seen - timedelta(hours=2)
-    last_seen  = last_seen + timedelta(hours=2)
     # ---- file-action buckets (UAL) ----
     ACCESSED_EVENTS     = ("FileAccessed", "MailItemsAccessed", "FilePreviewed")
     MODIFIED_EVENTS     = ("FileModified", "FileUploaded", "FileRenamed")
@@ -1358,7 +1355,7 @@ def incidents_impact(incident_id: str) -> dict:
                 SELECT id::text, timestamp, event_type, workload,
                        client_ip, raw_json
                 FROM vector_events
-                WHERE LOWER(entity_key) = LOWER(%s)
+                WHERE entity_key = %s
                   AND event_type = ANY(%s)
                   AND timestamp BETWEEN %s AND %s
                 ORDER BY timestamp DESC
@@ -1388,7 +1385,7 @@ def incidents_impact(incident_id: str) -> dict:
                        recipient_address, subject, received, status,
                        size_bytes, direction
                 FROM vector_message_trace
-                WHERE LOWER(sender_address) = LOWER(%s)
+                WHERE sender_address = %s
                   AND received BETWEEN %s AND %s
                   AND COALESCE(direction, '') <> 'ACTIVITY'
                 ORDER BY received DESC
@@ -3506,6 +3503,488 @@ async def jwt_auth_middleware(request: Request, call_next):
             return JSONResponse({"detail": "invalid token"}, status_code=401)
         request.state.user = payload
     return await call_next(request)
+
+
+# ============================================================================
+# Security Findings — proactive posture checks via Graph + DB
+# ============================================================================
+
+_SECURITY_FINDINGS_CACHE: dict[str, dict] = {}
+_SECURITY_FINDINGS_CACHE_TTL = 600  # 10 minutes
+
+_MAILBOX_RULES_CACHE: dict[str, dict] = {}
+_MAILBOX_RULES_CACHE_TTL = 600  # 10 minutes
+
+_ADMIN_ROLE_NAMES = frozenset({
+    "Global Administrator",
+    "Privileged Role Administrator",
+    "Security Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator",
+    "User Administrator",
+    "Billing Administrator",
+    "Compliance Administrator",
+    "Teams Administrator",
+    "Application Administrator",
+    "Authentication Administrator",
+})
+
+
+def _get_admin_members(token: str) -> dict[str, str]:
+    """Return {upn_lower: role_display_name} for every member of every admin role."""
+    try:
+        roles_data = _graph_get_with_token(token, "/directoryRoles")
+        roles = roles_data.get("value") or []
+    except Exception:
+        return {}
+    admin_members: dict[str, str] = {}
+    for role in roles:
+        if role.get("displayName") not in _ADMIN_ROLE_NAMES:
+            continue
+        role_id = role.get("id") or ""
+        role_name = role.get("displayName") or ""
+        if not role_id:
+            continue
+        try:
+            members_data = _graph_get_with_token(token, f"/directoryRoles/{role_id}/members")
+        except Exception:
+            continue
+        for m in (members_data.get("value") or []):
+            upn = (m.get("userPrincipalName") or "").lower()
+            if upn and upn not in admin_members:
+                admin_members[upn] = role_name
+    return admin_members
+
+
+def _check_external_forward_rules(
+    token: str, users: list[dict], tenant: str, now_str: str
+) -> list[dict]:
+    findings: list[dict] = []
+
+    def _fetch_user_rules(user: dict) -> list[dict]:
+        upn = user.get("userPrincipalName") or ""
+        if not upn:
+            return []
+        upn_domain = upn.rsplit("@", 1)[1].lower() if "@" in upn else ""
+        try:
+            data = _graph_get_with_token(
+                token,
+                f"/users/{urllib.parse.quote(upn, safe='')}/mailFolders/inbox/messageRules",
+            )
+            rules = data.get("value") or []
+        except Exception:
+            return []
+        user_findings: list[dict] = []
+        for rule in rules:
+            actions  = rule.get("actions") or {}
+            fwd      = actions.get("forwardTo") or []
+            redir    = actions.get("redirectTo") or []
+            del_msg  = actions.get("deleteMessage", False)
+            external: list[str] = []
+            for rl in (fwd, redir):
+                for r in rl:
+                    if isinstance(r, dict):
+                        addr = ((r.get("emailAddress") or {}).get("address") or "").lower()
+                        if addr:
+                            dom = addr.rsplit("@", 1)[1] if "@" in addr else ""
+                            if not upn_domain or dom != upn_domain:
+                                external.append(addr)
+            if not external and not del_msg:
+                continue
+            rule_name = rule.get("displayName") or "Unnamed Rule"
+            if del_msg:
+                desc  = f"Inbox rule '{rule_name}' automatically deletes incoming messages."
+                recom = "Disable or remove this rule. Silent message deletion is a key BEC indicator."
+            else:
+                addrs = ", ".join(external[:3])
+                desc  = f"Inbox rule '{rule_name}' forwards/redirects to external address(es): {addrs}."
+                recom = "Disable the forwarding rule immediately and investigate for BEC compromise."
+            user_findings.append({
+                "finding_type":    "EXTERNAL_FORWARD_RULE",
+                "severity":        "CRITICAL",
+                "title":           "Suspicious Inbox Rule Detected",
+                "description":     desc,
+                "affected":        upn,
+                "recommendation":  recom,
+                "tenant":          tenant,
+                "detected_at":     now_str,
+            })
+        return user_findings
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_user_rules, u): u for u in users[:500]}
+        for fut in as_completed(futures):
+            try:
+                findings.extend(fut.result())
+            except Exception:
+                pass
+    return findings
+
+
+def _check_admin_no_mfa(
+    token: str, admin_members: dict[str, str], tenant: str, now_str: str
+) -> list[dict]:
+    findings: list[dict] = []
+
+    def _check_one(upn: str, role_name: str):
+        try:
+            data = _graph_get_with_token(
+                token,
+                f"/users/{urllib.parse.quote(upn, safe='')}/authentication/methods",
+            )
+        except Exception:
+            return None
+        method_label, status, _ = _classify_methods(data.get("value") or [])
+        if status not in ("NONE", "WEAK"):
+            return None
+        qualifier = "no" if status == "NONE" else "only weak"
+        return {
+            "finding_type": "ADMIN_NO_MFA",
+            "severity":     "CRITICAL",
+            "title":        f"Admin Account Has {qualifier.title()} MFA",
+            "description": (
+                f"{upn} holds the '{role_name}' role but has {qualifier} MFA registered"
+                + (f" ({method_label})" if status == "WEAK" else "") + "."
+            ),
+            "affected":        upn,
+            "recommendation": (
+                "Enforce phishing-resistant MFA (FIDO2 or Authenticator app) "
+                "for all admin accounts via Conditional Access immediately."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        }
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_check_one, u, r): u for u, r in admin_members.items()}
+        for fut in as_completed(futures):
+            try:
+                finding = fut.result()
+                if finding:
+                    findings.append(finding)
+            except Exception:
+                pass
+    return findings
+
+
+def _check_anonymous_share(tenant: str, now_str: str) -> list[dict]:
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=30)).isoformat()
+    rows = db.fetch_all(
+        """
+        SELECT user_id, COUNT(*)::bigint AS share_count
+        FROM vector_events
+        WHERE client_name = %s
+          AND event_type  = 'AnonymousLinkCreated'
+          AND timestamp  >= %s
+          AND user_id IS NOT NULL
+        GROUP BY user_id
+        ORDER BY share_count DESC
+        LIMIT 50
+        """,
+        (tenant, cutoff),
+    )
+    findings = []
+    for row in rows:
+        uid = row.get("user_id") or ""
+        cnt = int(row.get("share_count") or 0)
+        findings.append({
+            "finding_type": "ANONYMOUS_SHARE",
+            "severity":     "HIGH",
+            "title":        "Anonymous Link Sharing Detected",
+            "description": (
+                f"{uid} created {cnt} anonymous sharing link{'s' if cnt != 1 else ''} "
+                "in the last 30 days."
+            ),
+            "affected":        uid,
+            "recommendation": (
+                "Review and revoke anonymous sharing links. "
+                "Consider disabling anonymous sharing in SharePoint/OneDrive admin settings."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_stale_admin(
+    admin_members: dict[str, str], tenant: str, now_str: str
+) -> list[dict]:
+    if not admin_members:
+        return []
+    cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(days=90)
+    upn_list  = list(admin_members.keys())
+    rows = db.fetch_all(
+        """
+        SELECT LOWER(user_id) AS user_id_lc, last_seen
+        FROM vector_user_baselines
+        WHERE client_name = %s
+          AND LOWER(user_id) = ANY(%s)
+        """,
+        (tenant, upn_list),
+    )
+    findings: list[dict] = []
+    for row in rows:
+        upn       = row.get("user_id_lc") or ""
+        last_seen = row.get("last_seen")
+        if last_seen is None:
+            continue
+        if isinstance(last_seen, str):
+            try:
+                last_seen = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if not isinstance(last_seen, datetime):
+            continue
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        if last_seen >= cutoff_dt:
+            continue
+        days_stale = (datetime.now(tz=timezone.utc) - last_seen).days
+        role_name  = admin_members.get(upn, "admin")
+        findings.append({
+            "finding_type": "STALE_ADMIN",
+            "severity":     "HIGH",
+            "title":        "Stale Admin Account",
+            "description": (
+                f"Admin account {upn} (role: {role_name}) has not been seen in "
+                f"{days_stale} days (last activity: {last_seen.date().isoformat()})."
+            ),
+            "affected":        upn,
+            "recommendation": (
+                "Disable or remove this admin account. "
+                "Verify with the owner whether elevated privileges are still required."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_guest_with_access(token: str, tenant: str, now_str: str) -> list[dict]:
+    try:
+        fv = urllib.parse.quote("userType eq 'Guest' and accountEnabled eq true", safe="")
+        data = _graph_get_with_token(
+            token,
+            f"/users?$filter={fv}&$select=userPrincipalName,displayName,mail&$top=500",
+        )
+        guests = data.get("value") or []
+    except Exception:
+        return []
+
+    guest_upns: set[str]        = set()
+    guest_display: dict[str, str] = {}
+    for g in guests:
+        upn     = (g.get("userPrincipalName") or "").lower()
+        mail    = (g.get("mail") or "").lower()
+        display = g.get("displayName") or upn
+        for addr in filter(None, {upn, mail}):
+            guest_upns.add(addr)
+            guest_display.setdefault(addr, display)
+
+    if not guest_upns:
+        return []
+
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=30)).isoformat()
+    rows = db.fetch_all(
+        """
+        SELECT LOWER(user_id) AS user_id_lc, COUNT(*)::bigint AS access_count
+        FROM vector_events
+        WHERE client_name = %s
+          AND workload IN ('SharePoint', 'OneDrive')
+          AND timestamp >= %s
+          AND user_id IS NOT NULL
+        GROUP BY LOWER(user_id)
+        ORDER BY access_count DESC
+        LIMIT 200
+        """,
+        (tenant, cutoff),
+    )
+    findings: list[dict] = []
+    for row in rows:
+        uid = row.get("user_id_lc") or ""
+        if uid not in guest_upns:
+            continue
+        cnt     = int(row.get("access_count") or 0)
+        display = guest_display.get(uid, uid)
+        findings.append({
+            "finding_type": "GUEST_WITH_ACCESS",
+            "severity":     "MEDIUM",
+            "title":        "Guest User Accessing Company Data",
+            "description": (
+                f"Guest account {uid} ({display}) made {cnt} access event"
+                f"{'s' if cnt != 1 else ''} to SharePoint/OneDrive in the last 30 days."
+            ),
+            "affected":        uid,
+            "recommendation": (
+                "Review guest access permissions. "
+                "Remove stale external collaborations and enforce least-privilege for guest accounts."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+@app.get("/api/security-findings")
+def security_findings(tenant: str = Query(...)) -> list[dict]:
+    """Proactive posture findings: Graph API checks + UAL analysis per tenant."""
+    now_mono = time.monotonic()
+    bucket = _SECURITY_FINDINGS_CACHE.get(tenant, {})
+    if (
+        bucket.get("data") is not None
+        and now_mono - bucket.get("fetched_at", 0.0) < _SECURITY_FINDINGS_CACHE_TTL
+    ):
+        return bucket["data"]
+
+    t_id    = _tenant_id_for(tenant)
+    now_str = datetime.now(tz=timezone.utc).isoformat()
+
+    try:
+        token = _get_graph_token(tenant_id=t_id)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not obtain Graph token: {exc.detail}"
+        )
+
+    try:
+        users_data = _graph_get_with_token(
+            token,
+            "/users?$filter=accountEnabled eq true"
+            "&$select=userPrincipalName,displayName&$top=999",
+        )
+        users = users_data.get("value") or []
+    except Exception:
+        users = []
+
+    admin_members = _get_admin_members(token)
+
+    all_findings: list[dict] = []
+    _SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+    for check_fn, args in [
+        (_check_external_forward_rules, (token, users, tenant, now_str)),
+        (_check_admin_no_mfa,           (token, admin_members, tenant, now_str)),
+        (_check_anonymous_share,        (tenant, now_str)),
+        (_check_stale_admin,            (admin_members, tenant, now_str)),
+        (_check_guest_with_access,      (token, tenant, now_str)),
+    ]:
+        try:
+            all_findings.extend(check_fn(*args))
+        except Exception as exc:
+            logger.warning("security-findings %s failed: %s", check_fn.__name__, exc)
+
+    all_findings.sort(key=lambda f: _SEV_ORDER.get(f.get("severity", "LOW"), 4))
+    _SECURITY_FINDINGS_CACHE[tenant] = {"data": all_findings, "fetched_at": now_mono}
+    return all_findings
+
+
+# ============================================================================
+# Mailbox Rules — inbox rule inventory per tenant
+# ============================================================================
+
+
+@app.get("/api/mailbox-rules")
+def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
+    """All inbox message rules for every Member mailbox in the tenant."""
+    now_mono = time.monotonic()
+    bucket = _MAILBOX_RULES_CACHE.get(tenant, {})
+    if (
+        bucket.get("data") is not None
+        and now_mono - bucket.get("fetched_at", 0.0) < _MAILBOX_RULES_CACHE_TTL
+    ):
+        return bucket["data"]
+
+    t_id = _tenant_id_for(tenant)
+    try:
+        token = _get_graph_token(tenant_id=t_id)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not obtain Graph token: {exc.detail}"
+        )
+
+    fv = urllib.parse.quote("accountEnabled eq true and userType eq 'Member'", safe="")
+    try:
+        users_data = _graph_get_with_token(
+            token,
+            f"/users?$filter={fv}&$select=userPrincipalName,displayName&$top=999",
+        )
+        users = users_data.get("value") or []
+    except HTTPException as exc:
+        raise HTTPException(status_code=502, detail=f"Graph failed: {exc.detail}")
+
+    results: list[dict] = []
+
+    def _fetch_user_rules(user: dict) -> list[dict]:
+        upn     = user.get("userPrincipalName") or ""
+        display = user.get("displayName") or upn
+        if not upn:
+            return []
+        upn_domain = upn.rsplit("@", 1)[1].lower() if "@" in upn else ""
+        try:
+            data = _graph_get_with_token(
+                token,
+                f"/users/{urllib.parse.quote(upn, safe='')}/mailFolders/inbox/messageRules",
+            )
+            rules = data.get("value") or []
+        except Exception:
+            return []
+
+        out: list[dict] = []
+        for rule in rules:
+            rule_name    = rule.get("displayName") or "Unnamed Rule"
+            rule_enabled = rule.get("isEnabled", True)
+            conditions   = rule.get("conditions") or {}
+            actions      = rule.get("actions") or {}
+            forward_to   = actions.get("forwardTo") or []
+            redirect_to  = actions.get("redirectTo") or []
+            delete_msg   = actions.get("deleteMessage", False)
+            mark_read    = actions.get("markAsRead", False)
+            move_folder  = actions.get("moveToFolder")
+
+            is_suspicious = False
+            reasons: list[str] = []
+
+            for rl, label in [(forward_to, "forward"), (redirect_to, "redirect")]:
+                for r in rl:
+                    if isinstance(r, dict):
+                        addr = ((r.get("emailAddress") or {}).get("address") or "").lower()
+                        if addr:
+                            dom = addr.rsplit("@", 1)[1] if "@" in addr else ""
+                            if not upn_domain or dom != upn_domain:
+                                is_suspicious = True
+                                reasons.append(f"Forwards/redirects to external: {addr}")
+
+            if delete_msg:
+                is_suspicious = True
+                reasons.append("Deletes matching messages")
+            if mark_read and move_folder:
+                is_suspicious = True
+                reasons.append(f"Marks read & moves to folder '{move_folder}'")
+
+            out.append({
+                "user":             upn,
+                "display_name":     display,
+                "rule_name":        rule_name,
+                "rule_enabled":     rule_enabled,
+                "conditions":       conditions,
+                "actions":          actions,
+                "is_suspicious":    is_suspicious,
+                "suspicion_reason": "; ".join(reasons) if reasons else None,
+                "tenant":           tenant,
+            })
+        return out
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_user_rules, u): u for u in users[:500]}
+        for fut in as_completed(futures):
+            try:
+                results.extend(fut.result())
+            except Exception:
+                pass
+
+    results.sort(key=lambda r: (0 if r["is_suspicious"] else 1, r["user"]))
+    _MAILBOX_RULES_CACHE[tenant] = {"data": results, "fetched_at": now_mono}
+    return results
 
 
 # ============================================================================

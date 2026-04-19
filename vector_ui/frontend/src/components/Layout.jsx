@@ -28,16 +28,18 @@ const SIDEBAR_ITEMS = [
   { to: "/baseline",   label: "Baseline",            icon: "activity", phase2: true },
 
   { divider: true, label: "GOVERNANCE" },
-  { to: "/identity",   label: "Identity & Access",   icon: "identity"   },
-  { to: "/mfa-status", label: "MFA Status",          icon: "mfa"        },
-  { to: "/data",       label: "Data & Sharing",      icon: "data"       },
-  { to: "/devices",    label: "Devices",             icon: "devices"    },
-  { to: "/threats",    label: "Threat Intelligence", icon: "threats"    },
-  { to: "/ai",         label: "AI & Shadow IT",      icon: "ai"         },
+  { to: "/identity",          label: "Identity & Access",   icon: "identity"          },
+  { to: "/mfa-status",        label: "MFA Status",          icon: "mfa"               },
+  { to: "/security-findings", label: "Security Findings",   icon: "security-findings" },
+  { to: "/mailbox-rules",     label: "Mailbox Rules",       icon: "mailbox-rules"     },
+  { to: "/data",              label: "Data & Sharing",      icon: "data"              },
+  { to: "/devices",           label: "Devices",             icon: "devices"           },
+  { to: "/threats",           label: "Threat Intelligence", icon: "threats"           },
+  { to: "/ai",                label: "AI & Shadow IT",      icon: "ai"                },
 
   { divider: true, label: "SYSTEM" },
-  { to: "/sources",    label: "Sources",             icon: "sources"    },
-  { to: "/exceptions", label: "Exceptions",          icon: "exceptions" },
+  { to: "/sources",    label: "Sources",    icon: "sources"    },
+  { to: "/exceptions", label: "Exceptions", icon: "exceptions" },
 ];
 
 const BOTTOM_TABS = [
@@ -183,6 +185,25 @@ function Icon({ name, size = 18 }) {
         <svg {...p}>
           <path d="M12 3 l1.6 4.4 L18 9 l-4.4 1.6 L12 15 l-1.6-4.4 L6 9 l4.4-1.6 z" />
           <path d="M18 15 l0.7 1.9 L21 18 l-2.3 0.6 L18 21 l-0.7-2.3 L15 18 l2.3-0.6 z" />
+        </svg>
+      );
+    case "security-findings":
+      // Shield with exclamation mark — "security posture / findings".
+      return (
+        <svg {...p}>
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <circle cx="12" cy="16" r="0.6" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case "mailbox-rules":
+      // Envelope with a small arrow — "mailbox forwarding rules".
+      return (
+        <svg {...p}>
+          <rect x="2" y="6" width="20" height="14" rx="2" />
+          <polyline points="2 6 12 13 22 6" />
+          <line x1="16" y1="17" x2="20" y2="17" />
+          <polyline points="18 15 20 17 18 19" />
         </svg>
       );
     case "exceptions":
