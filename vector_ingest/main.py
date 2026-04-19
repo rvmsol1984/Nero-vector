@@ -163,6 +163,17 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
             extra={"has_token": bool(tl_token), "has_org_id": bool(tl_org_id)},
         )
 
+    # DattoRmmPoller syncs device inventory and open alerts every 4h
+    datto_base = os.environ.get('DATTO_RMM_BASE_URL', '').strip()
+    datto_key  = os.environ.get('DATTO_RMM_API_KEY', '').strip()
+    if datto_base and datto_key:
+        from vector_ingest.datto_rmm_poller import DattoRmmPoller
+        logger.info('[datto-rmm] building poller')
+        ingestors.append(DattoRmmPoller(db=db))
+    else:
+        logger.info('[datto-rmm] DATTO_RMM_BASE_URL or DATTO_RMM_API_KEY not set, skipping')
+
+
     # ScoringEngine and BaselineEngine
     ingestors.append(BaselineEngine(db=db))
     ingestors.append(ScoringEngine(db=db))

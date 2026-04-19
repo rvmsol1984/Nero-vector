@@ -34,6 +34,7 @@ const CATEGORY_TYPES = {
   "Legacy Auth":      ["LEGACY_AUTH_LOGIN"],
   "Cross-Tenant":     ["CROSS_TENANT_IOC"],
   "Phishing":         ["PATIENT_ZERO_PHISHING", "IMPOSSIBLE_TRAVEL"],
+  "Devices":          ["UNMANAGED_DEVICE_LOGIN", "RMM_CRITICAL_ALERT", "UNREGISTERED_DEVICE_ADMIN"],
 };
 
 export default function SecurityFindings() {
