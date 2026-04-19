@@ -135,14 +135,10 @@ export default function Governance({
     setLoadingTabs(new Set());
   }, [selectedTenantName]);
 
-  // Lazy-load the active tab on first visit only. Switching back to
-  // a previously-viewed tab uses the cached rows and fires no new
-  // request, which keeps the Postgres pool from getting hammered by
-  // 11 simultaneous queries on mount.
+  // Fetch the active tab whenever activeTab or selectedTenantName changes.
+  // Each change triggers a fresh request so navigating back to a tab or
+  // switching sub-pages always shows up-to-date data.
   useEffect(() => {
-    // Already cached? nothing to do.
-    if (data[activeTab] !== undefined) return;
-    // Don't fire until we know which tenant to query for.
     if (!selectedTenantName) return;
 
     const tab = TABS.find((t) => t.id === activeTab);
@@ -188,10 +184,6 @@ export default function Governance({
     return () => {
       cancel = true;
     };
-    // The effect intentionally only re-runs on activeTab or
-    // selectedTenantName change; the in-effect ``data[activeTab]``
-    // check reads the live snapshot and bails early if cached.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, selectedTenantName]);
 
   const tenantCtx = useMemo(

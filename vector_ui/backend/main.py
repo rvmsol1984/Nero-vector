@@ -2690,6 +2690,18 @@ _GRAPH_TOKEN_CACHE: dict = {"token": None, "expires_at": 0.0}
 # Shape: { tenant_id: {"token": str, "expires_at": float} }
 _GRAPH_TOKEN_CACHE_BY_TENANT: dict[str, dict] = {}
 
+# Canonical display-name → Azure AD tenant UUID mapping.
+_TENANT_NAME_TO_ID: dict[str, str] = {
+    "NERO":            "12077321-d5c3-4d90-ad87-d19b58b2f847",
+    "London Fischer":  "4bddd2a5-8bee-46c0-968c-a7a0190e1245",
+    "GameChange Solar": _GCS_TENANT_ID,
+}
+
+
+def _tenant_id_for(client_name: str | None) -> str:
+    """Return the AAD tenant UUID for *client_name*, falling back to GCS."""
+    return _TENANT_NAME_TO_ID.get(client_name or "", _GCS_TENANT_ID)
+
 
 def _get_graph_token(tenant_id: str | None = None) -> str:
     """Client credentials token for *tenant_id*, cached until ~1 min before expiry.
@@ -2774,8 +2786,8 @@ def _graph_get_with_token(token: str, path_with_query: str) -> dict:
         raise HTTPException(status_code=502, detail=f"graph failed: {exc}")
 
 
-def _graph_get(path_with_query: str) -> dict:
-    token = _get_graph_token()
+def _graph_get(path_with_query: str, tenant_id: str | None = None) -> dict:
+    token = _get_graph_token(tenant_id)
     url = f"https://graph.microsoft.com/v1.0{path_with_query}"
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
@@ -3057,7 +3069,9 @@ def governance_guest_users(
 # cached in-process for 5 minutes so the two endpoints below can share it
 # without hammering Graph on every tab click.
 
-_INTUNE_CACHE: dict = {"data": None, "fetched_at": 0.0}
+# Per-tenant cache keyed by tenant_id UUID.
+# Shape: { tenant_id: {"data": list, "fetched_at": float} }
+_INTUNE_CACHE: dict[str, dict] = {}
 _INTUNE_CACHE_TTL = 300  # seconds
 _STALE_SYNC_DAYS = 30
 
@@ -3077,14 +3091,21 @@ def _parse_graph_iso(value: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _fetch_intune_devices(force: bool = False) -> list[dict]:
-    """Return the cached /deviceManagement/managedDevices payload."""
+def _fetch_intune_devices(
+    tenant_id: str | None = None, force: bool = False
+) -> list[dict]:
+    """Return the cached /deviceManagement/managedDevices payload.
+
+    Results are cached per *tenant_id* for ``_INTUNE_CACHE_TTL`` seconds.
+    """
+    key = tenant_id or _GCS_TENANT_ID
     now_mono = time.monotonic()
-    cached = _INTUNE_CACHE.get("data")
+    bucket = _INTUNE_CACHE.get(key, {})
+    cached = bucket.get("data")
     if (
         not force
         and cached is not None
-        and now_mono - _INTUNE_CACHE.get("fetched_at", 0.0) < _INTUNE_CACHE_TTL
+        and now_mono - bucket.get("fetched_at", 0.0) < _INTUNE_CACHE_TTL
     ):
         return cached
 
@@ -3102,10 +3123,9 @@ def _fetch_intune_devices(force: bool = False) -> list[dict]:
         ]
     )
     path = f"/deviceManagement/managedDevices?$select={select_fields}&$top=999"
-    data = _graph_get(path)
+    data = _graph_get(path, tenant_id=key)
     values = data.get("value") or []
-    _INTUNE_CACHE["data"] = values
-    _INTUNE_CACHE["fetched_at"] = now_mono
+    _INTUNE_CACHE[key] = {"data": values, "fetched_at": now_mono}
     return values
 
 
@@ -3193,15 +3213,15 @@ def governance_intune_devices(
 ) -> list[dict]:
     """Users with at least one non-compliant, unencrypted, or stale
     Intune-managed device."""
-    devices = _fetch_intune_devices()
+    devices = _fetch_intune_devices(tenant_id=_tenant_id_for(tenant))
     return _group_intune_by_user(devices, only_with_issues=True)
 
 
 @app.get("/api/governance/intune-devices/{upn}")
-def governance_intune_devices_user(upn: str) -> dict:
+def governance_intune_devices_user(upn: str, tenant: str | None = Query(None)) -> dict:
     """All Intune-managed devices for a single user (used by the
     Intune Devices expandable row)."""
-    devices = _fetch_intune_devices()
+    devices = _fetch_intune_devices(tenant_id=_tenant_id_for(tenant))
     upn_lower = upn.strip().lower()
     user_devices = [
         d
