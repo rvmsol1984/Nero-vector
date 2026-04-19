@@ -25,19 +25,29 @@ function fetchFindings(tenant, signal) {
   });
 }
 
+const CATEGORY_TYPES = {
+  "Forward Rules":    ["EXTERNAL_FORWARD_RULE", "INTERNAL_FORWARD_RULE", "DELETE_INBOX_RULE", "HIDE_INBOX_RULE"],
+  "Admin Risk":       ["ADMIN_NO_MFA", "STALE_ADMIN", "UNREGISTERED_DEVICE_ADMIN"],
+  "Sharing":          ["ANONYMOUS_SHARE", "GUEST_WITH_ACCESS"],
+  "Inactive Users":   ["INACTIVE_LICENSED_USER"],
+  "Shared Mailboxes": ["SHARED_MAILBOX_SIGNIN_ENABLED"],
+};
+
 export default function SecurityFindings() {
-  const [tenant, setTenant]     = useState(TENANTS[0]);
-  const [findings, setFindings] = useState(null);
-  const [loading, setLoading]   = useState(false);
-  const [err, setErr]           = useState(null);
+  const [tenant, setTenant]       = useState(TENANTS[0]);
+  const [findings, setFindings]   = useState(null);
+  const [loading, setLoading]     = useState(false);
+  const [err, setErr]             = useState(null);
   const [sevFilter, setSevFilter] = useState("ALL");
-  const [expanded, setExpanded] = useState({});
+  const [catFilter, setCatFilter] = useState("ALL");
+  const [expanded, setExpanded]   = useState({});
 
   useEffect(() => {
     const ctrl = new AbortController();
     setFindings(null);
     setErr(null);
     setSevFilter("ALL");
+    setCatFilter("ALL");
     setExpanded({});
     setLoading(true);
     fetchFindings(tenant, ctrl.signal)
@@ -50,15 +60,20 @@ export default function SecurityFindings() {
     return () => ctrl.abort();
   }, [tenant]);
 
-  const criticalCount = findings ? findings.filter((f) => f.severity === "CRITICAL").length : 0;
-  const highCount     = findings ? findings.filter((f) => f.severity === "HIGH").length     : 0;
-  const mediumCount   = findings ? findings.filter((f) => f.severity === "MEDIUM").length   : 0;
-
-  const visible = useMemo(() => {
+  const filtered = useMemo(() => {
     if (!findings) return [];
-    if (sevFilter === "ALL") return findings;
-    return findings.filter((f) => f.severity === sevFilter);
-  }, [findings, sevFilter]);
+    return findings.filter((f) => {
+      const sevOk = sevFilter === "ALL" || f.severity === sevFilter;
+      const catOk = catFilter === "ALL" || (CATEGORY_TYPES[catFilter] || []).includes(f.finding_type);
+      return sevOk && catOk;
+    });
+  }, [findings, sevFilter, catFilter]);
+
+  const criticalCount = filtered.filter((f) => f.severity === "CRITICAL").length;
+  const highCount     = filtered.filter((f) => f.severity === "HIGH").length;
+  const mediumCount   = filtered.filter((f) => f.severity === "MEDIUM").length;
+
+  const visible = filtered;
 
   function toggleExpand(idx) {
     setExpanded((prev) => ({ ...prev, [idx]: !prev[idx] }));
@@ -94,7 +109,7 @@ export default function SecurityFindings() {
 
       {findings && !loading && (
         <>
-          {/* summary bar */}
+          {/* summary bar — counts reflect current filters */}
           <div className="flex gap-3 flex-wrap">
             <SummaryChip count={criticalCount} label="critical" color={SEVERITY_META.CRITICAL.color} bg={SEVERITY_META.CRITICAL.bg} />
             <SummaryChip count={highCount}     label="high"     color={SEVERITY_META.HIGH.color}     bg={SEVERITY_META.HIGH.bg} />
@@ -124,12 +139,32 @@ export default function SecurityFindings() {
             ))}
           </div>
 
+          {/* category filter tabs */}
+          <div className="flex text-[11px] rounded-lg overflow-hidden border border-white/10 w-fit">
+            {["ALL", ...Object.keys(CATEGORY_TYPES)].map((cat, i) => (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setCatFilter(cat)}
+                className={`px-3 py-1.5 font-semibold transition-colors whitespace-nowrap ${
+                  i > 0 ? "border-l border-white/10" : ""
+                } ${
+                  catFilter === cat
+                    ? "bg-white/10 text-white"
+                    : "text-white/50 hover:text-white/70"
+                }`}
+              >
+                {cat === "ALL" ? "All" : cat}
+              </button>
+            ))}
+          </div>
+
           {/* cards */}
           {visible.length === 0 ? (
             <div className="text-white/40 text-[12px] py-10 text-center">
-              {sevFilter === "ALL"
+              {sevFilter === "ALL" && catFilter === "ALL"
                 ? "No findings detected. Posture looks good."
-                : `No ${sevFilter.toLowerCase()} findings.`}
+                : "No findings match the selected filters."}
             </div>
           ) : (
             <div className="space-y-3">
@@ -147,7 +182,8 @@ export default function SecurityFindings() {
           <div className="text-white/30 text-[10px]">
             Showing {visible.length} of {findings.length} finding
             {findings.length !== 1 ? "s" : ""} · {tenant}
-            {sevFilter !== "ALL" ? ` (filtered: ${sevFilter})` : ""}
+            {sevFilter !== "ALL" ? ` · severity: ${sevFilter}` : ""}
+            {catFilter !== "ALL" ? ` · category: ${catFilter}` : ""}
           </div>
         </>
       )}
