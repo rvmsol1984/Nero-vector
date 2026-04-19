@@ -3175,6 +3175,169 @@ def governance_intune_devices_user(upn: str) -> dict:
     }
 
 
+# ---- MFA registration status (Graph: /users/{upn}/authentication/methods) ---
+#
+# Enumerates all known users from vector_user_baselines (or vector_events as
+# fallback), calls Graph for each user's authentication methods, classifies
+# the primary method, masks phone numbers, and sorts with unprotected users
+# first so the operator sees the highest-risk rows immediately.
+#
+# Results are cached in-process for 5 minutes. The endpoint degrades
+# gracefully per user: a Graph failure for one user produces status=NONE
+# rather than failing the whole response.
+
+_MFA_STATUS_CACHE: dict = {"data": None, "fetched_at": 0.0}
+_MFA_STATUS_CACHE_TTL = 300  # seconds
+
+
+def _mask_phone(phone: str) -> str:
+    """Return a masked version of a phone number: +1 ***-***-1234."""
+    cleaned = re.sub(r"[\s\-\(\)\.]", "", phone)
+    last4 = cleaned[-4:] if len(cleaned) >= 4 else cleaned
+    prefix = re.match(r"^\+\d{1,3}", cleaned)
+    cc = prefix.group(0) if prefix else ""
+    return f"{cc} ***-***-{last4}" if cc else f"***-***-{last4}"
+
+
+@app.get("/api/mfa-status")
+def mfa_status() -> list[dict]:
+    """MFA registration status for all known users across all tenants.
+
+    Pulls the user list from ``vector_user_baselines`` (falls back to
+    ``vector_events`` when the baselines table is empty), calls
+    ``/users/{upn}/authentication/methods`` via Graph for each user, and
+    classifies into STRONG / WEAK / NONE tiers:
+
+        STRONG  -- Microsoft Authenticator, FIDO2, Windows Hello, Software OATH
+        WEAK    -- SMS / voice phone method
+        NONE    -- password only, or Graph returned no methods
+
+    Results are sorted NONE -> WEAK -> STRONG so the riskiest rows appear
+    at the top of the table. The full list is cached for 5 minutes.
+    """
+    now_mono = time.monotonic()
+    cached = _MFA_STATUS_CACHE.get("data")
+    if (
+        cached is not None
+        and now_mono - _MFA_STATUS_CACHE.get("fetched_at", 0.0) < _MFA_STATUS_CACHE_TTL
+    ):
+        return cached
+
+    # ---- build user list from DB -----------------------------------------
+    try:
+        db_users = db.fetch_all(
+            """
+            SELECT DISTINCT user_id,
+                            MAX(tenant_id)   AS tenant_id,
+                            MAX(client_name) AS client_name
+            FROM vector_user_baselines
+            WHERE user_id IS NOT NULL
+            GROUP BY user_id
+            ORDER BY client_name, user_id
+            LIMIT 300
+            """
+        )
+    except Exception:
+        logger.debug("mfa_status baseline fetch failed", exc_info=True)
+        db_users = []
+
+    if not db_users:
+        try:
+            db_users = db.fetch_all(
+                """
+                SELECT DISTINCT user_id,
+                                MAX(tenant_id)   AS tenant_id,
+                                MAX(client_name) AS client_name
+                FROM vector_events
+                WHERE user_id IS NOT NULL
+                  AND user_id NOT LIKE 'ServicePrincipal_%%'
+                GROUP BY user_id
+                ORDER BY client_name, user_id
+                LIMIT 300
+                """
+            )
+        except Exception:
+            logger.debug("mfa_status events fallback failed", exc_info=True)
+            db_users = []
+
+    # ---- call Graph per user ---------------------------------------------
+    out: list[dict] = []
+    for row in db_users:
+        user_id     = (row.get("user_id")     or "").strip()
+        tenant_id   = (row.get("tenant_id")   or "").strip()
+        client_name = (row.get("client_name") or "").strip()
+        if not user_id:
+            continue
+
+        methods_raw: list[dict] = []
+        try:
+            upn       = urllib.parse.quote(user_id, safe="@")
+            auth_data = _graph_get(f"/users/{upn}/authentication/methods")
+            methods_raw = auth_data.get("value") or []
+        except Exception:
+            logger.debug("mfa auth methods failed for %s", user_id, exc_info=True)
+
+        strong_labels: list[str] = []
+        weak_labels:   list[str] = []
+        phone_number:  str | None = None
+
+        for m in methods_raw:
+            odata = m.get("@odata.type", "")
+            if "microsoftAuthenticator" in odata:
+                strong_labels.append("Authenticator App")
+            elif "fido2" in odata.lower():
+                strong_labels.append("FIDO2")
+            elif "windowsHello" in odata.lower():
+                strong_labels.append("Windows Hello")
+            elif "softwareOath" in odata.lower():
+                strong_labels.append("Software OATH")
+            elif "phone" in odata.lower():
+                weak_labels.append("SMS")
+                raw_phone = m.get("phoneNumber") or ""
+                if raw_phone and phone_number is None:
+                    phone_number = _mask_phone(raw_phone)
+            # password type is always present -- not an MFA factor, skip
+
+        if strong_labels:
+            primary_method = ", ".join(sorted(set(strong_labels)))
+            status = "STRONG"
+        elif weak_labels:
+            primary_method = ", ".join(sorted(set(weak_labels)))
+            status = "WEAK"
+        else:
+            primary_method = "None"
+            status = "NONE"
+
+        display_name: str | None = None
+        try:
+            upn = urllib.parse.quote(user_id, safe="@")
+            gu  = _graph_get(f"/users/{upn}?$select=displayName")
+            display_name = gu.get("displayName") or None
+        except Exception:
+            pass
+
+        out.append({
+            "user_id":      user_id,
+            "display_name": display_name,
+            "tenant_id":    tenant_id,
+            "client_name":  client_name,
+            "mfa_method":   primary_method,
+            "phone_number": phone_number,
+            "status":       status,
+        })
+
+    _STATUS_ORDER = {"NONE": 0, "WEAK": 1, "STRONG": 2}
+    out.sort(key=lambda r: (
+        _STATUS_ORDER.get(r["status"], 9),
+        r.get("client_name") or "",
+        r.get("user_id") or "",
+    ))
+
+    _MFA_STATUS_CACHE["data"] = out
+    _MFA_STATUS_CACHE["fetched_at"] = now_mono
+    return out
+
+
 # ============================================================================
 # JWT auth middleware
 # ============================================================================

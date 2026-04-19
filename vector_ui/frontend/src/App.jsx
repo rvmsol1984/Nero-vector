@@ -17,6 +17,7 @@ import ThreatIntelligence from "./pages/ThreatIntelligence.jsx";
 import Users from "./pages/Users.jsx";
 import UserDetail from "./pages/UserDetail.jsx";
 import Watchlist from "./pages/Watchlist.jsx";
+import MfaStatus from "./pages/MfaStatus.jsx";
 
 export default function App() {
   return (
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/governance"       element={<Governance />} />
           <Route path="/sources"          element={<Sources />} />
           <Route path="/exceptions"       element={<Exceptions />} />
+          <Route path="/mfa-status"       element={<MfaStatus />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>
       </Routes>

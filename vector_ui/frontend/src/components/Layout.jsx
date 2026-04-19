@@ -29,6 +29,7 @@ const SIDEBAR_ITEMS = [
 
   { divider: true, label: "GOVERNANCE" },
   { to: "/identity",   label: "Identity & Access",   icon: "identity"   },
+  { to: "/mfa-status", label: "MFA Status",          icon: "mfa"        },
   { to: "/data",       label: "Data & Sharing",      icon: "data"       },
   { to: "/devices",    label: "Devices",             icon: "devices"    },
   { to: "/threats",    label: "Threat Intelligence", icon: "threats"    },
@@ -132,6 +133,18 @@ function Icon({ name, size = 18 }) {
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
           <circle cx="12" cy="10" r="2.4" />
           <path d="M7.8 17c.6-2 2.3-3 4.2-3s3.6 1 4.2 3" />
+        </svg>
+      );
+    case "mfa":
+      // Phone with a lock badge -- "MFA / authentication".
+      return (
+        <svg {...p}>
+          <rect x="5" y="2" width="14" height="20" rx="2" />
+          <circle cx="16.5" cy="6.5" r="2.5" />
+          <line x1="16.5" y1="5" x2="16.5" y2="8" />
+          <line x1="15" y1="6.5" x2="18" y2="6.5" />
+          <line x1="9" y1="12" x2="15" y2="12" />
+          <line x1="9" y1="15" x2="13" y2="15" />
         </svg>
       );
     case "data":
