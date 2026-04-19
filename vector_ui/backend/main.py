@@ -3321,7 +3321,7 @@ def mfa_status() -> list[dict]:
             continue
 
         # ---- 2. list enabled users -----------------------------------------
-        filter_val = urllib.parse.quote("accountEnabled eq true", safe="")
+        filter_val = urllib.parse.quote("accountEnabled eq true and userType eq 'Member'", safe="")
         users_path = (
             f"/users?$filter={filter_val}"
             "&$select=userPrincipalName,displayName"
