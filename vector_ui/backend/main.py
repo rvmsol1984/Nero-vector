@@ -1340,6 +1340,9 @@ def incidents_impact(incident_id: str) -> dict:
     if not first_seen or not last_seen:
         return empty
 
+    # Expand window by minimum 2 hours so zero-dwell incidents show surrounding activity.
+    first_seen = first_seen - timedelta(hours=2)
+    last_seen  = last_seen + timedelta(hours=2)
     # ---- file-action buckets (UAL) ----
     ACCESSED_EVENTS     = ("FileAccessed", "MailItemsAccessed", "FilePreviewed")
     MODIFIED_EVENTS     = ("FileModified", "FileUploaded", "FileRenamed")
