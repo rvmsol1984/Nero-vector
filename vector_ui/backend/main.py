@@ -4045,6 +4045,9 @@ def _check_shared_mailbox_signin_enabled(token: str, tenant: str, now_str: str) 
         upn = u.get("userPrincipalName") or ""
         if not upn:
             continue
+        upn = (u.get("userPrincipalName") or "")
+        if "#EXT#" in upn or upn.endswith(".onmicrosoft.com"):
+            continue
         if u.get("assignedLicenses"):
             continue
         findings.append({
