@@ -176,8 +176,18 @@ class DattoRmmPoller:
             "[datto] polling devices",
             extra={"site_uid": site_uid, "client_name": client_name},
         )
-        data    = self._get(f"/api/v2/site/{site_uid}/devices")
-        devices = data if isinstance(data, list) else (data.get("devices") or data.get("data") or [])
+        devices = []
+        page = 1
+        while True:
+            data = self._get(f"/api/v2/site/{site_uid}/devices", params={"page": page, "pageSize": 250})
+            page_devices = data if isinstance(data, list) else (data.get("devices") or data.get("data") or [])
+            if not page_devices:
+                break
+            devices.extend(page_devices)
+            if isinstance(data, dict) and data.get("pageDetails", {}).get("nextPageUrl"):
+                page += 1
+            else:
+                break
 
         rows: list[dict] = []
         for dev in devices:
@@ -245,7 +255,19 @@ class DattoRmmPoller:
     def _poll_alerts(self) -> int:
         logger.info("[datto] polling open alerts")
         try:
-            data   = self._get("/api/v2/account/alerts/open", params={"pageSize": 200})
+            all_alerts = []
+            page = 1
+            while True:
+                data = self._get("/api/v2/account/alerts/open", params={"pageSize": 200, "page": page})
+                page_alerts = data if isinstance(data, list) else (data.get("alerts") or data.get("data") or [])
+                if not page_alerts:
+                    break
+                all_alerts.extend(page_alerts)
+                if isinstance(data, dict) and data.get("pageDetails", {}).get("nextPageUrl"):
+                    page += 1
+                else:
+                    break
+            data = {"alerts": all_alerts}
             alerts = data if isinstance(data, list) else (data.get("alerts") or data.get("data") or [])
         except Exception as exc:
             logger.exception("[datto] alert poll failed", extra={"error": str(exc)})
