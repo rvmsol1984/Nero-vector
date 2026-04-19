@@ -4188,11 +4188,12 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
             reasons.append("Marks messages as read")
         if move_folder and _is_hiding_folder(move_folder):
             reasons.append(f"Moves to suspicious folder: '{move_folder}'")
-        if _is_suspicious_name(rule_name):
-            reasons.append(f"Suspicious rule name: '{rule_name or '<blank>'}'")
         has_suspicious_actions = bool(forward_to or redirect_to or delete_msg)
         if not rule_enabled and has_suspicious_actions:
             reasons.append("Rule is disabled (may have been used and disabled by attacker)")
+        # Suspicious name is secondary context only — never a standalone trigger.
+        if reasons and _is_suspicious_name(rule_name):
+            reasons.append(f"Suspicious rule name: '{rule_name or '<blank>'}'")
         return reasons
 
     # ------------------------------------------------------------------
@@ -4236,6 +4237,7 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
 
             out: list[dict] = []
             for rule in rules:
+                rule_id      = rule.get("id") or ""
                 rule_name    = rule.get("displayName") or ""
                 rule_enabled = rule.get("isEnabled", True)
                 conditions   = rule.get("conditions") or {}
@@ -4252,6 +4254,7 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
                 )
 
                 out.append({
+                    "rule_id":          rule_id,
                     "user":             upn,
                     "display_name":     display,
                     "rule_name":        rule_name or "Unnamed Rule",
@@ -4272,6 +4275,20 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
                     results.extend(fut.result())
                 except Exception:
                     pass
+
+        # Deduplicate by rule_id — keep first occurrence (thread order is non-deterministic
+        # but each rule ID should appear exactly once; this guards against edge cases).
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for row in results:
+            rid = row.get("rule_id") or ""
+            dedup_key = f"{row['user']}:{rid}" if rid else None
+            if dedup_key and dedup_key in seen_ids:
+                continue
+            if dedup_key:
+                seen_ids.add(dedup_key)
+            deduped.append(row)
+        results = deduped
 
         results.sort(key=lambda r: (0 if r["is_suspicious"] else 1, r["user"]))
         _MAILBOX_RULES_CACHE[tenant] = {"data": results, "fetched_at": now_mono}
@@ -4386,7 +4403,8 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
             reasons.append("Marks messages as read")
         if move_folder and _is_hiding_folder(move_folder):
             reasons.append(f"Moves to suspicious folder: '{move_folder}'")
-        if _is_suspicious_name(rule_name):
+        # Suspicious name is secondary context only — never a standalone trigger.
+        if reasons and _is_suspicious_name(rule_name):
             reasons.append(f"Suspicious rule name: '{rule_name}'")
 
         # Build Graph-compatible actions dict for frontend compatibility
