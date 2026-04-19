@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -3335,13 +3336,12 @@ def mfa_status() -> list[dict]:
         user_list = users_data.get("value") or []
         logger.debug("mfa_status: tenant=%s users=%d", t_name, len(user_list))
 
-        # ---- 3. auth methods per user --------------------------------------
-        for u in user_list:
+        # ---- 3. auth methods per user (concurrent) -------------------------
+        def _fetch_user_methods(u: dict) -> dict | None:
             upn          = (u.get("userPrincipalName") or "").strip()
             display_name = (u.get("displayName") or "").strip() or None
             if not upn:
-                continue
-
+                return None
             methods_raw: list[dict] = []
             try:
                 encoded_upn = urllib.parse.quote(upn, safe="@")
@@ -3354,10 +3354,8 @@ def mfa_status() -> list[dict]:
                     "mfa_status: methods failed upn=%s tenant=%s", upn, t_name,
                     exc_info=True,
                 )
-
             primary_method, status, phone_number = _classify_methods(methods_raw)
-
-            out.append({
+            return {
                 "user_id":      upn,
                 "display_name": display_name,
                 "tenant_id":    t_id,
@@ -3365,7 +3363,18 @@ def mfa_status() -> list[dict]:
                 "mfa_method":   primary_method,
                 "phone_number": phone_number,
                 "status":       status,
-            })
+            }
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_fetch_user_methods, u): u for u in user_list}
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception:
+                    logger.debug("mfa_status: future raised tenant=%s", t_name, exc_info=True)
+                    result = None
+                if result is not None:
+                    out.append(result)
 
     _STATUS_ORDER = {"NONE": 0, "WEAK": 1, "STRONG": 2}
     out.sort(key=lambda r: (
