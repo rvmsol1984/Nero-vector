@@ -133,11 +133,12 @@ export default function MailboxRules() {
               <div className="overflow-x-auto">
                 <table className="w-full table-fixed text-[11px]">
                   <colgroup>
-                    <col style={{ width: "22%" }} />
-                    <col style={{ width: "20%" }} />
-                    <col style={{ width: "20%" }} />
-                    <col style={{ width: "10%" }} />
-                    <col style={{ width: "28%" }} />
+                    <col style={{ width: "21%" }} />
+                    <col style={{ width: "19%" }} />
+                    <col style={{ width: "18%" }} />
+                    <col style={{ width: "9%" }} />
+                    <col style={{ width: "8%" }} />
+                    <col style={{ width: "25%" }} />
                   </colgroup>
                   <thead>
                     <tr className="border-b border-white/8 text-left">
@@ -145,6 +146,7 @@ export default function MailboxRules() {
                       <Th>Rule Name</Th>
                       <Th>Actions</Th>
                       <Th>Suspicious</Th>
+                      <Th>Source</Th>
                       <Th>Reason</Th>
                     </tr>
                   </thead>
@@ -240,6 +242,29 @@ function RuleRow({ row }) {
           </span>
         ) : (
           <span className="text-white/25 text-[10px]">—</span>
+        )}
+      </td>
+
+      {/* Data source badge */}
+      <td className="px-3 py-2">
+        {row.data_source === "graph" ? (
+          <span
+            className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider"
+            style={{ color: "#60A5FA", backgroundColor: "#60A5FA15" }}
+            title="Data from Microsoft Graph API"
+          >
+            Graph
+          </span>
+        ) : row.data_source === "ual" ? (
+          <span
+            className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider"
+            style={{ color: "#A78BFA", backgroundColor: "#A78BFA15" }}
+            title="Data from Unified Audit Log"
+          >
+            UAL
+          </span>
+        ) : (
+          <span className="text-white/20 text-[10px]">—</span>
         )}
       </td>
 

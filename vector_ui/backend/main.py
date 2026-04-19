@@ -3516,6 +3516,10 @@ _SECURITY_FINDINGS_CACHE_TTL = 600  # 10 minutes
 _MAILBOX_RULES_CACHE: dict[str, dict] = {}
 _MAILBOX_RULES_CACHE_TTL = 600  # 10 minutes
 
+# Tenants with E5 licensing where Graph /mailFolders/inbox/messageRules is available.
+# All other tenants fall back to UAL data from vector_events.
+_MAILBOX_E5_TENANTS: frozenset[str] = frozenset({"GameChange Solar"})
+
 _ADMIN_ROLE_NAMES = frozenset({
     "Global Administrator",
     "Privileged Role Administrator",
@@ -4126,7 +4130,11 @@ def security_findings(tenant: str = Query(...)) -> list[dict]:
 
 @app.get("/api/mailbox-rules")
 def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
-    """All inbox message rules for every Member mailbox in the tenant."""
+    """All inbox message rules for every Member mailbox in the tenant.
+
+    E5 tenants use the Graph /mailFolders/inbox/messageRules API.
+    Non-E5 tenants fall back to UAL events from vector_events.
+    """
     now_mono = time.monotonic()
     bucket = _MAILBOX_RULES_CACHE.get(tenant, {})
     if (
@@ -4134,26 +4142,6 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
         and now_mono - bucket.get("fetched_at", 0.0) < _MAILBOX_RULES_CACHE_TTL
     ):
         return bucket["data"]
-
-    t_id = _tenant_id_for(tenant)
-    try:
-        token = _get_graph_token(tenant_id=t_id)
-    except HTTPException as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Could not obtain Graph token: {exc.detail}"
-        )
-
-    fv = urllib.parse.quote("accountEnabled eq true and userType eq 'Member'", safe="")
-    try:
-        users_data = _graph_get_with_token(
-            token,
-            f"/users?$filter={fv}&$select=userPrincipalName,displayName&$top=999",
-        )
-        users = users_data.get("value") or []
-    except HTTPException as exc:
-        raise HTTPException(status_code=502, detail=f"Graph failed: {exc.detail}")
-
-    results: list[dict] = []
 
     _HIDING_FOLDERS = frozenset(("archive", "deleted items", "rss", "junk", "spam", "trash"))
 
@@ -4173,92 +4161,263 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
             return True
         return False
 
-    def _fetch_user_rules(user: dict) -> list[dict]:
-        upn     = user.get("userPrincipalName") or ""
-        display = user.get("displayName") or upn
-        if not upn:
-            return []
-        upn_domain = upn.rsplit("@", 1)[1].lower() if "@" in upn else ""
+    def _build_reasons_graph(
+        rule_name: str,
+        rule_enabled: bool,
+        forward_to: list,
+        redirect_to: list,
+        delete_msg: bool,
+        mark_read: bool,
+        move_folder: str | None,
+        upn_domain: str,
+    ) -> list[str]:
+        reasons: list[str] = []
+        for rl in (forward_to, redirect_to):
+            for r in rl:
+                if isinstance(r, dict):
+                    addr = ((r.get("emailAddress") or {}).get("address") or "").lower()
+                    if addr:
+                        dom = addr.rsplit("@", 1)[1] if "@" in addr else ""
+                        if not upn_domain or dom != upn_domain:
+                            reasons.append(f"Forwards/redirects to external: {addr}")
+                        else:
+                            reasons.append(f"Forwards/redirects internally to: {addr}")
+        if delete_msg:
+            reasons.append("Auto-deletes matching messages")
+        if mark_read:
+            reasons.append("Marks messages as read")
+        if move_folder and _is_hiding_folder(move_folder):
+            reasons.append(f"Moves to suspicious folder: '{move_folder}'")
+        if _is_suspicious_name(rule_name):
+            reasons.append(f"Suspicious rule name: '{rule_name or '<blank>'}'")
+        has_suspicious_actions = bool(forward_to or redirect_to or delete_msg)
+        if not rule_enabled and has_suspicious_actions:
+            reasons.append("Rule is disabled (may have been used and disabled by attacker)")
+        return reasons
+
+    # ------------------------------------------------------------------
+    # E5 path — Graph /mailFolders/inbox/messageRules
+    # ------------------------------------------------------------------
+    if tenant in _MAILBOX_E5_TENANTS:
+        t_id = _tenant_id_for(tenant)
         try:
-            data = _graph_get_with_token(
-                token,
-                f"/users/{urllib.parse.quote(upn, safe='')}/mailFolders/inbox/messageRules",
+            token = _get_graph_token(tenant_id=t_id)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Could not obtain Graph token: {exc.detail}"
             )
-            rules = data.get("value") or []
-        except Exception:
-            return []
 
-        out: list[dict] = []
-        for rule in rules:
-            rule_name    = rule.get("displayName") or ""
-            rule_enabled = rule.get("isEnabled", True)
-            conditions   = rule.get("conditions") or {}
-            actions      = rule.get("actions") or {}
-            forward_to   = actions.get("forwardTo") or []
-            redirect_to  = actions.get("redirectTo") or []
-            delete_msg   = actions.get("deleteMessage", False)
-            mark_read    = actions.get("markAsRead", False)
-            move_folder  = actions.get("moveToFolder")
+        fv = urllib.parse.quote("accountEnabled eq true and userType eq 'Member'", safe="")
+        try:
+            users_data = _graph_get_with_token(
+                token,
+                f"/users?$filter={fv}&$select=userPrincipalName,displayName&$top=999",
+            )
+            users = users_data.get("value") or []
+        except HTTPException as exc:
+            raise HTTPException(status_code=502, detail=f"Graph failed: {exc.detail}")
 
-            reasons: list[str] = []
+        results: list[dict] = []
 
-            # 1 & 6 — FORWARD_TO_EXTERNAL / FORWARD_TO_INTERNAL
-            for rl in (forward_to, redirect_to):
-                for r in rl:
-                    if isinstance(r, dict):
-                        addr = ((r.get("emailAddress") or {}).get("address") or "").lower()
-                        if addr:
-                            dom = addr.rsplit("@", 1)[1] if "@" in addr else ""
-                            if not upn_domain or dom != upn_domain:
-                                reasons.append(f"Forwards/redirects to external: {addr}")
-                            else:
-                                reasons.append(f"Forwards/redirects internally to: {addr}")
-
-            # 2 — AUTO_DELETE
-            if delete_msg:
-                reasons.append("Auto-deletes matching messages")
-
-            # 3 — MARK_AS_READ
-            if mark_read:
-                reasons.append("Marks messages as read")
-
-            # 4 — MOVE_TO_ARCHIVE (suspicious folder target)
-            if move_folder and _is_hiding_folder(move_folder):
-                reasons.append(f"Moves to suspicious folder: '{move_folder}'")
-
-            # 5 — SUSPICIOUS_NAME
-            if _is_suspicious_name(rule_name):
-                reasons.append(f"Suspicious rule name: '{rule_name or '<blank>'}'")
-
-            # 7 — DISABLED_SUSPICIOUS: disabled but retains suspicious actions
-            has_suspicious_actions = bool(forward_to or redirect_to or delete_msg)
-            if not rule_enabled and has_suspicious_actions:
-                reasons.append("Rule is disabled (may have been used and disabled by attacker)")
-
-            out.append({
-                "user":             upn,
-                "display_name":     display,
-                "rule_name":        rule_name or "Unnamed Rule",
-                "rule_enabled":     rule_enabled,
-                "conditions":       conditions,
-                "actions":          actions,
-                "is_suspicious":    bool(reasons),
-                "suspicion_reason": "; ".join(reasons) if reasons else None,
-                "tenant":           tenant,
-            })
-        return out
-
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(_fetch_user_rules, u): u for u in users[:500]}
-        for fut in as_completed(futures):
+        def _fetch_user_rules_graph(user: dict) -> list[dict]:
+            upn     = user.get("userPrincipalName") or ""
+            display = user.get("displayName") or upn
+            if not upn:
+                return []
+            upn_domain = upn.rsplit("@", 1)[1].lower() if "@" in upn else ""
             try:
-                results.extend(fut.result())
+                data = _graph_get_with_token(
+                    token,
+                    f"/users/{urllib.parse.quote(upn, safe='')}/mailFolders/inbox/messageRules",
+                )
+                rules = data.get("value") or []
             except Exception:
-                pass
+                return []
 
-    results.sort(key=lambda r: (0 if r["is_suspicious"] else 1, r["user"]))
-    _MAILBOX_RULES_CACHE[tenant] = {"data": results, "fetched_at": now_mono}
-    return results
+            out: list[dict] = []
+            for rule in rules:
+                rule_name    = rule.get("displayName") or ""
+                rule_enabled = rule.get("isEnabled", True)
+                conditions   = rule.get("conditions") or {}
+                actions      = rule.get("actions") or {}
+                forward_to   = actions.get("forwardTo") or []
+                redirect_to  = actions.get("redirectTo") or []
+                delete_msg   = actions.get("deleteMessage", False)
+                mark_read    = actions.get("markAsRead", False)
+                move_folder  = actions.get("moveToFolder")
+
+                reasons = _build_reasons_graph(
+                    rule_name, rule_enabled, forward_to, redirect_to,
+                    delete_msg, mark_read, move_folder, upn_domain,
+                )
+
+                out.append({
+                    "user":             upn,
+                    "display_name":     display,
+                    "rule_name":        rule_name or "Unnamed Rule",
+                    "rule_enabled":     rule_enabled,
+                    "conditions":       conditions,
+                    "actions":          actions,
+                    "is_suspicious":    bool(reasons),
+                    "suspicion_reason": "; ".join(reasons) if reasons else None,
+                    "tenant":           tenant,
+                    "data_source":      "graph",
+                })
+            return out
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_fetch_user_rules_graph, u): u for u in users[:500]}
+            for fut in as_completed(futures):
+                try:
+                    results.extend(fut.result())
+                except Exception:
+                    pass
+
+        results.sort(key=lambda r: (0 if r["is_suspicious"] else 1, r["user"]))
+        _MAILBOX_RULES_CACHE[tenant] = {"data": results, "fetched_at": now_mono}
+        return results
+
+    # ------------------------------------------------------------------
+    # Non-E5 path — UAL events from vector_events
+    # ------------------------------------------------------------------
+    UAL_EVENT_TYPES = ["New-InboxRule", "Set-InboxRule", "Enable-InboxRule"]
+
+    def _params_from_raw(raw: Any) -> list[dict]:
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return []
+        if not isinstance(raw, dict):
+            return []
+        params = raw.get("Parameters")
+        if not isinstance(params, list):
+            return []
+        return [p for p in params if isinstance(p, dict)]
+
+    def _param_value(params: list[dict], key: str) -> str | None:
+        key_l = key.lower()
+        for p in params:
+            if (p.get("Name") or "").lower() == key_l:
+                v = p.get("Value")
+                return str(v).strip() if v is not None else None
+        return None
+
+    def _parse_address_list(raw_val: str | None) -> list[str]:
+        """UAL stores ForwardTo/RedirectTo as a semicolon- or comma-separated
+        string of addresses, or occasionally a JSON array string."""
+        if not raw_val:
+            return []
+        raw_val = raw_val.strip()
+        if raw_val.startswith("["):
+            try:
+                parsed = json.loads(raw_val)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if x]
+            except (ValueError, TypeError):
+                pass
+        return [a.strip() for a in raw_val.replace(";", ",").split(",") if a.strip()]
+
+    try:
+        rows = db.fetch_all(
+            """
+            SELECT user_id, raw_json, timestamp
+            FROM vector_events
+            WHERE event_type = ANY(%s)
+              AND client_name = %s
+            ORDER BY timestamp DESC
+            """,
+            (UAL_EVENT_TYPES, tenant),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"DB query failed: {exc}")
+
+    # Deduplicate (user_id, rule_name) keeping only the latest event.
+    seen: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        user_id  = (row.get("user_id") or "").strip()
+        raw_json = row.get("raw_json")
+        if not user_id:
+            continue
+        params = _params_from_raw(raw_json)
+
+        # Derive rule name from Parameters or ObjectId
+        rule_name = _param_value(params, "Name")
+        if not rule_name and isinstance(raw_json, dict):
+            obj_id = raw_json.get("ObjectId")
+            if isinstance(obj_id, str) and obj_id.strip():
+                rule_name = obj_id.strip()
+        rule_name = rule_name or "Unnamed Rule"
+
+        key = (user_id, rule_name)
+        if key not in seen:
+            seen[key] = {"user_id": user_id, "params": params, "rule_name": rule_name, "raw_json": raw_json}
+
+    ual_results: list[dict] = []
+    for (user_id, rule_name), info in seen.items():
+        params    = info["params"]
+        forward_raw  = _param_value(params, "ForwardTo") or _param_value(params, "ForwardAsAttachmentTo")
+        redirect_raw = _param_value(params, "RedirectTo")
+        delete_raw   = _param_value(params, "DeleteMessage") or ""
+        read_raw     = _param_value(params, "MarkAsRead") or ""
+        move_folder  = _param_value(params, "MoveToFolder")
+
+        forward_addrs  = _parse_address_list(forward_raw)
+        redirect_addrs = _parse_address_list(redirect_raw)
+        delete_msg = delete_raw.lower() in ("true", "1", "yes")
+        mark_read  = read_raw.lower() in ("true", "1", "yes")
+
+        # Derive UPN domain for external-forward detection (user_id is often a UPN)
+        upn_domain = user_id.rsplit("@", 1)[1].lower() if "@" in user_id else ""
+
+        reasons: list[str] = []
+        for addr in forward_addrs + redirect_addrs:
+            if addr:
+                dom = addr.rsplit("@", 1)[1] if "@" in addr else ""
+                if not upn_domain or dom != upn_domain:
+                    reasons.append(f"Forwards/redirects to external: {addr}")
+                else:
+                    reasons.append(f"Forwards/redirects internally to: {addr}")
+        if delete_msg:
+            reasons.append("Auto-deletes matching messages")
+        if mark_read:
+            reasons.append("Marks messages as read")
+        if move_folder and _is_hiding_folder(move_folder):
+            reasons.append(f"Moves to suspicious folder: '{move_folder}'")
+        if _is_suspicious_name(rule_name):
+            reasons.append(f"Suspicious rule name: '{rule_name}'")
+
+        # Build Graph-compatible actions dict for frontend compatibility
+        actions: dict = {}
+        if forward_addrs:
+            actions["forwardTo"] = [{"emailAddress": {"address": a}} for a in forward_addrs]
+        if redirect_addrs:
+            actions["redirectTo"] = [{"emailAddress": {"address": a}} for a in redirect_addrs]
+        if delete_msg:
+            actions["deleteMessage"] = True
+        if mark_read:
+            actions["markAsRead"] = True
+        if move_folder:
+            actions["moveToFolder"] = move_folder
+
+        ual_results.append({
+            "user":             user_id,
+            "display_name":     user_id,
+            "rule_name":        rule_name,
+            "rule_enabled":     True,
+            "conditions":       {},
+            "actions":          actions,
+            "is_suspicious":    bool(reasons),
+            "suspicion_reason": "; ".join(reasons) if reasons else None,
+            "tenant":           tenant,
+            "data_source":      "ual",
+        })
+
+    ual_results.sort(key=lambda r: (0 if r["is_suspicious"] else 1, r["user"]))
+    _MAILBOX_RULES_CACHE[tenant] = {"data": ual_results, "fetched_at": now_mono}
+    return ual_results
 
 
 # ============================================================================
