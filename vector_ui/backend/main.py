@@ -3232,6 +3232,8 @@ def governance_intune_devices_user(upn: str) -> dict:
 
 _MFA_STATUS_CACHE: dict = {"data": None, "fetched_at": 0.0}
 _MFA_STATUS_CACHE_TTL = 300  # seconds
+# Per-tenant cache.  Shape: { client_name: {"data": list, "fetched_at": float} }
+_MFA_STATUS_CACHE_BY_TENANT: dict[str, dict] = {}
 
 # Tenants to enumerate.  Each entry carries the AAD tenant_id (used to
 # obtain a scoped Graph token) and the display name surfaced in the UI.
@@ -3284,107 +3286,118 @@ def _classify_methods(methods_raw: list[dict]) -> tuple[str, str, str | None]:
 
 
 @app.get("/api/mfa-status")
-def mfa_status() -> list[dict]:
-    """MFA registration status for all managed tenants.
+def mfa_status(tenant: str = Query(...)) -> list[dict]:
+    """MFA registration status for a single managed tenant.
 
-    For each tenant in ``_MFA_TENANTS``:
+    ``tenant`` (required) must match a ``client_name`` in ``_MFA_TENANTS``.
+    Returns 400 when missing and 404 when the name is not recognised.
 
-    1.  Obtains a tenant-scoped Graph token via
-        ``_get_graph_token(tenant_id)``.
-    2.  Calls ``GET /users?$filter=accountEnabled eq true&$top=999`` to
-        enumerate only real, enabled user accounts (no guests, disabled
-        accounts, or service principals slipping through from the DB).
-    3.  For each user calls ``GET /users/{upn}/authentication/methods``
-        and classifies MFA posture as STRONG / WEAK / NONE.
+    Steps:
+    1.  Obtain a tenant-scoped Graph token via ``_get_graph_token(tenant_id)``.
+    2.  ``GET /users?$filter=accountEnabled eq true&$top=999`` — only real,
+        enabled accounts; no guests, disabled users, or service principals.
+    3.  Fetch ``/users/{upn}/authentication/methods`` concurrently
+        (``ThreadPoolExecutor(max_workers=10)``) and classify as
+        STRONG / WEAK / NONE.
 
-    Results are sorted NONE -> WEAK -> STRONG and cached for 5 minutes.
+    Results are sorted NONE -> WEAK -> STRONG and cached per-tenant for
+    5 minutes.
     """
-    now_mono = time.monotonic()
-    cached = _MFA_STATUS_CACHE.get("data")
+    # Resolve the requested client_name to a tenant config entry.
+    tenant_cfg = next(
+        (t for t in _MFA_TENANTS if t["client_name"] == tenant), None
+    )
+    if tenant_cfg is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Tenant '{tenant}' not found in MFA tenant list.",
+        )
+
+    # Per-tenant cache check.
+    now_mono   = time.monotonic()
+    t_cache    = _MFA_STATUS_CACHE_BY_TENANT.setdefault(tenant, {"data": None, "fetched_at": 0.0})
+    cached     = t_cache.get("data")
     if (
         cached is not None
-        and now_mono - _MFA_STATUS_CACHE.get("fetched_at", 0.0) < _MFA_STATUS_CACHE_TTL
+        and now_mono - t_cache.get("fetched_at", 0.0) < _MFA_STATUS_CACHE_TTL
     ):
         return cached
 
+    t_id   = tenant_cfg["tenant_id"]
+    t_name = tenant_cfg["client_name"]
     out: list[dict] = []
 
-    for tenant_cfg in _MFA_TENANTS:
-        t_id   = tenant_cfg["tenant_id"]
-        t_name = tenant_cfg["client_name"]
+    # ---- 1. obtain tenant-scoped token -------------------------------------
+    try:
+        token = _get_graph_token(t_id)
+    except Exception:
+        logger.warning("mfa_status: token fetch failed tenant=%s", t_name, exc_info=True)
+        raise HTTPException(status_code=502, detail="Graph token request failed.")
 
-        # ---- 1. obtain tenant-scoped token ---------------------------------
+    # ---- 2. list enabled users ---------------------------------------------
+    filter_val = urllib.parse.quote("accountEnabled eq true", safe="")
+    users_path = (
+        f"/users?$filter={filter_val}"
+        "&$select=userPrincipalName,displayName"
+        "&$top=999"
+    )
+    try:
+        users_data = _graph_get_with_token(token, users_path)
+    except Exception:
+        logger.warning("mfa_status: user list failed tenant=%s", t_name, exc_info=True)
+        raise HTTPException(status_code=502, detail="Graph user list request failed.")
+
+    user_list = users_data.get("value") or []
+    logger.debug("mfa_status: tenant=%s users=%d", t_name, len(user_list))
+
+    # ---- 3. auth methods per user (concurrent) -----------------------------
+    def _fetch_user_methods(u: dict) -> dict | None:
+        upn          = (u.get("userPrincipalName") or "").strip()
+        display_name = (u.get("displayName") or "").strip() or None
+        if not upn:
+            return None
+        methods_raw: list[dict] = []
         try:
-            token = _get_graph_token(t_id)
+            encoded_upn = urllib.parse.quote(upn, safe="@")
+            auth_data   = _graph_get_with_token(
+                token, f"/users/{encoded_upn}/authentication/methods"
+            )
+            methods_raw = auth_data.get("value") or []
         except Exception:
-            logger.warning("mfa_status: token fetch failed tenant=%s", t_name, exc_info=True)
-            continue
+            logger.debug(
+                "mfa_status: methods failed upn=%s tenant=%s", upn, t_name,
+                exc_info=True,
+            )
+        primary_method, status, phone_number = _classify_methods(methods_raw)
+        return {
+            "user_id":      upn,
+            "display_name": display_name,
+            "tenant_id":    t_id,
+            "client_name":  t_name,
+            "mfa_method":   primary_method,
+            "phone_number": phone_number,
+            "status":       status,
+        }
 
-        # ---- 2. list enabled users -----------------------------------------
-        filter_val = urllib.parse.quote("accountEnabled eq true", safe="")
-        users_path = (
-            f"/users?$filter={filter_val}"
-            "&$select=userPrincipalName,displayName"
-            "&$top=999"
-        )
-        try:
-            users_data = _graph_get_with_token(token, users_path)
-        except Exception:
-            logger.warning("mfa_status: user list failed tenant=%s", t_name, exc_info=True)
-            continue
-
-        user_list = users_data.get("value") or []
-        logger.debug("mfa_status: tenant=%s users=%d", t_name, len(user_list))
-
-        # ---- 3. auth methods per user (concurrent) -------------------------
-        def _fetch_user_methods(u: dict) -> dict | None:
-            upn          = (u.get("userPrincipalName") or "").strip()
-            display_name = (u.get("displayName") or "").strip() or None
-            if not upn:
-                return None
-            methods_raw: list[dict] = []
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_user_methods, u): u for u in user_list}
+        for future in as_completed(futures):
             try:
-                encoded_upn = urllib.parse.quote(upn, safe="@")
-                auth_data   = _graph_get_with_token(
-                    token, f"/users/{encoded_upn}/authentication/methods"
-                )
-                methods_raw = auth_data.get("value") or []
+                result = future.result()
             except Exception:
-                logger.debug(
-                    "mfa_status: methods failed upn=%s tenant=%s", upn, t_name,
-                    exc_info=True,
-                )
-            primary_method, status, phone_number = _classify_methods(methods_raw)
-            return {
-                "user_id":      upn,
-                "display_name": display_name,
-                "tenant_id":    t_id,
-                "client_name":  t_name,
-                "mfa_method":   primary_method,
-                "phone_number": phone_number,
-                "status":       status,
-            }
-
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(_fetch_user_methods, u): u for u in user_list}
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                except Exception:
-                    logger.debug("mfa_status: future raised tenant=%s", t_name, exc_info=True)
-                    result = None
-                if result is not None:
-                    out.append(result)
+                logger.debug("mfa_status: future raised tenant=%s", t_name, exc_info=True)
+                result = None
+            if result is not None:
+                out.append(result)
 
     _STATUS_ORDER = {"NONE": 0, "WEAK": 1, "STRONG": 2}
     out.sort(key=lambda r: (
         _STATUS_ORDER.get(r["status"], 9),
-        r.get("client_name") or "",
         r.get("user_id") or "",
     ))
 
-    _MFA_STATUS_CACHE["data"] = out
-    _MFA_STATUS_CACHE["fetched_at"] = now_mono
+    t_cache["data"]       = out
+    t_cache["fetched_at"] = now_mono
     return out
 
 

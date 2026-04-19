@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import TenantBadge from "../components/TenantBadge.jsx";
 
@@ -6,17 +6,19 @@ import TenantBadge from "../components/TenantBadge.jsx";
 // constants
 // ---------------------------------------------------------------------------
 
-// Tenants excluded from the selector because MFA data is not available
-// (e.g. they use a third-party IdP such as Okta).
-const EXCLUDED_TENANTS = new Set(["GameChange Solar"]);
+// Tenants available in the MFA status endpoint.  Must match _MFA_TENANTS
+// client_name values in the backend.  "All" is intentionally absent —
+// fetching every tenant at once is too expensive.
+const MFA_TENANTS = ["NERO", "London Fischer"];
 
 // ---------------------------------------------------------------------------
 // fetch helper
 // ---------------------------------------------------------------------------
 
-function fetchMfaStatus(signal) {
+function fetchMfaStatus(tenantName, signal) {
   const token = localStorage.getItem("vector_token");
-  return fetch("/api/mfa-status", {
+  const params = new URLSearchParams({ tenant: tenantName });
+  return fetch(`/api/mfa-status?${params}`, {
     credentials: "same-origin",
     signal,
     headers: {
@@ -44,55 +46,53 @@ const STATUS_META = {
 // ---------------------------------------------------------------------------
 
 export default function MfaStatus() {
-  const [rows, setRows]         = useState(null);
-  const [err, setErr]           = useState(null);
-  const [tenant, setTenant]     = useState("All");
-  const [search, setSearch]     = useState("");
+  const [tenant, setTenant]   = useState(null);   // null = none selected
+  const [rows, setRows]       = useState(null);   // null = not yet fetched
+  const [loading, setLoading] = useState(false);
+  const [err, setErr]         = useState(null);
+  const [search, setSearch]   = useState("");
 
-  useEffect(() => {
-    const ctrl = new AbortController();
+  // Stable abort-controller ref so switching tenants cancels in-flight fetch.
+  const [ctrl, setCtrl] = useState(null);
+
+  const selectTenant = useCallback((name) => {
+    // Cancel any in-flight request for the previous tenant.
+    if (ctrl) ctrl.abort();
+
+    setTenant(name);
     setRows(null);
     setErr(null);
-    fetchMfaStatus(ctrl.signal)
-      .then(setRows)
-      .catch((e) => { if (e.name !== "AbortError") setErr(String(e.message || e)); });
-    return () => ctrl.abort();
-  }, []);
+    setSearch("");
+    setLoading(true);
 
-  // Derive the ordered tenant list from data (exclude known Okta tenants).
-  const tenants = useMemo(() => {
-    if (!rows) return [];
-    const seen = new Set();
-    for (const r of rows) {
-      const name = r.client_name || "";
-      if (name && !EXCLUDED_TENANTS.has(name)) seen.add(name);
-    }
-    return Array.from(seen).sort();
-  }, [rows]);
+    const next = new AbortController();
+    setCtrl(next);
 
-  // Apply tenant filter first, then text search.
-  const tenantFiltered = useMemo(() => {
-    if (!rows) return [];
-    if (tenant === "All") return rows.filter((r) => !EXCLUDED_TENANTS.has(r.client_name || ""));
-    return rows.filter((r) => r.client_name === tenant);
-  }, [rows, tenant]);
+    fetchMfaStatus(name, next.signal)
+      .then((data) => { setRows(data); setLoading(false); })
+      .catch((e) => {
+        if (e.name === "AbortError") return;
+        setErr(String(e.message || e));
+        setLoading(false);
+      });
+  }, [ctrl]);
+
+  // Summary counts — based on full fetched set, before text search.
+  const noneCount   = rows ? rows.filter((r) => r.status === "NONE").length   : 0;
+  const weakCount   = rows ? rows.filter((r) => r.status === "WEAK").length   : 0;
+  const strongCount = rows ? rows.filter((r) => r.status === "STRONG").length : 0;
 
   const q = search.trim().toLowerCase();
   const visible = useMemo(() => {
-    if (!q) return tenantFiltered;
-    return tenantFiltered.filter((r) =>
+    if (!rows) return [];
+    if (!q) return rows;
+    return rows.filter((r) =>
       (r.user_id      || "").toLowerCase().includes(q) ||
       (r.display_name || "").toLowerCase().includes(q) ||
-      (r.client_name  || "").toLowerCase().includes(q) ||
       (r.mfa_method   || "").toLowerCase().includes(q) ||
       (r.status       || "").toLowerCase().includes(q)
     );
-  }, [tenantFiltered, q]);
-
-  // Summary counts reflect the current tenant filter (before text search).
-  const noneCount   = tenantFiltered.filter((r) => r.status === "NONE").length;
-  const weakCount   = tenantFiltered.filter((r) => r.status === "WEAK").length;
-  const strongCount = tenantFiltered.filter((r) => r.status === "STRONG").length;
+  }, [rows, q]);
 
   return (
     <div className="px-6 py-6 space-y-5 max-w-6xl mx-auto">
@@ -100,35 +100,51 @@ export default function MfaStatus() {
       <div>
         <h1 className="text-xl font-bold">MFA Status</h1>
         <p className="text-white/50 text-[12px] mt-1">
-          MFA registration state for all users across all tenants. First load
-          queries Microsoft Graph per user and may take a moment; results are
-          cached for 5 minutes.
+          Select a tenant to load MFA registration status from Microsoft Graph.
+          Results are cached for 5 minutes per tenant.
         </p>
       </div>
 
       {/* tenant selector */}
-      {tenants.length > 0 && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[10px] uppercase tracking-wider text-white/40 mr-1">
-            Tenant
-          </span>
-          <TenantPill active={tenant === "All"} onClick={() => setTenant("All")}>
-            All
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] uppercase tracking-wider text-white/40 mr-1">
+          Tenant
+        </span>
+        {MFA_TENANTS.map((name) => (
+          <TenantPill
+            key={name}
+            active={tenant === name}
+            onClick={() => selectTenant(name)}
+          >
+            {name}
           </TenantPill>
-          {tenants.map((name) => (
-            <TenantPill
-              key={name}
-              active={tenant === name}
-              onClick={() => setTenant(name)}
-            >
-              {name}
-            </TenantPill>
-          ))}
+        ))}
+      </div>
+
+      {/* prompt when nothing selected */}
+      {tenant === null && (
+        <div className="text-white/40 text-[12px] py-4">
+          Select a tenant to load MFA status.
         </div>
       )}
 
-      {/* summary bar — counts update with tenant selection */}
-      {rows && (
+      {/* loading */}
+      {loading && (
+        <div className="text-white/40 text-[12px] py-4">
+          Loading MFA status for <span className="text-white/70">{tenant}</span>
+          {" "}from Microsoft Graph…
+        </div>
+      )}
+
+      {/* error */}
+      {err && (
+        <div className="text-[12px] text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg px-4 py-3">
+          Failed to load MFA status: {err}
+        </div>
+      )}
+
+      {/* summary bar — only when data is loaded */}
+      {rows && !loading && (
         <div className="flex gap-4 flex-wrap">
           <SummaryChip
             count={noneCount}
@@ -151,29 +167,19 @@ export default function MfaStatus() {
         </div>
       )}
 
-      {/* search */}
-      <input
-        type="search"
-        placeholder="Filter by user, method, status…"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        className="w-full max-w-sm bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-[12px] text-white placeholder-white/30 outline-none focus:border-white/30"
-      />
-
-      {/* states */}
-      {err && (
-        <div className="text-[12px] text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg px-4 py-3">
-          Failed to load MFA status: {err}
-        </div>
-      )}
-      {rows === null && !err && (
-        <div className="text-white/40 text-[12px] py-6">
-          Loading MFA status from Microsoft Graph…
-        </div>
+      {/* search — only when data is loaded */}
+      {rows && !loading && (
+        <input
+          type="search"
+          placeholder="Filter by user, method, status…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full max-w-sm bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-[12px] text-white placeholder-white/30 outline-none focus:border-white/30"
+        />
       )}
 
       {/* table */}
-      {rows !== null && (
+      {rows && !loading && (
         <div
           className="rounded-lg border border-white/5 overflow-hidden"
           style={{ backgroundColor: "rgba(255,255,255,0.015)" }}
@@ -186,16 +192,14 @@ export default function MfaStatus() {
             <div className="overflow-x-auto">
               <table className="w-full table-fixed text-[11px]">
                 <colgroup>
+                  <col style={{ width: "32%" }} />
+                  <col style={{ width: "18%" }} />
+                  <col style={{ width: "22%" }} />
                   <col style={{ width: "28%" }} />
-                  <col style={{ width: "16%" }} />
-                  <col style={{ width: "20%" }} />
-                  <col style={{ width: "20%" }} />
-                  <col style={{ width: "16%" }} />
                 </colgroup>
                 <thead>
                   <tr className="border-b border-white/8 text-left">
                     <Th>User</Th>
-                    <Th>Tenant</Th>
                     <Th>MFA Method</Th>
                     <Th>Phone</Th>
                     <Th>Status</Th>
@@ -212,12 +216,12 @@ export default function MfaStatus() {
         </div>
       )}
 
-      {rows !== null && visible.length > 0 && (
+      {rows && !loading && visible.length > 0 && (
         <div className="text-white/30 text-[10px]">
-          Showing {visible.length} of {tenantFiltered.length} user
-          {tenantFiltered.length !== 1 ? "s" : ""}
-          {tenant !== "All" ? ` · ${tenant}` : ""}
+          Showing {visible.length} of {rows.length} user
+          {rows.length !== 1 ? "s" : ""}
           {q ? " (filtered)" : ""}
+          {" · "}{tenant}
         </div>
       )}
     </div>
@@ -282,15 +286,6 @@ function MfaRow({ row }) {
           <div className="text-white/40 text-[10px] truncate mt-0.5" title={email}>
             {email}
           </div>
-        )}
-      </td>
-
-      {/* Tenant */}
-      <td className="px-3 py-2">
-        {row.client_name ? (
-          <TenantBadge name={row.client_name} />
-        ) : (
-          <span className="text-white/30">—</span>
         )}
       </td>
 
