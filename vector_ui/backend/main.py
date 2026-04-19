@@ -4466,6 +4466,108 @@ def _check_patient_zero_phishing(tenant: str, now_str: str) -> list[dict]:
     return findings
 
 
+def _check_unmanaged_device_login(tenant: str, now_str: str) -> list[dict]:
+    """Flag logins from devices not registered in Datto RMM for this tenant."""
+    try:
+        rows = db.fetch_all(
+            """
+            SELECT DISTINCT
+                e.user_id,
+                COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName') AS device_name,
+                MAX(e.timestamp) AS last_seen
+            FROM vector_events e
+            WHERE e.event_type  = 'UserLoggedIn'
+              AND e.client_name = %s
+              AND e.timestamp   > NOW() - INTERVAL '7 days'
+              AND (
+                    e.raw_json->>'DeviceName'        IS NOT NULL
+                    OR e.raw_json->>'WorkstationName' IS NOT NULL
+                  )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM vector_datto_devices d
+                    WHERE d.client_name = e.client_name
+                      AND LOWER(d.hostname) = LOWER(
+                            COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName')
+                          )
+                  )
+            GROUP BY e.user_id,
+                     COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName')
+            ORDER BY MAX(e.timestamp) DESC
+            LIMIT 100
+            """,
+            (tenant,),
+        )
+    except Exception as exc:
+        logger.warning("_check_unmanaged_device_login failed: %s", exc)
+        return []
+
+    findings: list[dict] = []
+    for row in rows:
+        user        = (row.get("user_id") or "").strip()
+        device_name = (row.get("device_name") or "").strip()
+        if not user or not device_name:
+            continue
+        findings.append({
+            "finding_type": "UNMANAGED_DEVICE_LOGIN",
+            "severity":     "HIGH",
+            "title":        "Login from unmanaged device",
+            "description": (
+                f"{user} logged in from {device_name} which is not registered in Datto RMM."
+            ),
+            "affected":        f"{user} via {device_name}",
+            "recommendation": (
+                "Verify this device belongs to the user. "
+                "Enroll in Datto RMM or investigate if unauthorized."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+    return findings
+
+
+def _check_rmm_critical_alerts(tenant: str, now_str: str) -> list[dict]:
+    """Surface unresolved Critical/High Datto RMM alerts from the last 24 hours."""
+    try:
+        rows = db.fetch_all(
+            """
+            SELECT hostname, client_name, alert_type, message, priority, alert_timestamp
+            FROM vector_datto_alerts
+            WHERE client_name   = %s
+              AND resolved       = FALSE
+              AND priority       IN ('Critical', 'High')
+              AND alert_timestamp > NOW() - INTERVAL '24 hours'
+            ORDER BY alert_timestamp DESC
+            LIMIT 50
+            """,
+            (tenant,),
+        )
+    except Exception as exc:
+        logger.warning("_check_rmm_critical_alerts failed: %s", exc)
+        return []
+
+    findings: list[dict] = []
+    for row in rows:
+        hostname  = (row.get("hostname") or "unknown device").strip()
+        message   = (row.get("message") or "No message").strip()
+        priority  = (row.get("priority") or "").strip()
+        alert_ts  = row.get("alert_timestamp")
+        ts_str    = alert_ts.isoformat() if hasattr(alert_ts, "isoformat") else str(alert_ts or "")
+        findings.append({
+            "finding_type": "RMM_CRITICAL_ALERT",
+            "severity":     "HIGH",
+            "title":        f"Critical RMM alert on {hostname}",
+            "description":  message,
+            "affected":     hostname,
+            "recommendation": (
+                "Investigate the affected device in Datto RMM immediately."
+            ),
+            "tenant":      tenant,
+            "detected_at": ts_str or now_str,
+        })
+    return findings
+
+
 @app.get("/api/security-findings")
 def security_findings(tenant: str = Query(...)) -> list[dict]:
     """Proactive posture findings: Graph API checks + UAL analysis per tenant."""
@@ -4520,6 +4622,9 @@ def security_findings(tenant: str = Query(...)) -> list[dict]:
         # Cross-tenant (NERO only) and correlation checks
         (_check_cross_tenant_ioc,              (tenant, now_str)),
         (_check_patient_zero_phishing,         (tenant, now_str)),
+        # Datto RMM checks (gracefully no-op if tables are empty)
+        (_check_unmanaged_device_login,        (tenant, now_str)),
+        (_check_rmm_critical_alerts,           (tenant, now_str)),
     ]:
         try:
             all_findings.extend(check_fn(*args))

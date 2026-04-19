@@ -19,6 +19,7 @@ from pathlib import Path
 from pythonjsonlogger import jsonlogger
 
 from vector_ingest.db import Database
+from vector_ingest.datto_rmm_poller import DattoRmmPoller
 from vector_ingest.defender_ingest import DefenderIngestor
 from vector_ingest.ingestor import TenantIngestor
 from vector_ingest.ioc_enricher import IocEnricher
@@ -166,6 +167,22 @@ def build_ingestors(tenants: list[dict], db: Database) -> list:
     # the list so it runs after the other ingestors have committed any
     # new rows this cycle.
     ingestors.append(IocEnricher(db=db))
+
+    # DattoRmmPoller is a global worker (tenant_id="*") that syncs
+    # device inventory and open alerts from Datto RMM every 4 hours.
+    # It self-skips when DATTO_RMM_BASE_URL / API creds are absent so
+    # installs without Datto don't generate noise.
+    datto_base = os.environ.get("DATTO_RMM_BASE_URL", "").strip()
+    datto_key  = os.environ.get("DATTO_RMM_API_KEY", "").strip()
+    if datto_base and datto_key:
+        logger.info("[datto-rmm] building poller", extra={"base_url": datto_base})
+        ingestors.append(DattoRmmPoller(db=db))
+    else:
+        logger.info(
+            "[datto-rmm] DATTO_RMM_BASE_URL or DATTO_RMM_API_KEY not set, skipping poller",
+            extra={"has_base": bool(datto_base), "has_key": bool(datto_key)},
+        )
+
     return ingestors
 
 
