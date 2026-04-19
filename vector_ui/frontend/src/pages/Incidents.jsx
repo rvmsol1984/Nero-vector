@@ -877,15 +877,16 @@ function ImpactTab({ incident }) {
   }
 
   const buckets = [
-    { key: "accessed", label: "Accessed", color: "#3B82F6", icon: "👁" },
-    { key: "sent",     label: "Sent",     color: "#F97316", icon: "📤" },
-    { key: "modified", label: "Modified", color: "#EAB308", icon: "✎" },
-    { key: "deleted",  label: "Deleted",  color: "#EF4444", icon: "🗑" },
+    { key: "accessed",    label: "Accessed",    color: "#3B82F6", icon: "👁" },
+    { key: "sent",        label: "Sent",        color: "#F97316", icon: "📤" },
+    { key: "modified",    label: "Modified",    color: "#EAB308", icon: "✎" },
+    { key: "deleted",     label: "Deleted",     color: "#EF4444", icon: "🗑" },
+    { key: "read_viewed", label: "Read/Viewed", color: "#60A5FA", icon: "👁" },
   ];
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {buckets.map((b) => {
           const bucket = data[b.key] || {};
           const total = (bucket.emails || 0) + (bucket.files || 0);
@@ -934,7 +935,7 @@ function ImpactTab({ incident }) {
 
 function ImpactEventsTable({ data }) {
   const rows = [];
-  const buckets = ["accessed", "sent", "modified", "deleted"];
+  const buckets = ["accessed", "sent", "modified", "deleted", "read_viewed"];
   for (const b of buckets) {
     for (const e of (data[b]?.events || [])) {
       rows.push({ ...e, _bucket: b });
