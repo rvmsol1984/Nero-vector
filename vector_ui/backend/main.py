@@ -1306,6 +1306,7 @@ def incidents_impact(incident_id: str) -> dict:
         "sent":           {"emails": 0, "files": 0, "events": []},
         "modified":       {"emails": 0, "files": 0, "events": []},
         "deleted":        {"emails": 0, "files": 0, "events": []},
+        "read_viewed":    {"emails": 0, "files": 0, "events": []},
         "dwell_minutes":  0,
     }
 
@@ -1339,11 +1340,10 @@ def incidents_impact(incident_id: str) -> dict:
         return empty
 
     # ---- file-action buckets (UAL) ----
-    ACCESSED_EVENTS = ("FileAccessed", "MailItemsAccessed", "FilePreviewed")
-    MODIFIED_EVENTS = ("FileModified", "FileUploaded", "FileRenamed")
-    DELETED_EVENTS = (
-        "FileDeleted", "SoftDelete", "HardDelete", "FileRecycled",
-    )
+    ACCESSED_EVENTS     = ("FileAccessed", "MailItemsAccessed", "FilePreviewed")
+    MODIFIED_EVENTS     = ("FileModified", "FileUploaded", "FileRenamed")
+    DELETED_EVENTS      = ("FileDeleted", "SoftDelete", "HardDelete", "FileRecycled")
+    READ_VIEWED_EVENTS  = ("MailItemsAccessed", "MessageRead", "FilePreviewed", "FileAccessed")
 
     def _fetch_bucket(event_types: tuple[str, ...]) -> list[dict]:
         if not entity_key:
@@ -1366,9 +1366,10 @@ def incidents_impact(incident_id: str) -> dict:
             logger.debug("incident impact fetch failed", exc_info=True)
             return []
 
-    accessed_events = _fetch_bucket(ACCESSED_EVENTS)
-    modified_events = _fetch_bucket(MODIFIED_EVENTS)
-    deleted_events = _fetch_bucket(DELETED_EVENTS)
+    accessed_events     = _fetch_bucket(ACCESSED_EVENTS)
+    modified_events     = _fetch_bucket(MODIFIED_EVENTS)
+    deleted_events      = _fetch_bucket(DELETED_EVENTS)
+    read_viewed_events  = _fetch_bucket(READ_VIEWED_EVENTS)
 
     # ---- sent email bucket (message_trace) ----
     # The activity-report fallback path writes a single "ACTIVITY"
@@ -1419,6 +1420,7 @@ def incidents_impact(incident_id: str) -> dict:
     acc_e, acc_f = _split_kinds(accessed_events)
     mod_e, mod_f = _split_kinds(modified_events)
     del_e, del_f = _split_kinds(deleted_events)
+    rv_e,  rv_f  = _split_kinds(read_viewed_events)
 
     return {
         "accessed": {
@@ -1440,6 +1442,11 @@ def incidents_impact(incident_id: str) -> dict:
             "emails": del_e,
             "files":  del_f,
             "events": deleted_events,
+        },
+        "read_viewed": {
+            "emails": rv_e,
+            "files":  rv_f,
+            "events": read_viewed_events,
         },
         "dwell_minutes": int(dwell_minutes or 0),
     }
