@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { fmtRelative, fmtNumber } from "../utils/format.js";
+import TenantSelect from "../components/TenantSelect.jsx";
+
+const TENANTS = ["NERO", "London Fischer", "GameChange Solar"];
 
 const RULES = [
   "NewCountryLoginRule",
@@ -34,8 +37,7 @@ function fetchJson(url, opts = {}) {
 }
 
 export default function Exceptions() {
-  const [tenants, setTenants] = useState([]);
-  const [selectedTenant, setSelectedTenant] = useState("");
+  const [selectedTenant, setSelectedTenant] = useState(TENANTS[0]);
   const [rows, setRows] = useState([]);
   const [err, setErr] = useState(null);
 
@@ -45,14 +47,6 @@ export default function Exceptions() {
   const [formValue, setFormValue] = useState("");
   const [formNote, setFormNote] = useState("");
   const [saving, setSaving] = useState(false);
-
-  // load tenants on mount
-  useEffect(() => {
-    api.byTenant().then((t) => {
-      setTenants(t || []);
-      if (t && t.length) setSelectedTenant(t[0].client_name);
-    }).catch(() => {});
-  }, []);
 
   // load exceptions when tenant changes
   useEffect(() => {
@@ -132,27 +126,11 @@ export default function Exceptions() {
       </div>
 
       {/* tenant selector */}
-      {tenants.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold mr-1">
-            tenant
-          </span>
-          {tenants.map((t) => (
-            <button
-              key={t.client_name}
-              type="button"
-              onClick={() => setSelectedTenant(t.client_name)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all active:scale-95 ${
-                selectedTenant === t.client_name
-                  ? "bg-primary text-white"
-                  : "bg-white/10 text-white/70 hover:bg-white/15"
-              }`}
-            >
-              {t.client_name}
-            </button>
-          ))}
-        </div>
-      )}
+      <TenantSelect
+        tenants={TENANTS}
+        value={selectedTenant}
+        onChange={setSelectedTenant}
+      />
 
       {err && (
         <div className="card border-critical/30 text-critical text-sm px-4 py-3">

@@ -4,80 +4,10 @@ import { Link } from "react-router-dom";
 import Avatar from "../components/Avatar.jsx";
 import JsonBlock from "../components/JsonBlock.jsx";
 import TenantBadge from "../components/TenantBadge.jsx";
+import TenantSelect from "../components/TenantSelect.jsx";
 import { api } from "../api.js";
 import { getEventLabel } from "../utils/eventLabels.js";
 import { filenameFromObjectId, fmtNumber, fmtRelative, fmtTime } from "../utils/format.js";
-
-// ⚠️ POSITION-CRITICAL: _ipCell and UAL_COL_* must stay here — they are referenced by column definitions above. Do NOT move these constants.
-const _ipCell = (r) =>
-  r.client_ip ? (
-    <span className="font-mono tabular-nums">{r.client_ip}</span>
-  ) : (
-    <span className="text-white/30">—</span>
-  );
-
-const _fileCell = (r) => {
-  const fn = filenameFromObjectId(r.raw_json?.ObjectId);
-  return fn || <span className="text-white/30">—</span>;
-};
-
-const UAL_COL_TIMESTAMP = {
-  key: "timestamp",
-  label: "Time",
-  render: (r) => (
-    <span className="text-white/60 whitespace-nowrap tabular-nums">
-      {fmtTime(r.timestamp)}
-    </span>
-  ),
-};
-const UAL_COL_IP = { key: "client_ip", label: "IP", render: _ipCell };
-const UAL_COL_EVENT_TYPE = {
-  key: "event_type",
-  label: "Type",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.event_type}>
-      {getEventLabel(r.event_type) || "—"}
-    </span>
-  ),
-};
-const UAL_COL_WORKLOAD = {
-  key: "workload",
-  label: "Workload",
-  render: (r) => r.workload || <span className="text-white/30">—</span>,
-};
-const UAL_COL_USER = {
-  key: "user_id",
-  label: "User",
-  render: (r) => (
-    <span className="truncate max-w-[200px] inline-block align-middle" title={r.user_id}>
-      {r.user_id || <span className="text-white/30">—</span>}
-    </span>
-  ),
-};
-
-// ---- AI Activity tab -------------------------------------------------------
-
-// Friendly names for the AI tool domains the Defender KQL query filters on.
-// Keys are the hostnames we expect RemoteUrl to resolve to; anything not in
-// the map falls back to the raw hostname.
-const AI_TOOL_NAMES = {
-  "chat.openai.com":      "ChatGPT",
-  "chatgpt.com":          "ChatGPT",
-  "api.openai.com":       "ChatGPT (API)",
-  "claude.ai":            "Claude",
-  "anthropic.com":        "Anthropic",
-  "gemini.google.com":    "Gemini",
-  "bard.google.com":      "Bard",
-  "deepseek.com":         "DeepSeek",
-  "perplexity.ai":        "Perplexity",
-  "copilot.microsoft.com":"Copilot",
-  "huggingface.co":       "HuggingFace",
-  "mistral.ai":           "Mistral",
-  "grok.x.ai":            "Grok",
-  "you.com":              "You.com",
-  "poe.com":              "Poe",
-};
-
 
 // Each tab owns its own endpoint, its default severity pill, and an
 // intrinsic severity (what the empty-vs-finding story looks like).
@@ -110,29 +40,11 @@ const TABS = [
 // Shape:
 //   { clientName: string, tenantId: string }
 //
-// Before the first api.byTenant() response returns both fields are
-// empty strings; consumers must handle empty-string defensively.
+// tenantId starts as "" while the one-row events lookup resolves it;
+// consumers must handle empty-string defensively.
 const TenantContext = createContext({ clientName: "", tenantId: "" });
 
-// Tenant pill selector -- same visual language as the Events page's
-// Pill component so the two filter strips read consistently. Kept
-// local to Governance.jsx since we aren't allowed to touch
-// App.jsx / api.js this change and don't want to churn imports.
-function TenantPill({ active, onClick, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all duration-200 active:scale-95 ${
-        active
-          ? "bg-primary text-white"
-          : "bg-white/10 text-white/70 hover:bg-white/15"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
+const TENANTS = ["NERO", "London Fischer", "GameChange Solar"];
 
 // ---------------------------------------------------------------------------
 
@@ -179,45 +91,13 @@ export default function Governance({
 
   // ----- tenant selector state ---------------------------------------
   //
-  // ``tenants`` is the full list of available tenants (from
-  // api.byTenant()); ``selectedTenantName`` is the client_name the
-  // user has picked; ``tenantId`` is the resolved UUID that the
-  // deeply-nested table components need for entity_key synthesis.
-  //
-  // api.byTenant() only returns (client_name, count) -- no
-  // tenant_id -- so after the selection changes we kick a second
-  // query (api.events with a 1-row limit) to pull tenant_id off a
-  // real event row. The extra call fires at most once per tenant
-  // switch, not per tab.
-  const [tenants, setTenants] = useState([]);
-  const [selectedTenantName, setSelectedTenantName] = useState("");
+  // ``selectedTenantName`` is the client_name the user has picked;
+  // ``tenantId`` is the resolved UUID that deeply-nested table
+  // components need for entity_key synthesis. After each selection
+  // change a one-row api.events call resolves the UUID (fires once
+  // per switch, not per tab).
+  const [selectedTenantName, setSelectedTenantName] = useState(TENANTS[0]);
   const [tenantId, setTenantId] = useState("");
-
-  // Fetch the list of tenants once on mount. First tenant wins the
-  // initial selection so the page has something to show before the
-  // user interacts.
-  useEffect(() => {
-    let cancel = false;
-    api
-      .byTenant()
-      .then((rows) => {
-        if (cancel) return;
-        const list = Array.isArray(rows) ? rows : [];
-        setTenants(list);
-        if (list.length && !selectedTenantName) {
-          setSelectedTenantName(list[0].client_name || "");
-        }
-      })
-      .catch(() => {
-        if (!cancel) setTenants([]);
-      });
-    return () => {
-      cancel = true;
-    };
-    // One-shot on mount. Don't depend on selectedTenantName so
-    // switching the pill doesn't re-fetch the tenant list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Resolve tenant_id for the currently-selected tenant name via a
   // one-row event fetch. Runs every time the selection changes and
@@ -332,22 +212,11 @@ export default function Governance({
       </p>
 
       {/* ----- tenant selector ----- */}
-      {tenants.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold mr-1">
-            tenant
-          </span>
-          {tenants.map((t) => (
-            <TenantPill
-              key={t.client_name}
-              active={selectedTenantName === t.client_name}
-              onClick={() => setSelectedTenantName(t.client_name)}
-            >
-              {t.client_name}
-            </TenantPill>
-          ))}
-        </div>
-      )}
+      <TenantSelect
+        tenants={TENANTS}
+        value={selectedTenantName}
+        onChange={setSelectedTenantName}
+      />
 
       {/* ----- wrapping tab bar (2-row on narrow screens) ----- */}
       <div
@@ -1869,6 +1738,74 @@ function AsyncEventsExpand({
 
 // Shorthand helpers for some very common UAL event shapes so each
 // table can reuse the same column specs.
+const _ipCell = (r) =>
+  r.client_ip ? (
+    <span className="font-mono tabular-nums">{r.client_ip}</span>
+  ) : (
+    <span className="text-white/30">—</span>
+  );
+
+const _fileCell = (r) => {
+  const fn = filenameFromObjectId(r.raw_json?.ObjectId);
+  return fn || <span className="text-white/30">—</span>;
+};
+
+const UAL_COL_TIMESTAMP = {
+  key: "timestamp",
+  label: "Time",
+  render: (r) => (
+    <span className="text-white/60 whitespace-nowrap tabular-nums">
+      {fmtTime(r.timestamp)}
+    </span>
+  ),
+};
+const UAL_COL_IP = { key: "client_ip", label: "IP", render: _ipCell };
+const UAL_COL_EVENT_TYPE = {
+  key: "event_type",
+  label: "Type",
+  render: (r) => (
+    <span className="truncate max-w-[200px] inline-block align-middle" title={r.event_type}>
+      {getEventLabel(r.event_type) || "—"}
+    </span>
+  ),
+};
+const UAL_COL_WORKLOAD = {
+  key: "workload",
+  label: "Workload",
+  render: (r) => r.workload || <span className="text-white/30">—</span>,
+};
+const UAL_COL_USER = {
+  key: "user_id",
+  label: "User",
+  render: (r) => (
+    <span className="truncate max-w-[200px] inline-block align-middle" title={r.user_id}>
+      {r.user_id || <span className="text-white/30">—</span>}
+    </span>
+  ),
+};
+
+// ---- AI Activity tab -------------------------------------------------------
+
+// Friendly names for the AI tool domains the Defender KQL query filters on.
+// Keys are the hostnames we expect RemoteUrl to resolve to; anything not in
+// the map falls back to the raw hostname.
+const AI_TOOL_NAMES = {
+  "chat.openai.com":      "ChatGPT",
+  "chatgpt.com":          "ChatGPT",
+  "api.openai.com":       "ChatGPT (API)",
+  "claude.ai":            "Claude",
+  "anthropic.com":        "Anthropic",
+  "gemini.google.com":    "Gemini",
+  "bard.google.com":      "Bard",
+  "deepseek.com":         "DeepSeek",
+  "perplexity.ai":        "Perplexity",
+  "copilot.microsoft.com":"Copilot",
+  "huggingface.co":       "HuggingFace",
+  "mistral.ai":           "Mistral",
+  "grok.x.ai":            "Grok",
+  "you.com":              "You.com",
+  "poe.com":              "Poe",
+};
 
 function aiToolDisplay(remoteUrl) {
   if (!remoteUrl) return { label: "—", host: "" };

@@ -1,14 +1,12 @@
-import { useCallback, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import TenantBadge from "../components/TenantBadge.jsx";
+import TenantSelect from "../components/TenantSelect.jsx";
 
 // ---------------------------------------------------------------------------
 // constants
 // ---------------------------------------------------------------------------
 
-// Tenants available in the MFA status endpoint.  Must match _MFA_TENANTS
-// client_name values in the backend.  "All" is intentionally absent —
-// fetching every tenant at once is too expensive.
+// GameChange Solar uses Okta — MFA data not available via Graph.
 const MFA_TENANTS = ["NERO", "London Fischer"];
 
 // ---------------------------------------------------------------------------
@@ -46,38 +44,30 @@ const STATUS_META = {
 // ---------------------------------------------------------------------------
 
 export default function MfaStatus() {
-  const [tenant, setTenant]   = useState(null);   // null = none selected
-  const [rows, setRows]       = useState(null);   // null = not yet fetched
+  const [tenant, setTenant]   = useState(MFA_TENANTS[0]);
+  const [rows, setRows]       = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr]         = useState(null);
   const [search, setSearch]   = useState("");
 
-  // Stable abort-controller ref so switching tenants cancels in-flight fetch.
-  const [ctrl, setCtrl] = useState(null);
-
-  const selectTenant = useCallback((name) => {
-    // Cancel any in-flight request for the previous tenant.
-    if (ctrl) ctrl.abort();
-
-    setTenant(name);
+  // Fetch when tenant changes (including on mount with the default tenant).
+  useEffect(() => {
+    const ctrl = new AbortController();
     setRows(null);
     setErr(null);
     setSearch("");
     setLoading(true);
-
-    const next = new AbortController();
-    setCtrl(next);
-
-    fetchMfaStatus(name, next.signal)
+    fetchMfaStatus(tenant, ctrl.signal)
       .then((data) => { setRows(data); setLoading(false); })
       .catch((e) => {
         if (e.name === "AbortError") return;
         setErr(String(e.message || e));
         setLoading(false);
       });
-  }, [ctrl]);
+    return () => ctrl.abort();
+  }, [tenant]);
 
-  // Summary counts — based on full fetched set, before text search.
+  // Summary counts reflect the full fetched set, before text search.
   const noneCount   = rows ? rows.filter((r) => r.status === "NONE").length   : 0;
   const weakCount   = rows ? rows.filter((r) => r.status === "WEAK").length   : 0;
   const strongCount = rows ? rows.filter((r) => r.status === "STRONG").length : 0;
@@ -100,39 +90,23 @@ export default function MfaStatus() {
       <div>
         <h1 className="text-xl font-bold">MFA Status</h1>
         <p className="text-white/50 text-[12px] mt-1">
-          Select a tenant to load MFA registration status from Microsoft Graph.
+          MFA registration state per tenant from Microsoft Graph.
           Results are cached for 5 minutes per tenant.
         </p>
       </div>
 
       {/* tenant selector */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[10px] uppercase tracking-wider text-white/40 mr-1">
-          Tenant
-        </span>
-        {MFA_TENANTS.map((name) => (
-          <TenantPill
-            key={name}
-            active={tenant === name}
-            onClick={() => selectTenant(name)}
-          >
-            {name}
-          </TenantPill>
-        ))}
-      </div>
-
-      {/* prompt when nothing selected */}
-      {tenant === null && (
-        <div className="text-white/40 text-[12px] py-4">
-          Select a tenant to load MFA status.
-        </div>
-      )}
+      <TenantSelect
+        tenants={MFA_TENANTS}
+        value={tenant}
+        onChange={setTenant}
+      />
 
       {/* loading */}
       {loading && (
         <div className="text-white/40 text-[12px] py-4">
-          Loading MFA status for <span className="text-white/70">{tenant}</span>
-          {" "}from Microsoft Graph…
+          Loading MFA status for{" "}
+          <span className="text-white/70">{tenant}</span>…
         </div>
       )}
 
@@ -143,7 +117,7 @@ export default function MfaStatus() {
         </div>
       )}
 
-      {/* summary bar — only when data is loaded */}
+      {/* summary bar */}
       {rows && !loading && (
         <div className="flex gap-4 flex-wrap">
           <SummaryChip
@@ -167,7 +141,7 @@ export default function MfaStatus() {
         </div>
       )}
 
-      {/* search — only when data is loaded */}
+      {/* search */}
       {rows && !loading && (
         <input
           type="search"
@@ -219,9 +193,8 @@ export default function MfaStatus() {
       {rows && !loading && visible.length > 0 && (
         <div className="text-white/30 text-[10px]">
           Showing {visible.length} of {rows.length} user
-          {rows.length !== 1 ? "s" : ""}
+          {rows.length !== 1 ? "s" : ""} · {tenant}
           {q ? " (filtered)" : ""}
-          {" · "}{tenant}
         </div>
       )}
     </div>
@@ -231,22 +204,6 @@ export default function MfaStatus() {
 // ---------------------------------------------------------------------------
 // sub-components
 // ---------------------------------------------------------------------------
-
-function TenantPill({ active, onClick, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-all duration-200 active:scale-95 ${
-        active
-          ? "bg-primary text-white"
-          : "bg-white/10 text-white/70 hover:bg-white/15"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
 
 function SummaryChip({ count, label, color, bg }) {
   return (
