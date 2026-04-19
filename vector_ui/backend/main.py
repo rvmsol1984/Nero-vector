@@ -1358,7 +1358,7 @@ def incidents_impact(incident_id: str) -> dict:
                 SELECT id::text, timestamp, event_type, workload,
                        client_ip, raw_json
                 FROM vector_events
-                WHERE entity_key = %s
+                WHERE LOWER(entity_key) = LOWER(%s)
                   AND event_type = ANY(%s)
                   AND timestamp BETWEEN %s AND %s
                 ORDER BY timestamp DESC
@@ -1388,7 +1388,7 @@ def incidents_impact(incident_id: str) -> dict:
                        recipient_address, subject, received, status,
                        size_bytes, direction
                 FROM vector_message_trace
-                WHERE sender_address = %s
+                WHERE LOWER(sender_address) = LOWER(%s)
                   AND received BETWEEN %s AND %s
                   AND COALESCE(direction, '') <> 'ACTIVITY'
                 ORDER BY received DESC
