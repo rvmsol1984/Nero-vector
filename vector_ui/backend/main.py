@@ -2928,9 +2928,11 @@ DeviceNetworkEvents
 
 
 @app.get("/api/governance/ai-activity")
-def governance_ai_activity() -> dict:
+def governance_ai_activity(
+    tenant: str | None = Query(None),
+) -> dict:
     """Combined Microsoft Copilot usage (from UAL) + external AI tool
-    access (from Defender Advanced Hunting) for the GCS tenant."""
+    access (from Defender Advanced Hunting)."""
     copilot = db.fetch_all(
         """
         SELECT
@@ -2943,14 +2945,14 @@ def governance_ai_activity() -> dict:
                 ARRAY[]::text[]
             ) AS event_types
         FROM vector_events
-        WHERE client_name = %s
+        WHERE (%s::text IS NULL OR client_name = %s)
           AND workload    = 'Copilot'
           AND user_id IS NOT NULL
         GROUP BY user_id
         ORDER BY event_count DESC
         LIMIT 200
         """,
-        (_GCS,),
+        (tenant, tenant),
     )
 
     external_ai: list[dict] = []
@@ -3218,6 +3220,40 @@ def governance_intune_devices_user(upn: str) -> dict:
         "stale_count":        0,
         "total_issues":       0,
     }
+
+
+@app.get("/api/governance/ioc-matches")
+def governance_ioc_matches(
+    tenant: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+) -> list[dict]:
+    """Recent OpenCTI IOC matches, optionally filtered by tenant."""
+    return db.fetch_all(
+        """
+        SELECT
+            m.id::text,
+            m.ioc_value,
+            m.ioc_type,
+            m.confidence,
+            m.indicator_name,
+            m.opencti_id,
+            m.client_name,
+            m.tenant_id,
+            m.matched_at,
+            m.matched_event_id::text,
+            m.raw_json,
+            ve.user_id,
+            ve.entity_key,
+            ve.event_type,
+            ve.workload
+        FROM vector_ioc_matches m
+        LEFT JOIN vector_events ve ON ve.id = m.matched_event_id
+        WHERE (%s::text IS NULL OR m.client_name = %s)
+        ORDER BY m.matched_at DESC
+        LIMIT %s
+        """,
+        (tenant, tenant, limit),
+    )
 
 
 # ---- MFA registration status (Graph: /users + /users/{upn}/authentication/methods) ---
