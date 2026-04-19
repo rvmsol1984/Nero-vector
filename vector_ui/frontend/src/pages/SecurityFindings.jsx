@@ -27,10 +27,13 @@ function fetchFindings(tenant, signal) {
 
 const CATEGORY_TYPES = {
   "Forward Rules":    ["EXTERNAL_FORWARD_RULE", "INTERNAL_FORWARD_RULE", "DELETE_INBOX_RULE", "HIDE_INBOX_RULE"],
-  "Admin Risk":       ["ADMIN_NO_MFA", "STALE_ADMIN", "UNREGISTERED_DEVICE_ADMIN"],
-  "Sharing":          ["ANONYMOUS_SHARE", "GUEST_WITH_ACCESS"],
+  "Admin Risk":       ["ADMIN_NO_MFA", "STALE_ADMIN", "UNREGISTERED_DEVICE_ADMIN", "NEW_GLOBAL_ADMIN", "MFA_METHOD_CHANGED"],
+  "Sharing":          ["ANONYMOUS_SHARE", "GUEST_WITH_ACCESS", "OAUTH_HIGH_PERMISSION_APP"],
   "Inactive Users":   ["INACTIVE_LICENSED_USER"],
   "Shared Mailboxes": ["SHARED_MAILBOX_SIGNIN_ENABLED"],
+  "Legacy Auth":      ["LEGACY_AUTH_LOGIN"],
+  "Cross-Tenant":     ["CROSS_TENANT_IOC"],
+  "Phishing":         ["PATIENT_ZERO_PHISHING", "IMPOSSIBLE_TRAVEL"],
 };
 
 export default function SecurityFindings() {
