@@ -2716,31 +2716,32 @@ class InboxRuleCreatedRule(CorrelationRule):
     """
 
     name = "InboxRuleCreated"
-    SCORE_DELTA = 35
+    SCORE_DELTA = 45
     LOOKBACK = timedelta(hours=24)
 
-    MATCHED_EVENT_TYPES = ("New-InboxRule", "NewInboxRule", "Set-InboxRule")
+    MATCHED_EVENT_TYPES = (
+        "New-InboxRule",
+        "NewInboxRule",
+        "Set-InboxRule",
+        "Enable-InboxRule",
+    )
 
     # Case-insensitive substrings on the *parameter name* side of
     # the UAL Parameters array that indicate suspicious actions.
-    # These line up with the Exchange cmdlet parameter names
-    # ``ForwardTo`` / ``ForwardAsAttachmentTo`` / ``RedirectTo`` /
-    # ``DeleteMessage`` / ``MoveToFolder``.
     SUSPICIOUS_PARAM_MARKERS: tuple[str, ...] = (
         "forwardto",
         "forwardasattachmentto",
         "redirectto",
         "deletemessage",
         "movetofolder",
+        "markasread",
     )
 
     # Case-insensitive substrings on the *parameter value* side that
     # indicate a hide-messages destination. Applied only when the
     # parameter name is ``MoveToFolder`` so we don't over-match.
-    # "Archive" deliberately isn't here -- users routinely create
-    # rules that move old mail to "2024 Archive" or similar and we
-    # don't want to page on legitimate housekeeping.
     HIDING_FOLDER_MARKERS: tuple[str, ...] = (
+        "archive",
         "rss",
         "deleted items",
         "junk",
@@ -2791,19 +2792,33 @@ class InboxRuleCreatedRule(CorrelationRule):
             params = self._parameters(raw)
             if not params:
                 continue
-            rule_name = self._rule_name_from_params(params, raw)
-            action = self._suspicious_action(params)
-            if action is None:
+            rule_name   = self._rule_name_from_params(params, raw)
+            action      = self._suspicious_action(params)
+            name_sus    = self._is_suspicious_name(rule_name or "")
+
+            if action is None and not name_sus:
                 continue
+
+            destination = None
+            if action:
+                if action.startswith("forward:"):
+                    destination = action[len("forward:"):]
+                elif action.startswith("move:"):
+                    destination = action[len("move:"):]
+
+            suspicious_reason = action or ("suspicious_name" if name_sus else "")
+
             return RuleResult(
                 rule_name=self.rule_name,
                 score_delta=self.SCORE_DELTA,
                 fired=True,
                 evidence={
-                    "user":        user_id,
-                    "rule_name":   rule_name,
-                    "rule_action": action,
-                    "timestamp":   ts.isoformat() if isinstance(ts, datetime) else str(ts),
+                    "user":             user_id,
+                    "rule_name":        rule_name,
+                    "rule_action":      action or "suspicious_name",
+                    "suspicious_reason": suspicious_reason,
+                    "destination":      destination,
+                    "timestamp":        ts.isoformat() if isinstance(ts, datetime) else str(ts),
                 },
             )
 
@@ -2877,9 +2892,10 @@ class InboxRuleCreatedRule(CorrelationRule):
         """Return a short action label if ``params`` contains a
         suspicious cmdlet argument, else ``None``.
 
-        The label is what we surface on the Incidents UI so
-        operators can triage without clicking into the raw event:
-        ``"forward"`` / ``"delete"`` / ``"move:RSS Feeds"`` etc.
+        The label is surfaced on the Incidents UI so operators can
+        triage without clicking into the raw event:
+        ``"forward:addr"`` / ``"delete"`` / ``"move:RSS Feeds"`` /
+        ``"mark_as_read"`` etc.
         """
         for p in params:
             name = (p.get("Name") or "").lower()
@@ -2900,8 +2916,6 @@ class InboxRuleCreatedRule(CorrelationRule):
                     None,
                 )
                 if hiding is None:
-                    # MoveToFolder to a non-hiding destination is
-                    # legitimate (e.g. "move to 2024 Archive"); skip.
                     continue
                 return f"move:{value_str or hiding}"
             if matched in ("forwardto", "forwardasattachmentto", "redirectto"):
@@ -2910,7 +2924,29 @@ class InboxRuleCreatedRule(CorrelationRule):
                 return f"forward:{target}" if target else "forward"
             if matched == "deletemessage":
                 return "delete"
+            if matched == "markasread":
+                value = p.get("Value")
+                truthy = (
+                    (isinstance(value, bool) and value)
+                    or (isinstance(value, str) and value.lower() in ("true", "1", "yes"))
+                )
+                if truthy:
+                    return "mark_as_read"
         return None
+
+    @staticmethod
+    def _is_suspicious_name(name: str) -> bool:
+        """Return True if the rule display name looks adversarial."""
+        s = name.strip()
+        if not s:
+            return True
+        if len(s) == 1:
+            return True
+        if s.isdigit():
+            return True
+        if all(c in ".,- \t" for c in s):
+            return True
+        return False
 
 
 class MassEmailDeleteRule(CorrelationRule):

@@ -3112,6 +3112,7 @@ def _fetch_intune_devices(
     select_fields = ",".join(
         [
             "id",
+            "azureADDeviceId",
             "deviceName",
             "complianceState",
             "userPrincipalName",
@@ -3576,11 +3577,16 @@ def _check_external_forward_rules(
             return []
         user_findings: list[dict] = []
         for rule in rules:
-            actions  = rule.get("actions") or {}
-            fwd      = actions.get("forwardTo") or []
-            redir    = actions.get("redirectTo") or []
-            del_msg  = actions.get("deleteMessage", False)
+            actions   = rule.get("actions") or {}
+            fwd       = actions.get("forwardTo") or []
+            redir     = actions.get("redirectTo") or []
+            del_msg   = actions.get("deleteMessage", False)
+            mark_read = actions.get("markAsRead", False)
+            move_fld  = actions.get("moveToFolder")
+            rule_name = rule.get("displayName") or "Unnamed Rule"
+
             external: list[str] = []
+            internal: list[str] = []
             for rl in (fwd, redir):
                 for r in rl:
                     if isinstance(r, dict):
@@ -3589,26 +3595,70 @@ def _check_external_forward_rules(
                             dom = addr.rsplit("@", 1)[1] if "@" in addr else ""
                             if not upn_domain or dom != upn_domain:
                                 external.append(addr)
-            if not external and not del_msg:
-                continue
-            rule_name = rule.get("displayName") or "Unnamed Rule"
+                            else:
+                                internal.append(addr)
+
+            if external:
+                user_findings.append({
+                    "finding_type":   "EXTERNAL_FORWARD_RULE",
+                    "severity":       "CRITICAL",
+                    "title":          "Inbox Rule Forwards Mail Externally",
+                    "description":    (
+                        f"Rule '{rule_name}' forwards/redirects to external "
+                        f"address(es): {', '.join(external[:3])}."
+                    ),
+                    "affected":       upn,
+                    "recommendation": "Disable the forwarding rule immediately and investigate for BEC compromise.",
+                    "tenant":         tenant,
+                    "detected_at":    now_str,
+                })
+
+            if internal:
+                user_findings.append({
+                    "finding_type":   "INTERNAL_FORWARD_RULE",
+                    "severity":       "HIGH",
+                    "title":          "Inbox Rule Forwards Mail Internally",
+                    "description":    (
+                        f"Rule '{rule_name}' silently forwards mail to internal "
+                        f"mailbox(es): {', '.join(internal[:3])}. "
+                        "May indicate compromise or insider threat."
+                    ),
+                    "affected":       upn,
+                    "recommendation": "Verify this rule was created intentionally. Remove if unauthorized.",
+                    "tenant":         tenant,
+                    "detected_at":    now_str,
+                })
+
             if del_msg:
-                desc  = f"Inbox rule '{rule_name}' automatically deletes incoming messages."
-                recom = "Disable or remove this rule. Silent message deletion is a key BEC indicator."
-            else:
-                addrs = ", ".join(external[:3])
-                desc  = f"Inbox rule '{rule_name}' forwards/redirects to external address(es): {addrs}."
-                recom = "Disable the forwarding rule immediately and investigate for BEC compromise."
-            user_findings.append({
-                "finding_type":    "EXTERNAL_FORWARD_RULE",
-                "severity":        "CRITICAL",
-                "title":           "Suspicious Inbox Rule Detected",
-                "description":     desc,
-                "affected":        upn,
-                "recommendation":  recom,
-                "tenant":          tenant,
-                "detected_at":     now_str,
-            })
+                user_findings.append({
+                    "finding_type":   "DELETE_INBOX_RULE",
+                    "severity":       "HIGH",
+                    "title":          "Inbox Rule Auto-Deletes Messages",
+                    "description":    (
+                        f"Rule '{rule_name}' automatically deletes incoming messages, "
+                        "potentially hiding attacker activity."
+                    ),
+                    "affected":       upn,
+                    "recommendation": "Investigate and remove if unauthorized.",
+                    "tenant":         tenant,
+                    "detected_at":    now_str,
+                })
+
+            if mark_read and move_fld:
+                user_findings.append({
+                    "finding_type":   "HIDE_INBOX_RULE",
+                    "severity":       "MEDIUM",
+                    "title":          "Inbox Rule Hides Messages",
+                    "description":    (
+                        f"Rule '{rule_name}' marks messages as read and moves them to "
+                        f"'{move_fld}', hiding activity from the mailbox owner."
+                    ),
+                    "affected":       upn,
+                    "recommendation": "Review rule. Common in BEC attacks to hide attacker correspondence.",
+                    "tenant":         tenant,
+                    "detected_at":    now_str,
+                })
+
         return user_findings
 
     with ThreadPoolExecutor(max_workers=10) as pool:
@@ -3825,6 +3875,194 @@ def _check_guest_with_access(token: str, tenant: str, now_str: str) -> list[dict
     return findings
 
 
+def _check_unregistered_device_admin(
+    t_id: str, admin_members: dict[str, str], tenant: str, now_str: str
+) -> list[dict]:
+    """Flag admin logins from devices not enrolled in Intune."""
+    if not admin_members:
+        return []
+
+    # Build set of AAD device IDs known to Intune.
+    intune_aad_ids: set[str] = set()
+    for d in _fetch_intune_devices(tenant_id=t_id):
+        aad_id = (d.get("azureADDeviceId") or "").lower().strip()
+        mgmt_id = (d.get("id") or "").lower().strip()
+        if aad_id:
+            intune_aad_ids.add(aad_id)
+        if mgmt_id:
+            intune_aad_ids.add(mgmt_id)
+
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=30)).isoformat()
+    admin_upns = list(admin_members.keys())
+
+    rows = db.fetch_all(
+        """
+        SELECT LOWER(user_id) AS user_id_lc, raw_json
+        FROM vector_events
+        WHERE client_name = %s
+          AND event_type   = 'UserLoggedIn'
+          AND LOWER(user_id) = ANY(%s)
+          AND timestamp   >= %s
+        ORDER BY timestamp DESC
+        LIMIT 2000
+        """,
+        (tenant, admin_upns, cutoff),
+    )
+
+    seen: set[tuple[str, str]] = set()
+    findings: list[dict] = []
+
+    for row in rows:
+        upn = row.get("user_id_lc") or ""
+        raw = row.get("raw_json") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                continue
+        if not isinstance(raw, dict):
+            continue
+
+        device_id   = ""
+        device_name = ""
+        for prop in (raw.get("DeviceProperties") or []):
+            if not isinstance(prop, dict):
+                continue
+            prop_name = (prop.get("Name") or "").lower()
+            if prop_name == "deviceid":
+                device_id = (prop.get("Value") or "").lower().strip()
+            elif prop_name in ("displayname", "devicename"):
+                device_name = (prop.get("Value") or "").strip()
+
+        if not device_id or device_id in intune_aad_ids:
+            continue
+
+        key = (upn, device_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        role_name = admin_members.get(upn, "admin")
+        label = device_name or device_id
+        findings.append({
+            "finding_type": "UNREGISTERED_DEVICE_ADMIN",
+            "severity":     "HIGH",
+            "title":        "Admin Login from Unregistered Device",
+            "description": (
+                f"Administrator {upn} (role: {role_name}) signed in from "
+                f"device '{label}' which is not enrolled in Intune."
+            ),
+            "affected":        f"{upn} / {label}",
+            "recommendation": (
+                "Require Intune-compliant devices via Conditional Access for all admin accounts. "
+                "Investigate whether this login was expected."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+
+    return findings
+
+
+def _check_inactive_licensed_users(token: str, tenant: str, now_str: str) -> list[dict]:
+    """Flag licensed users who haven't signed in for 60+ days."""
+    fv = urllib.parse.quote("accountEnabled eq true and userType eq 'Member'", safe="")
+    try:
+        data = _graph_get_with_token(
+            token,
+            f"/users?$filter={fv}"
+            "&$select=userPrincipalName,displayName,assignedLicenses,signInActivity&$top=999",
+        )
+        users = data.get("value") or []
+    except Exception:
+        return []
+
+    cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(days=60)
+    findings: list[dict] = []
+
+    for u in users:
+        upn = u.get("userPrincipalName") or ""
+        if not upn:
+            continue
+        if not (u.get("assignedLicenses") or []):
+            continue
+
+        sign_in   = u.get("signInActivity") or {}
+        last_str  = sign_in.get("lastSignInDateTime")
+        last_date = "never"
+
+        if last_str:
+            try:
+                last_dt = datetime.fromisoformat(last_str.replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                if last_dt >= cutoff_dt:
+                    continue
+                last_date = last_dt.date().isoformat()
+            except ValueError:
+                last_date = "unknown"
+        # null lastSignInDateTime = never signed in; always flag
+
+        display  = u.get("displayName") or upn
+        findings.append({
+            "finding_type": "INACTIVE_LICENSED_USER",
+            "severity":     "MEDIUM",
+            "title":        "Licensed User Inactive for 60+ Days",
+            "description": (
+                f"{display} ({upn}) has not signed in for over 60 days "
+                f"(last sign-in: {last_date}), representing wasted spend and attack surface."
+            ),
+            "affected":        f"{upn} (last sign-in: {last_date})",
+            "recommendation": (
+                "Review account. Consider removing the license or disabling "
+                "the account if the user no longer needs access."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+
+    return findings
+
+
+def _check_shared_mailbox_signin_enabled(token: str, tenant: str, now_str: str) -> list[dict]:
+    """Flag accounts with sign-in enabled but no assigned licenses (shared mailboxes)."""
+    fv = urllib.parse.quote("accountEnabled eq true", safe="")
+    try:
+        data = _graph_get_with_token(
+            token,
+            f"/users?$filter={fv}&$select=userPrincipalName,displayName,assignedLicenses&$top=999",
+        )
+        users = data.get("value") or []
+    except Exception:
+        return []
+
+    findings: list[dict] = []
+    for u in users:
+        upn = u.get("userPrincipalName") or ""
+        if not upn:
+            continue
+        if u.get("assignedLicenses"):
+            continue
+        findings.append({
+            "finding_type": "SHARED_MAILBOX_SIGNIN_ENABLED",
+            "severity":     "HIGH",
+            "title":        "Shared Mailbox with Sign-In Enabled",
+            "description": (
+                f"Account {upn} has interactive sign-in enabled but no assigned licenses. "
+                "Shared mailboxes should block direct sign-in to prevent credential abuse."
+            ),
+            "affected":        upn,
+            "recommendation": (
+                "Disable sign-in for this account in Entra ID, "
+                "or block direct sign-in via a Conditional Access policy."
+            ),
+            "tenant":      tenant,
+            "detected_at": now_str,
+        })
+
+    return findings
+
+
 @app.get("/api/security-findings")
 def security_findings(tenant: str = Query(...)) -> list[dict]:
     """Proactive posture findings: Graph API checks + UAL analysis per tenant."""
@@ -3862,11 +4100,14 @@ def security_findings(tenant: str = Query(...)) -> list[dict]:
     _SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
     for check_fn, args in [
-        (_check_external_forward_rules, (token, users, tenant, now_str)),
-        (_check_admin_no_mfa,           (token, admin_members, tenant, now_str)),
-        (_check_anonymous_share,        (tenant, now_str)),
-        (_check_stale_admin,            (admin_members, tenant, now_str)),
-        (_check_guest_with_access,      (token, tenant, now_str)),
+        (_check_external_forward_rules,        (token, users, tenant, now_str)),
+        (_check_admin_no_mfa,                  (token, admin_members, tenant, now_str)),
+        (_check_anonymous_share,               (tenant, now_str)),
+        (_check_stale_admin,                   (admin_members, tenant, now_str)),
+        (_check_guest_with_access,             (token, tenant, now_str)),
+        (_check_unregistered_device_admin,     (t_id, admin_members, tenant, now_str)),
+        (_check_inactive_licensed_users,       (token, tenant, now_str)),
+        (_check_shared_mailbox_signin_enabled, (token, tenant, now_str)),
     ]:
         try:
             all_findings.extend(check_fn(*args))
@@ -3914,6 +4155,24 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
 
     results: list[dict] = []
 
+    _HIDING_FOLDERS = frozenset(("archive", "deleted items", "rss", "junk", "spam", "trash"))
+
+    def _is_hiding_folder(folder: str) -> bool:
+        fl = folder.lower()
+        return any(s in fl for s in _HIDING_FOLDERS)
+
+    def _is_suspicious_name(name: str) -> bool:
+        s = name.strip()
+        if not s:
+            return True
+        if len(s) == 1:
+            return True
+        if s.isdigit():
+            return True
+        if all(c in ".,- \t" for c in s):
+            return True
+        return False
+
     def _fetch_user_rules(user: dict) -> list[dict]:
         upn     = user.get("userPrincipalName") or ""
         display = user.get("displayName") or upn
@@ -3931,7 +4190,7 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
 
         out: list[dict] = []
         for rule in rules:
-            rule_name    = rule.get("displayName") or "Unnamed Rule"
+            rule_name    = rule.get("displayName") or ""
             rule_enabled = rule.get("isEnabled", True)
             conditions   = rule.get("conditions") or {}
             actions      = rule.get("actions") or {}
@@ -3941,34 +4200,49 @@ def mailbox_rules(tenant: str = Query(...)) -> list[dict]:
             mark_read    = actions.get("markAsRead", False)
             move_folder  = actions.get("moveToFolder")
 
-            is_suspicious = False
             reasons: list[str] = []
 
-            for rl, label in [(forward_to, "forward"), (redirect_to, "redirect")]:
+            # 1 & 6 — FORWARD_TO_EXTERNAL / FORWARD_TO_INTERNAL
+            for rl in (forward_to, redirect_to):
                 for r in rl:
                     if isinstance(r, dict):
                         addr = ((r.get("emailAddress") or {}).get("address") or "").lower()
                         if addr:
                             dom = addr.rsplit("@", 1)[1] if "@" in addr else ""
                             if not upn_domain or dom != upn_domain:
-                                is_suspicious = True
                                 reasons.append(f"Forwards/redirects to external: {addr}")
+                            else:
+                                reasons.append(f"Forwards/redirects internally to: {addr}")
 
+            # 2 — AUTO_DELETE
             if delete_msg:
-                is_suspicious = True
-                reasons.append("Deletes matching messages")
-            if mark_read and move_folder:
-                is_suspicious = True
-                reasons.append(f"Marks read & moves to folder '{move_folder}'")
+                reasons.append("Auto-deletes matching messages")
+
+            # 3 — MARK_AS_READ
+            if mark_read:
+                reasons.append("Marks messages as read")
+
+            # 4 — MOVE_TO_ARCHIVE (suspicious folder target)
+            if move_folder and _is_hiding_folder(move_folder):
+                reasons.append(f"Moves to suspicious folder: '{move_folder}'")
+
+            # 5 — SUSPICIOUS_NAME
+            if _is_suspicious_name(rule_name):
+                reasons.append(f"Suspicious rule name: '{rule_name or '<blank>'}'")
+
+            # 7 — DISABLED_SUSPICIOUS: disabled but retains suspicious actions
+            has_suspicious_actions = bool(forward_to or redirect_to or delete_msg)
+            if not rule_enabled and has_suspicious_actions:
+                reasons.append("Rule is disabled (may have been used and disabled by attacker)")
 
             out.append({
                 "user":             upn,
                 "display_name":     display,
-                "rule_name":        rule_name,
+                "rule_name":        rule_name or "Unnamed Rule",
                 "rule_enabled":     rule_enabled,
                 "conditions":       conditions,
                 "actions":          actions,
-                "is_suspicious":    is_suspicious,
+                "is_suspicious":    bool(reasons),
                 "suspicion_reason": "; ".join(reasons) if reasons else None,
                 "tenant":           tenant,
             })
