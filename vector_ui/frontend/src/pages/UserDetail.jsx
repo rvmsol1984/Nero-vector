@@ -1326,110 +1326,166 @@ function EventTypeBadgeEdr({ type }) {
   );
 }
 
+function DattoDeviceCard({ device }) {
+  const online = device.online;
+  const lastSeen = device.last_seen ? fmtRelative(device.last_seen) : "—";
+  return (
+    <div
+      className="rounded-xl border p-4 flex flex-wrap items-start gap-4"
+      style={{
+        backgroundColor: "rgba(255,255,255,0.02)",
+        borderColor: online ? "#10B98140" : "rgba(255,255,255,0.08)",
+        borderLeft: `3px solid ${online ? "#10B981" : "#6B7280"}`,
+      }}
+    >
+      {/* online dot + badge */}
+      <div className="flex items-center gap-2 shrink-0">
+        <span
+          className="inline-block w-2 h-2 rounded-full"
+          style={{ backgroundColor: online ? "#10B981" : "#6B7280" }}
+          title={online ? "Online" : "Offline"}
+        />
+        <span
+          className="inline-flex items-center px-1.5 py-[2px] text-[9px] font-bold uppercase tracking-widest rounded border"
+          style={{ color: "#60A5FA", borderColor: "#60A5FA40", backgroundColor: "#60A5FA10" }}
+        >
+          Datto RMM
+        </span>
+      </div>
+
+      {/* device fields */}
+      <div className="flex-1 min-w-0 grid grid-cols-2 gap-x-6 gap-y-1.5 text-[11px]">
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-white/40">Hostname</div>
+          <div className="font-mono text-white/85 truncate mt-0.5">{device.hostname || "—"}</div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-white/40">Status</div>
+          <div className="mt-0.5 font-semibold" style={{ color: online ? "#10B981" : "#9CA3AF" }}>
+            {online ? "Online" : "Offline"}
+          </div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-white/40">OS</div>
+          <div className="text-white/70 truncate mt-0.5">{device.operating_system || "—"}</div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-white/40">Last seen</div>
+          <div className="text-white/70 mt-0.5">{lastSeen}</div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-white/40">Tenant</div>
+          <div className="text-white/70 truncate mt-0.5">{device.client_name || "—"}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EndpointTab({ entityKey }) {
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(null);
+  const [edrRows, setEdrRows]       = useState([]);
+  const [dattoDevices, setDattoDevices] = useState([]);
+  const [loading, setLoading]       = useState(false);
+  const [expanded, setExpanded]     = useState(null);
 
   useEffect(() => {
     let cancel = false;
     setLoading(true);
     setExpanded(null);
-    api
-      .userEdr(entityKey)
-      .then((r) => {
-        if (!cancel) setRows(r || []);
-      })
-      .catch(() => {
-        if (!cancel) setRows([]);
-      })
-      .finally(() => {
-        if (!cancel) setLoading(false);
-      });
-    return () => {
-      cancel = true;
-    };
+    // Fetch EDR alerts and Datto RMM devices in parallel.
+    Promise.allSettled([
+      api.userEdr(entityKey),
+      api.userDattoDevices(entityKey),
+    ]).then(([edrResult, dattoResult]) => {
+      if (cancel) return;
+      setEdrRows(edrResult.status === "fulfilled" ? (edrResult.value || []) : []);
+      setDattoDevices(dattoResult.status === "fulfilled" ? (dattoResult.value || []) : []);
+      setLoading(false);
+    });
+    return () => { cancel = true; };
   }, [entityKey]);
 
   return (
-    <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
-      <div className="overflow-x-hidden">
-        <table className="w-full table-fixed text-[11px]">
-          <thead>
-            <tr>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Type</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Severity</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Host</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Threat</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Process</th>
-              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Action</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-white/5">
-            {rows.map((r) => (
-              <Fragment key={r.id}>
-                <tr
-                  onClick={() =>
-                    setExpanded((prev) => (prev === r.id ? null : r.id))
-                  }
-                  className="hover:bg-white/[0.03] cursor-pointer"
-                  style={{
-                    borderLeft: "3px solid #F97316",
-                  }}
-                >
-                  <td className="px-3 py-2 text-white/50 whitespace-nowrap tabular-nums">
-                    {fmtTime(r.timestamp)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <EventTypeBadgeEdr type={r.event_type} />
-                  </td>
-                  <td className="px-3 py-2">
-                    <EdrSeverityPill severity={r.severity} />
-                  </td>
-                  <td
-                    className="px-3 py-2 text-white/80 truncate max-w-[200px]"
-                    title={r.host_name || ""}
+    <div className="space-y-4">
+      {/* Datto RMM device cards */}
+      {dattoDevices.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-white/40 font-semibold px-1">
+            Registered Devices · Datto RMM
+          </div>
+          {dattoDevices.map((d) => (
+            <DattoDeviceCard key={d.uid} device={d} />
+          ))}
+        </div>
+      )}
+
+      {/* EDR alerts table */}
+      <div className="bg-surface border border-white/5 rounded-card overflow-hidden">
+        <div className="overflow-x-hidden">
+          <table className="w-full table-fixed text-[11px]">
+            <thead>
+              <tr>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Timestamp</th>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Type</th>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Severity</th>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Host</th>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Threat</th>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Process</th>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-white/40 font-semibold">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {edrRows.map((r) => (
+                <Fragment key={r.id}>
+                  <tr
+                    onClick={() => setExpanded((prev) => (prev === r.id ? null : r.id))}
+                    className="hover:bg-white/[0.03] cursor-pointer"
+                    style={{ borderLeft: "3px solid #F97316" }}
                   >
-                    {r.host_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-white/80 truncate max-w-[220px]"
-                    title={r.threat_name || ""}
-                  >
-                    {r.threat_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-white/70 truncate max-w-[200px]"
-                    title={r.process_name || ""}
-                  >
-                    {r.process_name || <span className="text-white/30">—</span>}
-                  </td>
-                  <td className="px-3 py-2 text-white/70 whitespace-nowrap">
-                    {r.action_taken || <span className="text-white/30">—</span>}
-                  </td>
-                </tr>
-                {expanded === r.id && (
-                  <tr className="bg-white/[0.02]">
-                    <td colSpan={7} className="px-3 py-3">
-                      <JsonBlock data={r.raw_json} />
+                    <td className="px-3 py-2 text-white/50 whitespace-nowrap tabular-nums">
+                      {fmtTime(r.timestamp)}
+                    </td>
+                    <td className="px-3 py-2">
+                      <EventTypeBadgeEdr type={r.event_type} />
+                    </td>
+                    <td className="px-3 py-2">
+                      <EdrSeverityPill severity={r.severity} />
+                    </td>
+                    <td className="px-3 py-2 text-white/80 truncate max-w-[200px]" title={r.host_name || ""}>
+                      {r.host_name || <span className="text-white/30">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-white/80 truncate max-w-[220px]" title={r.threat_name || ""}>
+                      {r.threat_name || <span className="text-white/30">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-white/70 truncate max-w-[200px]" title={r.process_name || ""}>
+                      {r.process_name || <span className="text-white/30">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-white/70 whitespace-nowrap">
+                      {r.action_taken || <span className="text-white/30">—</span>}
                     </td>
                   </tr>
-                )}
-              </Fragment>
-            ))}
-            {!loading && rows.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-3 py-10 text-center text-white/40">
-                  no endpoint alerts
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40">
-        Datto EDR alerts matched by user account or device name.
+                  {expanded === r.id && (
+                    <tr className="bg-white/[0.02]">
+                      <td colSpan={7} className="px-3 py-3">
+                        <JsonBlock data={r.raw_json} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+              {!loading && edrRows.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-3 py-10 text-center text-white/40">
+                    no endpoint alerts
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-4 py-2 border-t border-white/5 text-[10px] text-white/40">
+          Datto EDR alerts matched by user account or device name.
+        </div>
       </div>
     </div>
   );

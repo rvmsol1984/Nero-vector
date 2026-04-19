@@ -591,6 +591,26 @@ def user_memberships(entity_key: str) -> list[dict]:
     return out
 
 
+@app.get("/api/users/{entity_key}/datto-devices")
+def user_datto_devices(entity_key: str) -> list[dict]:
+    """Datto RMM devices last logged into by this user."""
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    try:
+        return db.fetch_all(
+            """
+            SELECT uid, hostname, operating_system, online, last_seen, client_name
+            FROM vector_datto_devices
+            WHERE LOWER(last_logged_in_user) = LOWER(%s)
+            ORDER BY last_seen DESC NULLS LAST
+            LIMIT 20
+            """,
+            (user_email,),
+        )
+    except Exception:
+        # Table may not exist yet on older installs; return empty gracefully.
+        return []
+
+
 @app.get("/api/users/{entity_key}/edr")
 def user_edr(entity_key: str) -> list[dict]:
     """Datto EDR events for this user.
