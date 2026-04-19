@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "COMMIT=$(git log --oneline -1 2>/dev/null) && BRANCH=$(git branch --show-current 2>/dev/null) && echo \"{\\\"systemMessage\\\": \\\"Branch: $BRANCH\\\\nCommit: $COMMIT\\\"}\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
