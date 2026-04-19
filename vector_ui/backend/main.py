@@ -4473,26 +4473,23 @@ def _check_unmanaged_device_login(tenant: str, now_str: str) -> list[dict]:
             """
             SELECT DISTINCT
                 e.user_id,
-                COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName') AS device_name,
+                elem->>'Value' AS device_name,
                 MAX(e.timestamp) AS last_seen
-            FROM vector_events e
+            FROM vector_events e,
+                 jsonb_array_elements(e.raw_json->'DeviceProperties') elem
             WHERE e.event_type  = 'UserLoggedIn'
               AND e.client_name = %s
               AND e.timestamp   > NOW() - INTERVAL '7 days'
-              AND (
-                    e.raw_json->>'DeviceName'        IS NOT NULL
-                    OR e.raw_json->>'WorkstationName' IS NOT NULL
-                  )
+              AND elem->>'Name'  = 'DisplayName'
+              AND elem->>'Value' IS NOT NULL
+              AND elem->>'Value' != ''
               AND NOT EXISTS (
                     SELECT 1
                     FROM vector_datto_devices d
                     WHERE d.client_name = e.client_name
-                      AND LOWER(d.hostname) = LOWER(
-                            COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName')
-                          )
+                      AND LOWER(d.hostname) = LOWER(elem->>'Value')
                   )
-            GROUP BY e.user_id,
-                     COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName')
+            GROUP BY e.user_id, elem->>'Value'
             ORDER BY MAX(e.timestamp) DESC
             LIMIT 100
             """,
