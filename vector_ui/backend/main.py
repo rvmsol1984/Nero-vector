@@ -2683,16 +2683,19 @@ def governance_privileged_roles(
 
 # ---- guest users (Graph API) -----------------------------------------------
 
-_GCS_TENANT_ID = "07b4c47a-e461-493e-91c4-90df73e2ebc6"
-_GRAPH_TOKEN_CACHE: dict = {"token": None, "expires_at": 0.0}
+_NERO_TENANT_ID   = "12077321-d5c3-4d90-ad87-d19b58b2f847"
+_GCS_TENANT_ID    = "07b4c47a-e461-493e-91c4-90df73e2ebc6"
+_LF_TENANT_ID     = "4bddd2a5-8bee-46c0-968c-a7a0190e1245"
+_GRAPH_TOKEN_CACHE: dict = {}
 
 
-def _get_graph_token() -> str:
-    """Client credentials token for the GCS tenant, cached until ~1m before expiry."""
+def _get_graph_token(tenant_id: str | None = None) -> str:
+    """Client credentials token for the given tenant, cached per tenant until ~1m before expiry."""
     now = time.monotonic()
-    cached_token = _GRAPH_TOKEN_CACHE.get("token")
-    if cached_token and _GRAPH_TOKEN_CACHE.get("expires_at", 0.0) > now + 60:
-        return cached_token
+    tid = tenant_id or _NERO_TENANT_ID
+    cached = _GRAPH_TOKEN_CACHE.get(tid, {})
+    if cached.get("token") and cached.get("expires_at", 0.0) > now + 60:
+        return cached["token"]
 
     client_id = os.environ.get("VECTOR_CLIENT_ID")
     client_secret = os.environ.get("VECTOR_CLIENT_SECRET")
@@ -2702,7 +2705,7 @@ def _get_graph_token() -> str:
             detail="VECTOR_CLIENT_ID / VECTOR_CLIENT_SECRET not configured",
         )
 
-    url = f"https://login.microsoftonline.com/{_GCS_TENANT_ID}/oauth2/v2.0/token"
+    url = f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/token"
     body = urllib.parse.urlencode(
         {
             "client_id": client_id,
@@ -2724,13 +2727,12 @@ def _get_graph_token() -> str:
     if not token:
         raise HTTPException(status_code=502, detail="graph token response missing access_token")
 
-    _GRAPH_TOKEN_CACHE["token"] = token
-    _GRAPH_TOKEN_CACHE["expires_at"] = now + int(data.get("expires_in", 3600))
+    _GRAPH_TOKEN_CACHE[tid] = {"token": token, "expires_at": now + int(data.get("expires_in", 3600))}
     return token
 
 
-def _graph_get(path_with_query: str) -> dict:
-    token = _get_graph_token()
+def _graph_get(path_with_query: str, tenant_id: str | None = None) -> dict:
+    token = _get_graph_token(tenant_id)
     url = f"https://graph.microsoft.com/v1.0{path_with_query}"
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
@@ -2775,7 +2777,7 @@ def _get_defender_token() -> str:
             detail="VECTOR_CLIENT_ID / VECTOR_CLIENT_SECRET not configured",
         )
 
-    url = f"https://login.microsoftonline.com/{_GCS_TENANT_ID}/oauth2/v2.0/token"
+    url = f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/token"
     body = urllib.parse.urlencode(
         {
             "client_id": client_id,
@@ -3276,7 +3278,7 @@ def mfa_status() -> list[dict]:
         methods_raw: list[dict] = []
         try:
             upn       = urllib.parse.quote(user_id, safe="@")
-            auth_data = _graph_get(f"/users/{upn}/authentication/methods")
+            auth_data = _graph_get(f"/users/{upn}/authentication/methods", tenant_id=tenant_id)
             methods_raw = auth_data.get("value") or []
         except Exception:
             logger.debug("mfa auth methods failed for %s", user_id, exc_info=True)
