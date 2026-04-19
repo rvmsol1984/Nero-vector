@@ -3678,6 +3678,8 @@ def _check_external_forward_rules(
 def _check_admin_no_mfa(
     token: str, admin_members: dict[str, str], tenant: str, now_str: str
 ) -> list[dict]:
+    if tenant == "GameChange Solar":
+        return []  # GCS uses Okta — Graph MFA not applicable
     findings: list[dict] = []
 
     def _check_one(upn: str, role_name: str):
