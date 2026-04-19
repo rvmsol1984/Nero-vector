@@ -591,6 +591,26 @@ def user_memberships(entity_key: str) -> list[dict]:
     return out
 
 
+@app.get("/api/users/{entity_key}/datto-devices")
+def user_datto_devices(entity_key: str) -> list[dict]:
+    """Datto RMM devices last logged into by this user."""
+    user_email = entity_key.split("::", 1)[1] if "::" in entity_key else entity_key
+    try:
+        return db.fetch_all(
+            """
+            SELECT uid, hostname, operating_system, online, last_seen, client_name
+            FROM vector_datto_devices
+            WHERE LOWER(last_logged_in_user) = LOWER(%s)
+            ORDER BY last_seen DESC NULLS LAST
+            LIMIT 20
+            """,
+            (user_email,),
+        )
+    except Exception:
+        # Table may not exist yet on older installs; return empty gracefully.
+        return []
+
+
 @app.get("/api/users/{entity_key}/edr")
 def user_edr(entity_key: str) -> list[dict]:
     """Datto EDR events for this user.
@@ -4473,23 +4493,26 @@ def _check_unmanaged_device_login(tenant: str, now_str: str) -> list[dict]:
             """
             SELECT DISTINCT
                 e.user_id,
-                elem->>'Value' AS device_name,
+                COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName') AS device_name,
                 MAX(e.timestamp) AS last_seen
-            FROM vector_events e,
-                 jsonb_array_elements(e.raw_json->'DeviceProperties') elem
+            FROM vector_events e
             WHERE e.event_type  = 'UserLoggedIn'
               AND e.client_name = %s
               AND e.timestamp   > NOW() - INTERVAL '7 days'
-              AND elem->>'Name'  = 'DisplayName'
-              AND elem->>'Value' IS NOT NULL
-              AND elem->>'Value' != ''
+              AND (
+                    e.raw_json->>'DeviceName'        IS NOT NULL
+                    OR e.raw_json->>'WorkstationName' IS NOT NULL
+                  )
               AND NOT EXISTS (
                     SELECT 1
                     FROM vector_datto_devices d
                     WHERE d.client_name = e.client_name
-                      AND LOWER(d.hostname) = LOWER(elem->>'Value')
+                      AND LOWER(d.hostname) = LOWER(
+                            COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName')
+                          )
                   )
-            GROUP BY e.user_id, elem->>'Value'
+            GROUP BY e.user_id,
+                     COALESCE(e.raw_json->>'DeviceName', e.raw_json->>'WorkstationName')
             ORDER BY MAX(e.timestamp) DESC
             LIMIT 100
             """,

@@ -80,6 +80,7 @@ export const api = {
   userEmails:  (entityKey, { direction, search, limit = 50, offset = 0 } = {}) =>
                  get(`/api/users/${path(entityKey)}/emails${qs({ direction, search, limit, offset })}`),
   userEdr:         (entityKey) => get(`/api/users/${path(entityKey)}/edr`),
+  userDattoDevices: (entityKey) => get(`/api/users/${path(entityKey)}/datto-devices`),
   userIoc:         (entityKey) => get(`/api/users/${path(entityKey)}/ioc`),
   userThreatLocker: (entityKey) => get(`/api/users/${path(entityKey)}/threatlocker`),
 
