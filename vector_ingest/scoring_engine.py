@@ -268,6 +268,7 @@ class ScoringEngine:
                 PasswordSprayRule(),
                 AttachmentOpenedPostLoginRule(),
                 ExternalSharingSpikeRule(),
+                AiTMDetectionRule(),
             ]
         for r in rules:
             self.register_rule(r)
