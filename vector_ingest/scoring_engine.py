@@ -266,7 +266,6 @@ class ScoringEngine:
                 MFAMethodChangedRule(),
                 ServicePrincipalLoginRule(),
                 PasswordSprayRule(),
-                AttachmentOpenedPostLoginRule(),
                 ExternalSharingSpikeRule(),
                 AiTMDetectionRule(),
             ]
