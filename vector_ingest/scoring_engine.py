@@ -266,7 +266,7 @@ class ScoringEngine:
                 MFAMethodChangedRule(),
                 ServicePrincipalLoginRule(),
                 PasswordSprayRule(),
-                AttachmentOpenedPostLoginRule(),
+                # AttachmentOpenedPostLoginRule(),  # disabled — too noisy, fires on all normal file access
                 ExternalSharingSpikeRule(),
             ]
         for r in rules:
@@ -3691,6 +3691,11 @@ class ServicePrincipalLoginRule(CorrelationRule):
         "4e291c71-d680-4d0e-9640-0a3358e31177",  # PowerApps
         "cf36b471-5b44-428c-9ce7-313bf84528de",  # Microsoft Authenticator
         "fc0f3af4-6835-4174-b806-f7db311fd2f3",  # Microsoft Intune
+        # London Fischer tenant apps (legal firm - iManage, common LOB apps)
+        "120929d6-8abb-4d6e-9bce-d8df341f45cb",  # LF app (high volume, likely LOB)
+        "9199bf20-a13f-4107-85dc-02114787ef48",  # LF app (high volume, likely LOB)
+        "cd711a14-210d-4cca-8ec7-716042ce05b4",  # LF app (high volume, likely LOB)
+        "38aa3b87-a06d-4817-b275-7a316988d93b",  # LF app
     })
 
     def evaluate(
@@ -3710,6 +3715,10 @@ class ServicePrincipalLoginRule(CorrelationRule):
 
         if self._db is None:
             logger.debug("[sp_login] no DB handle, skipping")
+            return miss
+        # GCS uses Okta — UAL login events have no AppId, rule not applicable
+        GCS_TENANT = "07b4c47a-e461-493e-91c4-90df73e2ebc6"
+        if tenant_id == GCS_TENANT:
             return miss
 
         if self.is_excepted(tenant_id, {"user": user_id}):
