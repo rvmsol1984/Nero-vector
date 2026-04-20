@@ -4329,6 +4329,265 @@ class ExternalSharingSpikeRule(CorrelationRule):
         return None
 
 
+class AiTMDetectionRule(CorrelationRule):
+    """Fires when indicators of an Adversary-in-the-Middle (AiTM) proxy
+    attack are detected for a user within the last 2 hours.
+
+    Two independent patterns are checked:
+
+    Pattern 1 — Automated HTTP client authenticating on behalf of the user.
+        User-agents like ``axios``, ``python-requests``, and ``curl`` are
+        never used by legitimate browsers. Seeing them on ``UserLoggedIn``
+        or ``UserLoginFailed`` events means an AiTM proxy (e.g. Evilginx2,
+        Modlishka) is relaying credentials. The rule checks both the
+        top-level ``UserAgent`` field and the ``ExtendedProperties`` JSONB
+        array that Office 365 uses to carry the same data.
+
+    Pattern 2 — Rapid OAuth consent burst (3+ grants in 10 minutes from one IP).
+        An AiTM proxy that successfully captures a session cookie
+        immediately attempts to establish persistence via OAuth app
+        consents. Three or more consent/app-role events from the same
+        source IP within a 10-minute window is a reliable persistence
+        fingerprint.
+
+    Score: 85 points (fires an incident on its own).
+    """
+
+    name = "AiTMDetection"
+    SCORE_DELTA = 85
+    WINDOW = timedelta(hours=2)
+
+    _BOT_UA_PATTERNS: tuple[str, ...] = ("axios", "python-requests", "curl/")
+
+    _OAUTH_EVENT_TYPES: frozenset[str] = frozenset({
+        "Add app role assignment to service principal.",
+        "Consent to application.",
+        "Add OAuth2PermissionGrant.",
+    })
+
+    # Minimum OAuth consent events from the same IP in 10 minutes.
+    _OAUTH_BURST_THRESHOLD = 3
+    _OAUTH_BURST_WINDOW = timedelta(minutes=10)
+
+    def evaluate(
+        self,
+        events: list[dict],
+        user_profile: dict,
+    ) -> RuleResult:
+        miss = RuleResult(rule_name=self.rule_name, score_delta=0, fired=False)
+        if not events:
+            return miss
+
+        first = events[0]
+        tenant_id = first.get("tenant_id")
+        user_id = first.get("user_id")
+        if not tenant_id or not user_id:
+            return miss
+
+        if self._db is None:
+            logger.debug("[aitm] no DB handle, skipping")
+            return miss
+
+        if self.is_excepted(tenant_id, {"user": user_id}):
+            return miss
+
+        try:
+            hit = self._check_bot_ua(tenant_id, user_id)
+            if hit:
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=self.SCORE_DELTA,
+                    fired=True,
+                    evidence=hit,
+                )
+
+            hit = self._check_oauth_burst(tenant_id, user_id)
+            if hit:
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=self.SCORE_DELTA,
+                    fired=True,
+                    evidence=hit,
+                )
+        except Exception:
+            logger.exception(
+                "[aitm] evaluation error",
+                extra={"tenant_id": tenant_id, "user_id": user_id},
+            )
+            try:
+                self._db.conn.rollback()
+            except Exception:
+                pass
+
+        return miss
+
+    # ----- pattern 1: bot user-agent on auth events -----------------------
+
+    def _check_bot_ua(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict | None:
+        """Return evidence dict if a non-browser UA is seen on auth events."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    timestamp,
+                    raw_json->>'UserAgent'    AS ua_top,
+                    raw_json->>'ClientIP'     AS client_ip,
+                    event_type
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND timestamp > NOW() - %s
+                  AND event_type IN ('UserLoggedIn', 'UserLoginFailed')
+                  AND (
+                    (
+                      raw_json->>'UserAgent' ILIKE '%%axios%%'
+                      OR raw_json->>'UserAgent' ILIKE '%%python-requests%%'
+                      OR raw_json->>'UserAgent' ILIKE '%%curl/%%'
+                    )
+                    OR EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements(
+                        CASE
+                          WHEN jsonb_typeof(raw_json->'ExtendedProperties') = 'array'
+                          THEN raw_json->'ExtendedProperties'
+                          ELSE '[]'::jsonb
+                        END
+                      ) ep
+                      WHERE ep->>'Name' = 'UserAgent'
+                        AND (
+                          ep->>'Value' ILIKE '%%axios%%'
+                          OR ep->>'Value' ILIKE '%%python-requests%%'
+                          OR ep->>'Value' ILIKE '%%curl/%%'
+                        )
+                    )
+                  )
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (tenant_id, user_id, self.WINDOW),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        ts, ua_top, client_ip, event_type = row
+        # Try to resolve the actual UA from ExtendedProperties when the
+        # top-level field was empty.
+        user_agent = ua_top or self._ua_from_extended(tenant_id, user_id, ts)
+        return {
+            "user":       user_id,
+            "pattern":    "bot_user_agent",
+            "user_agent": user_agent,
+            "client_ip":  client_ip,
+            "event_type": event_type,
+            "timestamp":  ts.isoformat() if isinstance(ts, datetime) else str(ts),
+        }
+
+    def _ua_from_extended(
+        self,
+        tenant_id: str,
+        user_id: str,
+        ts: Any,
+    ) -> str | None:
+        """Resolve the UA from ExtendedProperties for a specific event."""
+        try:
+            with self._db.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ep->>'Value'
+                    FROM vector_events,
+                         jsonb_array_elements(
+                           CASE
+                             WHEN jsonb_typeof(raw_json->'ExtendedProperties') = 'array'
+                             THEN raw_json->'ExtendedProperties'
+                             ELSE '[]'::jsonb
+                           END
+                         ) ep
+                    WHERE tenant_id = %s
+                      AND user_id = %s
+                      AND timestamp = %s
+                      AND ep->>'Name' = 'UserAgent'
+                    LIMIT 1
+                    """,
+                    (tenant_id, user_id, ts),
+                )
+                row = cur.fetchone()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    # ----- pattern 2: rapid OAuth consent burst ---------------------------
+
+    def _check_oauth_burst(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict | None:
+        """Return evidence dict if 3+ OAuth consent events occur within 10 min
+        from the same source IP."""
+        with self._db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    timestamp,
+                    raw_json->>'ClientIP' AS client_ip,
+                    event_type
+                FROM vector_events
+                WHERE tenant_id = %s
+                  AND user_id = %s
+                  AND timestamp > NOW() - %s
+                  AND (
+                    event_type = ANY(%s)
+                    OR event_type ILIKE '%%oauth%%'
+                  )
+                ORDER BY timestamp ASC
+                """,
+                (tenant_id, user_id, self.WINDOW, list(self._OAUTH_EVENT_TYPES)),
+            )
+            rows = cur.fetchall()
+
+        if len(rows) < self._OAUTH_BURST_THRESHOLD:
+            return None
+
+        # Group by source IP and slide a 10-minute window.
+        from collections import defaultdict
+        by_ip: dict[str, list] = defaultdict(list)
+        for ts, ip, etype in rows:
+            if ip:
+                by_ip[ip].append((ts, etype))
+
+        for ip, events_for_ip in by_ip.items():
+            sorted_evts = sorted(
+                events_for_ip,
+                key=lambda x: x[0] if isinstance(x[0], datetime) else datetime.min,
+            )
+            for i, (ts_start, _) in enumerate(sorted_evts):
+                if not isinstance(ts_start, datetime):
+                    continue
+                window_end = ts_start + self._OAUTH_BURST_WINDOW
+                bucket = [
+                    e for e in sorted_evts[i:]
+                    if isinstance(e[0], datetime) and e[0] <= window_end
+                ]
+                if len(bucket) >= self._OAUTH_BURST_THRESHOLD:
+                    return {
+                        "user":        user_id,
+                        "pattern":     "oauth_burst",
+                        "client_ip":   ip,
+                        "grant_count": len(bucket),
+                        "window_start": ts_start.isoformat(),
+                        "window_end":  bucket[-1][0].isoformat(),
+                        "event_types": list({e[1] for e in bucket}),
+                    }
+
+        return None
+
+
 class ThreatIntelMonitor:
     """Daily proactive IOC sweep against the local OpenCTI instance.
 
