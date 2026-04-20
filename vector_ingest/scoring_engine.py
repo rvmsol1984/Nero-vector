@@ -58,7 +58,7 @@ SCORING_WINDOW = timedelta(minutes=30)
 # Aggregate score at which a user's evaluation produces an incident.
 # Rules contribute positive integers via ``RuleResult.score_delta``;
 # the total across all fired rules is compared against this value.
-INCIDENT_THRESHOLD = 80
+INCIDENT_THRESHOLD = 200  # temporarily raised while tuning rules
 
 # Two confirmed incidents of the same type for the same user within
 # this window collapse into one. Prevents a single ongoing anomaly
