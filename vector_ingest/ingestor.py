@@ -169,9 +169,10 @@ class GeoEnricher:
                 "[geo] ipinfo non-2xx ip=%s status=%s body=%s",
                 ip, resp.status_code, resp.text[:120],
             )
-            # 429 / 5xx: don't cache, we want to retry eventually.
-            # 4xx (other): negative-cache so we stop hammering it.
-            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+            if resp.status_code == 429:
+                # Rate limited — fall back to ip-api.com
+                return self._lookup_fallback(ip)
+            if 400 <= resp.status_code < 500:
                 self._cache_put(ip, None)
             return None
 
@@ -197,6 +198,31 @@ class GeoEnricher:
 
         self._cache_put(ip, geo)
         return geo
+
+    def _lookup_fallback(self, ip: str) -> dict | None:
+        """ip-api.com fallback when ipinfo is rate-limited. Free, no token needed."""
+        try:
+            resp = self._session.get(
+                f"http://ip-api.com/json/{ip}?fields=status,country,city,org,countryCode",
+                timeout=5,
+            )
+            if not resp.ok:
+                return None
+            data = resp.json()
+            if data.get("status") != "success":
+                return None
+            country = str(data.get("countryCode") or "").strip() or None
+            city    = str(data.get("city")        or "").strip() or None
+            org     = str(data.get("org")         or "").strip() or None
+            geo = {"Country": country, "City": city, "ASN": org}
+            if not any(geo.values()):
+                return None
+            self._cache_put(ip, geo)
+            logger.debug("[geo] ip-api fallback hit ip=%s country=%s", ip, country)
+            return geo
+        except Exception as exc:
+            logger.debug("[geo] ip-api fallback failed ip=%s err=%s", ip, exc)
+            return None
 
 
 # Module-level singleton. Constructed on first access so
