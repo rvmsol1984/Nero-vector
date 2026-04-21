@@ -3710,6 +3710,7 @@ class ServicePrincipalLoginRule(CorrelationRule):
         "4e291c71-d680-4d0e-9640-0a3358e31177",  # PowerApps
         "cf36b471-5b44-428c-9ce7-313bf84528de",  # Microsoft Authenticator
         "fc0f3af4-6835-4174-b806-f7db311fd2f3",  # Microsoft Intune
+        "38aa3b87-a06d-4817-b275-7a316988d93b",  # Windows Sign In (AAD broker)
     })
 
     def evaluate(
