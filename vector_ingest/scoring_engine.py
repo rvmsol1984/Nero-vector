@@ -3162,6 +3162,7 @@ class NewDeviceLoginRule(CorrelationRule):
                 evidence={
                     "user":       user_id,
                     "device_id":  device_id,
+                    "hostname":   self._extract_device_name(raw),
                     "first_seen": ts.isoformat() if isinstance(ts, datetime) else None,
                 },
             )
@@ -3214,6 +3215,24 @@ class NewDeviceLoginRule(CorrelationRule):
                     if v:
                         out.add(str(v).strip())
         return out
+
+    @staticmethod
+    @staticmethod
+    def _extract_device_name(raw: Any) -> str | None:
+        """Extract DisplayName from DeviceProperties array."""
+        if not isinstance(raw, dict):
+            return None
+        block = raw.get("DeviceProperties")
+        if not isinstance(block, list):
+            return None
+        for entry in block:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("Name") or "").strip()
+            if name == "DisplayName":
+                val = entry.get("Value") or ""
+                return val.strip() or None
+        return None
 
     @staticmethod
     def _extract_device_id(raw: Any) -> str | None:
@@ -3796,6 +3815,27 @@ class ServicePrincipalLoginRule(CorrelationRule):
             or raw.get("AppDisplayName")
             or raw.get("app_name")
         )
+        # Static lookup for common app IDs not labeled in UAL
+        _APP_NAMES: dict[str, str] = {
+            "d3590ed6-52b3-4102-aeff-aad2292ab01c": "Microsoft Office",
+            "00000002-0000-0ff1-ce00-000000000000": "Exchange Online",
+            "00000003-0000-0ff1-ce00-000000000000": "SharePoint Online",
+            "1fec8e78-bce4-4aaf-ab1b-5451cc387264": "Microsoft Teams",
+            "5e3ce6c0-2b1f-4285-8d4b-75ee78787346": "Teams Web Client",
+            "4765445b-32c6-49b0-83e6-1d93765276ca": "Azure AD Join",
+            "27922004-5251-4030-b22d-91ecd9a37ea4": "Outlook Mobile",
+            "b26aadf8-566f-4478-926f-589f601d9c74": "OneDrive Sync",
+            "ab9b8c07-8f02-4f72-87fa-80105867a763": "OneDrive for Business",
+            "04b07795-8ddb-461a-bbee-02f9e1bf7b46": "Azure CLI",
+            "1950a258-227b-4e31-a9cf-717495945fc2": "Azure PowerShell",
+            "fc0f3af4-6835-4174-b806-f7db311fd2f3": "Microsoft Intune",
+            "38aa3b87-a06d-4817-b275-7a316988d93b": "LF App (38aa)",
+            "120929d6-8abb-4d6e-9bce-d8df341f45cb": "LF App (1209)",
+            "9199bf20-a13f-4107-85dc-02114787ef48": "LF App (9199)",
+            "cd711a14-210d-4cca-8ec7-716042ce05b4": "LF App (cd71)",
+        }
+        if not app_name and app_id:
+            app_name = _APP_NAMES.get(str(app_id).strip().lower())
         return (
             str(app_id).strip() if app_id else None,
             str(app_name).strip() if app_name else None,

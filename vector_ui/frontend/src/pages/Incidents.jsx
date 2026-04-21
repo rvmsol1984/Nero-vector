@@ -1269,7 +1269,7 @@ function EvidenceRow({ signal, userId }) {
   const ev = signal.evidence || {};
   const autoDetail = (() => {
     if (ruleName === "NewDeviceLogin" || ruleName === "NewDeviceLoginRule") {
-      return ev.device_id ? `Device: ${ev.device_id}` : null;
+      return ev.hostname ? `Device: ${ev.hostname}` : ev.device_id ? `Device ID: ${ev.device_id.substring(0, 8)}…` : null;
     }
     if (ruleName === "ServicePrincipalLogin" || ruleName === "ServicePrincipalLoginRule") {
       return ev.app_name ? `App: ${ev.app_name}` : ev.app_id ? `App ID: ${ev.app_id}` : null;
