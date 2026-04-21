@@ -1265,6 +1265,29 @@ function EvidenceRow({ signal, userId }) {
     "signal";
   const ts = signal.timestamp || signal.time || signal.event_time || signal.added_at;
   const style = RULE_STYLE[ruleName] || DEFAULT_RULE_STYLE;
+  // Build a human-readable detail line from the nested evidence object
+  const ev = signal.evidence || {};
+  const autoDetail = (() => {
+    if (ruleName === "NewDeviceLogin" || ruleName === "NewDeviceLoginRule") {
+      return ev.device_id ? `Device: ${ev.device_id}` : null;
+    }
+    if (ruleName === "ServicePrincipalLogin" || ruleName === "ServicePrincipalLoginRule") {
+      return ev.app_name ? `App: ${ev.app_name}` : ev.app_id ? `App ID: ${ev.app_id}` : null;
+    }
+    if (ruleName === "AiTMDetection" || ruleName === "AiTMDetectionRule") {
+      return ev.user_agent ? `Agent: ${ev.user_agent}` : null;
+    }
+    if (ruleName === "NewCountryLogin" || ruleName === "NewCountryLoginRule") {
+      return ev.new_country ? `Country: ${ev.new_country} (${ev.ip || ""})` : null;
+    }
+    if (ruleName === "ImpossibleTravel" || ruleName === "ImpossibleTravelRule") {
+      return ev.country_a && ev.country_b ? `${ev.country_a} → ${ev.country_b} (${ev.distance_km || "?"}km)` : null;
+    }
+    if (ruleName === "InboxRuleCreated" || ruleName === "InboxRuleCreatedRule") {
+      return ev.rule_name ? `Rule: "${ev.rule_name}"` : null;
+    }
+    return null;
+  })();
 
   const normalised = ruleName.replace(/Rule$/, "");
   const eventTypes = RULE_EVENT_TYPES[ruleName] || RULE_EVENT_TYPES[normalised];
@@ -1297,12 +1320,12 @@ function EvidenceRow({ signal, userId }) {
           </span>
           <SourceBadge source={signal.source || signal.event_source || signal.kind} />
         </div>
-        {signal.detail && (
+        {(signal.detail || autoDetail) && (
           <div
             className="text-white/40 text-[10px] truncate mt-0.5"
             title={signal.detail}
           >
-            {signal.detail}
+            {signal.detail || autoDetail}
           </div>
         )}
       </div>
