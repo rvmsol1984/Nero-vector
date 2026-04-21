@@ -3155,6 +3155,28 @@ class NewDeviceLoginRule(CorrelationRule):
                 continue
             if self.is_excepted(tenant_id, {"device": device_id}):
                 continue
+            hostname = self._extract_device_name(raw)
+            # If device is in Datto RMM and last_logged_in_user matches this user,
+            # it's a known managed device — suppress the rule
+            if hostname and self._db:
+                try:
+                    with self._db.conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT 1 FROM vector_datto_devices
+                            WHERE LOWER(hostname) = LOWER(%s)
+                              AND (
+                                LOWER(last_logged_in_user) LIKE '%%' || LOWER(%s) || '%%'
+                                OR LOWER(last_logged_in_user) LIKE '%%' || LOWER(SPLIT_PART(%s, '@', 1)) || '%%'
+                              )
+                            LIMIT 1
+                            """,
+                            (hostname, user_id, user_id),
+                        )
+                        if cur.fetchone():
+                            continue  # known managed device for this user — skip
+                except Exception:
+                    pass
             return RuleResult(
                 rule_name=self.rule_name,
                 score_delta=self.SCORE_DELTA,
@@ -3162,7 +3184,7 @@ class NewDeviceLoginRule(CorrelationRule):
                 evidence={
                     "user":       user_id,
                     "device_id":  device_id,
-                    "hostname":   self._extract_device_name(raw),
+                    "hostname":   hostname,
                     "first_seen": ts.isoformat() if isinstance(ts, datetime) else None,
                 },
             )
@@ -4233,7 +4255,7 @@ class ExternalSharingSpikeRule(CorrelationRule):
     name = "ExternalSharingSpike"
     SCORE_DELTA = 35
     WINDOW = timedelta(hours=1)
-    SHARE_THRESHOLD = 3
+    SHARE_THRESHOLD = 20  # raised from 3 — 3 was too noisy for normal business use
 
     SHARING_EVENT_TYPES: frozenset[str] = frozenset({
         "SharingInvitationCreated",
