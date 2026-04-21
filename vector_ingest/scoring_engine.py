@@ -3666,6 +3666,13 @@ class ServicePrincipalLoginRule(CorrelationRule):
     SCORE_DELTA = 30
     LOOKBACK = timedelta(hours=24)
 
+    # Resolved app display names keyed by lowercase app_id.
+    # Empty string means "looked up, not found" — avoids repeated network hits.
+    _APP_NAME_CACHE: dict[str, str] = {}
+
+    # Graph tokens keyed by tenant_id: (access_token, monotonic_expiry).
+    _TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+
     # Well-known Microsoft first-party app IDs that are safe to skip.
     # GUIDs are stored lowercase-normalised.
     KNOWN_SAFE_APP_IDS: frozenset[str] = frozenset({
@@ -3734,6 +3741,9 @@ class ServicePrincipalLoginRule(CorrelationRule):
                 continue
             if app_id.lower() in self.KNOWN_SAFE_APP_IDS:
                 continue
+            resolved_name = app_name or self._resolve_app_name(
+                app_id, tenant_id, self._db
+            )
             return RuleResult(
                 rule_name=self.rule_name,
                 score_delta=self.SCORE_DELTA,
@@ -3741,7 +3751,7 @@ class ServicePrincipalLoginRule(CorrelationRule):
                 evidence={
                     "user":      user_id,
                     "app_id":    app_id,
-                    "app_name":  app_name,
+                    "app_name":  resolved_name,
                     "timestamp": ts.isoformat() if isinstance(ts, datetime) else None,
                 },
             )
@@ -3800,6 +3810,120 @@ class ServicePrincipalLoginRule(CorrelationRule):
             str(app_id).strip() if app_id else None,
             str(app_name).strip() if app_name else None,
         )
+
+    # ----- app name resolution --------------------------------------------
+
+    @staticmethod
+    def _get_graph_token(tenant_id: str) -> str | None:
+        """Return a cached or freshly-acquired Graph API access token."""
+        import urllib.parse
+        import urllib.request
+
+        cached = ServicePrincipalLoginRule._TOKEN_CACHE.get(tenant_id)
+        if cached:
+            token, expires_at = cached
+            if time.monotonic() < expires_at - 60:
+                return token
+
+        client_id = os.environ.get("VECTOR_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("VECTOR_CLIENT_SECRET", "").strip()
+        if not client_id or not client_secret:
+            return None
+
+        url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        data = urllib.parse.urlencode({
+            "grant_type":    "client_credentials",
+            "client_id":     client_id,
+            "client_secret": client_secret,
+            "scope":         "https://graph.microsoft.com/.default",
+        }).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            payload = json.loads(resp.read())
+
+        token = payload["access_token"]
+        expires_in = int(payload.get("expires_in", 3600))
+        ServicePrincipalLoginRule._TOKEN_CACHE[tenant_id] = (
+            token,
+            time.monotonic() + expires_in,
+        )
+        return token
+
+    @staticmethod
+    def _resolve_app_name(app_id: str, tenant_id: str, db: Any) -> str | None:
+        """Return a human-readable display name for *app_id*.
+
+        Resolution order:
+        1. Class-level ``_APP_NAME_CACHE`` (empty string == negative cache).
+        2. Microsoft Graph ``/servicePrincipals`` endpoint.
+        3. merill/microsoft-info OtherMicrosoftApps.csv fallback.
+
+        Every result (positive or negative) is written back to the cache so
+        subsequent lookups for the same app_id are free. Any network error
+        is silently caught and the method returns ``None``.
+        """
+        import csv
+        import io
+        import urllib.request
+
+        cache_key = app_id.lower()
+        if cache_key in ServicePrincipalLoginRule._APP_NAME_CACHE:
+            stored = ServicePrincipalLoginRule._APP_NAME_CACHE[cache_key]
+            return stored if stored else None
+
+        # --- Graph API ---
+        try:
+            token = ServicePrincipalLoginRule._get_graph_token(tenant_id)
+            if token:
+                url = (
+                    "https://graph.microsoft.com/v1.0/servicePrincipals"
+                    f"?$filter=appId+eq+'{app_id}'&$select=displayName,appId"
+                )
+                req = urllib.request.Request(
+                    url, headers={"Authorization": f"Bearer {token}"}
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read())
+                values = data.get("value", [])
+                if values:
+                    name = (values[0].get("displayName") or "").strip()
+                    if name:
+                        ServicePrincipalLoginRule._APP_NAME_CACHE[cache_key] = name
+                        return name
+        except Exception:
+            logger.debug(
+                "[sp_login] graph app-name lookup failed",
+                extra={"app_id": app_id},
+            )
+
+        # --- merill/microsoft-info CSV fallback ---
+        try:
+            csv_url = (
+                "https://raw.githubusercontent.com/merill/microsoft-info"
+                "/main/customdata/OtherMicrosoftApps.csv"
+            )
+            req = urllib.request.Request(csv_url)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                content = resp.read().decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(content))
+            for row in reader:
+                row_id = (row.get("AppId") or row.get("appId") or "").strip().lower()
+                if row_id == cache_key:
+                    name = (
+                        row.get("DisplayName") or row.get("displayName") or ""
+                    ).strip()
+                    if name:
+                        ServicePrincipalLoginRule._APP_NAME_CACHE[cache_key] = name
+                        return name
+        except Exception:
+            logger.debug(
+                "[sp_login] csv app-name lookup failed",
+                extra={"app_id": app_id},
+            )
+
+        # Negative cache — don't retry until process restarts.
+        ServicePrincipalLoginRule._APP_NAME_CACHE[cache_key] = ""
+        return None
 
 
 class PasswordSprayRule(CorrelationRule):
