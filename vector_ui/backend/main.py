@@ -168,7 +168,7 @@ def events_recent(
                'ual'::text AS source
         FROM vector_events
         WHERE (%s::text IS NULL OR client_name = %s)
-          AND (%s::text IS NULL OR event_type  = %s)
+          AND (%s::text IS NULL OR event_type = ANY(string_to_array(%s, ',')))
           AND (%s::text IS NULL OR workload    = %s)
           AND (%s::text IS NULL OR user_id ILIKE '%%' || %s || '%%')
         ORDER BY timestamp DESC
