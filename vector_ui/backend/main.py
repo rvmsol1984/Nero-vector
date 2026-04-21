@@ -3748,7 +3748,7 @@ def _check_anonymous_share(tenant: str, now_str: str) -> list[dict]:
         SELECT user_id, COUNT(*)::bigint AS share_count
         FROM vector_events
         WHERE client_name = %s
-          AND event_type  = 'AnonymousLinkCreated'
+          AND event_type IN ('AnonymousLinkCreated', 'SharingLinkCreated', 'SharingInvitationCreated')
           AND timestamp  >= %s
           AND user_id IS NOT NULL
         GROUP BY user_id

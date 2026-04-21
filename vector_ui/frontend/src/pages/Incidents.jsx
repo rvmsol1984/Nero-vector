@@ -1248,7 +1248,7 @@ const RULE_EVENT_TYPES = {
   MFAMethodChanged:          "Update user.",
   PasswordSpray:             "UserLoginFailed",
   AttachmentOpenedPostLogin: "FileDownloaded,FilePreviewed",
-  ExternalSharingSpike:      "SharingInvitationCreated,AnonymousLinkCreated",
+  ExternalSharingSpike:      "SharingInvitationCreated,AnonymousLinkCreated,SharingLinkCreated,AnonymousLinkUpdated,SharingLinkUpdated",
 };
 
 function EvidenceRow({ signal, userId }) {

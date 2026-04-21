@@ -4197,6 +4197,9 @@ class ExternalSharingSpikeRule(CorrelationRule):
     SHARING_EVENT_TYPES: frozenset[str] = frozenset({
         "SharingInvitationCreated",
         "AnonymousLinkCreated",
+        "SharingLinkCreated",
+        "AnonymousLinkUpdated",
+        "SharingLinkUpdated",
         "AddedToSecureLink",
     })
 
