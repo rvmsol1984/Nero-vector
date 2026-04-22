@@ -136,8 +136,12 @@ per_user AS (
             '[]'::jsonb
         ) AS known_ips,
         COALESCE(
-            jsonb_agg(DISTINCT raw_json->>'DeviceName')
-                FILTER (WHERE raw_json->>'DeviceName' IS NOT NULL),
+            jsonb_agg(DISTINCT (
+                SELECT ep->>'Value'
+                FROM jsonb_array_elements(COALESCE(raw_json->'DeviceProperties', '[]'::jsonb)) ep
+                WHERE ep->>'Name' = 'DisplayName'
+                LIMIT 1
+            )) FILTER (WHERE raw_json->'DeviceProperties' IS NOT NULL),
             '[]'::jsonb
         ) AS known_devices,
         MAX(client_name) AS client_name
