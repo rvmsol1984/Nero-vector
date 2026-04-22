@@ -139,7 +139,8 @@ per_user AS (
             jsonb_agg(DISTINCT raw_json->>'DeviceName')
                 FILTER (WHERE raw_json->>'DeviceName' IS NOT NULL),
             '[]'::jsonb
-        ) AS known_devices
+        ) AS known_devices,
+        MAX(client_name) AS client_name
     FROM events_30d
     GROUP BY tenant_id, user_id
 )
@@ -147,7 +148,8 @@ INSERT INTO vector_user_baselines (
     tenant_id, user_id, computed_at,
     login_hours, login_countries, login_asns,
     known_devices, known_ips,
-    avg_daily_events, avg_daily_logins, baseline_days
+    avg_daily_events, avg_daily_logins, baseline_days,
+    client_name
 )
 SELECT
     u.tenant_id,
@@ -160,7 +162,8 @@ SELECT
     u.known_ips,
     u.avg_daily_events,
     u.avg_daily_logins,
-    u.baseline_days
+    u.baseline_days,
+    u.client_name
 FROM per_user u
 LEFT JOIN hourly h
     ON h.tenant_id = u.tenant_id
@@ -174,7 +177,8 @@ ON CONFLICT (tenant_id, user_id) DO UPDATE SET
     known_ips        = EXCLUDED.known_ips,
     avg_daily_events = EXCLUDED.avg_daily_events,
     avg_daily_logins = EXCLUDED.avg_daily_logins,
-    baseline_days    = EXCLUDED.baseline_days
+    baseline_days    = EXCLUDED.baseline_days,
+    client_name     = EXCLUDED.client_name
 """
 
 
