@@ -9,6 +9,14 @@ export function fmtNumber(n) {
   return Number(n).toLocaleString("en-US");
 }
 
+export function fmtCompact(n) {
+  if (n === null || n === undefined) return "—";
+  const v = Number(n);
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (v >= 1_000)     return `${(v / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  return String(v);
+}
+
 export function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);

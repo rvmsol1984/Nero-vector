@@ -1,4 +1,4 @@
-import { fmtNumber } from "../utils/format.js";
+import { fmtCompact } from "../utils/format.js";
 
 // SVG stat ring used on the Dashboard. Renders a full circle in the
 // requested accent color with a large bold number in the center.
@@ -39,7 +39,7 @@ export default function StatRing({ value, label, color, size = 128 }) {
         </svg>
         <div className="absolute inset-0 flex items-center justify-center">
           <span className="text-2xl font-bold text-white tabular-nums">
-            {fmtNumber(value)}
+            {fmtCompact(value)}
           </span>
         </div>
       </div>
