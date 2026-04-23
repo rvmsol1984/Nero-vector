@@ -2160,38 +2160,32 @@ class HighRiskCountryLoginRule(CorrelationRule):
 
 
 class VPNLoginRule(CorrelationRule):
-    """Fires when a user's recent login originated from an IP whose
-    ASN is a commercial VPN exit or a hosting/cloud provider.
+    """Fires when a user's recent login originated from a VPN, proxy, Tor
+    exit, datacenter IP, or a known commercial VPN provider ASN.
 
-    Commodity VPN traffic is a strong pre-compromise tell: attackers
-    routinely route credential-stuffing and session-replay attempts
-    through NordVPN / ExpressVPN / Mullvad / ProtonVPN / PIA /
-    Surfshark so their true origin doesn't land in ``vector_events``.
-    Hosting ASNs (``asn.type == "hosting"``) catch the "bot traffic
-    bounced off a rented VPS" variant of the same pattern.
+    Detection priority (first match wins):
 
-    Score: 20 points. Deliberately low on its own -- many legitimate
-    employees use a personal VPN, and some tenants require one for
-    remote work. The rule is intended to stack with NewCountryLogin
-    (+25), OffHoursLogin (+15), or HighRiskCountry (+40) to push a
-    suspicious session over the 80-point incident threshold.
+    1. ipapi.is threat flags on the enriched event (``IsVPN``, ``IsProxy``,
+       ``IsTor``) — score 20 pts. These are authoritative when
+       ``GeoEnricher`` ran against the event at ingest time.
 
-    IP resolution reuses the ``ipinfo.io`` pattern already in
-    ``NewCountryLoginRule`` / ``HighRiskCountryLoginRule`` -- same
-    timeout, rate-limit, and private-IP-skip logic. A single rule
-    instance shares a per-cycle cache so multiple users hitting the
-    same VPN exit only produce one outbound lookup.
+    2. ``IsDatacenter`` flag from ipapi.is — score 15 pts (lower because
+       datacenter IPs are common for corporate proxies and legitimate
+       cloud-based clients).
 
-    When ipinfo.io returns a paid-tier ``asn`` sub-object, the rule
-    uses ``asn.type`` / ``asn.name`` directly. On the free tier the
-    ``asn`` block is absent and we fall back to parsing the free
-    ``org`` field (format: ``"AS15169 Google LLC"``) -- ``asn_type``
-    is then ``None`` and detection relies solely on the VPN-provider
-    name match.
+    3. ASN-based fallback (ipinfo.io ``asn`` sub-object or free ``org``
+       field): matches against a curated list of VPN provider names and
+       ``asn.type == "hosting"`` — score 20 pts. Used when ipapi.is fields
+       are absent from the event (e.g. events ingested before the key was
+       configured, or when ipapi.is was unreachable during ingest).
+
+    Score: 20 pts (15 for datacenter-only). Designed to stack with
+    NewCountryLogin / OffHoursLogin / HighRiskCountry.
     """
 
     name = "VPNLogin"
     SCORE_DELTA = 20
+    SCORE_DELTA_DATACENTER = 15
     LOOKBACK = timedelta(hours=24)
 
     # Case-insensitive substrings matched against the ASN org name.
@@ -2260,9 +2254,54 @@ class VPNLoginRule(CorrelationRule):
         if not login_ips:
             return miss
 
-        for ip in login_ips:
+        for ip, raw_json in login_ips:
             if self.is_excepted(tenant_id, {"ip": ip}):
                 continue
+
+            # --- priority 1 & 2: ipapi.is threat flags stamped at ingest ---
+            raw = raw_json or {}
+            if not isinstance(raw, dict):
+                try:
+                    import json as _json
+                    raw = _json.loads(raw)
+                except Exception:
+                    raw = {}
+
+            is_vpn   = bool(raw.get("IsVPN"))
+            is_proxy = bool(raw.get("IsProxy"))
+            is_tor   = bool(raw.get("IsTor"))
+            is_dc    = bool(raw.get("IsDatacenter"))
+
+            if is_vpn or is_proxy or is_tor:
+                tag = "vpn" if is_vpn else ("proxy" if is_proxy else "tor")
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=self.SCORE_DELTA,
+                    fired=True,
+                    evidence={
+                        "user":    user_id,
+                        "ip":      ip,
+                        "trigger": tag,
+                        "is_vpn":  is_vpn,
+                        "is_proxy": is_proxy,
+                        "is_tor":   is_tor,
+                    },
+                )
+
+            if is_dc:
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=self.SCORE_DELTA_DATACENTER,
+                    fired=True,
+                    evidence={
+                        "user":         user_id,
+                        "ip":           ip,
+                        "trigger":      "datacenter",
+                        "is_datacenter": True,
+                    },
+                )
+
+            # --- priority 3: ASN-based fallback (ipinfo.io) ---
             info = self._resolve_asn(ip)
             if not info:
                 continue
@@ -2271,10 +2310,7 @@ class VPNLoginRule(CorrelationRule):
             name_lower = asn_name.lower()
             is_hosting = asn_type == "hosting"
             matched_provider = next(
-                (
-                    p for p in self.VPN_PROVIDER_MARKERS
-                    if p in name_lower
-                ),
+                (p for p in self.VPN_PROVIDER_MARKERS if p in name_lower),
                 None,
             )
             if not is_hosting and matched_provider is None:
@@ -2286,6 +2322,7 @@ class VPNLoginRule(CorrelationRule):
                 evidence={
                     "user":     user_id,
                     "ip":       ip,
+                    "trigger":  "asn",
                     "asn_name": asn_name or None,
                     "asn_type": info.get("asn_type"),
                 },
@@ -2299,21 +2336,28 @@ class VPNLoginRule(CorrelationRule):
         self,
         tenant_id: str,
         user_id: str,
-    ) -> list[str]:
+    ) -> list[tuple[str, dict]]:
+        """Return [(client_ip, raw_json), ...] for distinct IPs.
+
+        DISTINCT ON (client_ip) picks the most-recent row per IP so the
+        threat flags stamped by GeoEnricher at ingest time are available
+        to the evaluation loop without a separate lookup.
+        """
         with self._db.conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT client_ip
+                SELECT DISTINCT ON (client_ip) client_ip, raw_json
                 FROM vector_events
                 WHERE tenant_id = %s
                   AND user_id = %s
                   AND event_type = 'UserLoggedIn'
                   AND client_ip IS NOT NULL
                   AND timestamp > NOW() - %s
+                ORDER BY client_ip, timestamp DESC
                 """,
                 (tenant_id, user_id, self.LOOKBACK),
             )
-            return [row[0] for row in cur.fetchall() if row[0]]
+            return [(row[0], row[1]) for row in cur.fetchall() if row[0]]
 
     # ----- ipinfo resolver ------------------------------------------------
 

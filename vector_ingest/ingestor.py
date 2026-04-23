@@ -42,21 +42,23 @@ TOKEN_REFRESH_SKEW = timedelta(minutes=5)
 
 
 # ---------------------------------------------------------------------------
-# ipinfo.io geo-enrichment for UserLoggedIn events
+# IP geo/threat enrichment for UserLoggedIn events
 # ---------------------------------------------------------------------------
 #
-# Adds Country / City / ASN to each UserLoggedIn event's raw_json based
-# on the client_ip. Runs inside the ingest hot path so it's built to
-# fail open: any network / parse / rate-limit error is logged at
-# DEBUG and the event is left unchanged. Results are cached per-IP
-# with a 24h TTL so the second UserLoggedIn from the same IP doesn't
-# touch the network. Private and loopback addresses are skipped
-# entirely via the stdlib ``ipaddress`` module.
+# Primary source: ipapi.is (requires IPAPI_IS_KEY env var). Returns country,
+# city, ASN, and boolean threat flags (is_vpn, is_proxy, is_tor, is_datacenter)
+# plus an abuser_score that scoring rules consume directly.
 #
-# A single module-level instance is shared across every
-# TenantIngestor so the cache is effective across tenants -- two
-# different tenants hitting the same shared egress IP both get one
-# lookup, not two.
+# Fallback 1: ipinfo.io (IPINFO_TOKEN env var, optional). Used when
+# IPAPI_IS_KEY is absent or ipapi.is returns a non-2xx response.
+#
+# Fallback 2: ip-api.com (free, no key). Used when both primary sources fail.
+#
+# All three share the same 24h positive / 1h negative in-memory cache and
+# 1 req/s rate limiter so the ingest hot path is never blocked by a slow or
+# unavailable geo service. Private / loopback / link-local IPs are skipped
+# entirely. A single module-level GeoEnricher instance is shared across all
+# TenantIngestors so the cache is effective cross-tenant.
 
 _GEO_POSITIVE_TTL = timedelta(hours=24)
 _GEO_NEGATIVE_TTL = timedelta(hours=1)
@@ -64,22 +66,29 @@ _GEO_RATE_LIMIT_SEC = 1.0
 
 
 class GeoEnricher:
-    """Lazy ipinfo.io enrichment with a 24h in-memory cache."""
+    """IP geo/threat enrichment with a 24h in-memory cache.
 
-    def __init__(self, token: str | None = None) -> None:
-        self._token = token or None
-        # ip -> (expires_at, geo_dict or None). ``None`` is a cached
-        # negative result so we don't hammer ipinfo for IPs it
-        # doesn't know about.
+    Primary: ipapi.is. Fallback 1: ipinfo.io. Fallback 2: ip-api.com.
+    """
+
+    def __init__(
+        self,
+        token: str | None = None,
+        ipapi_is_key: str | None = None,
+    ) -> None:
+        self._token = token or None          # ipinfo.io token (optional)
+        self._ipapi_is_key = ipapi_is_key or None
         self._cache: dict[str, tuple[datetime, dict | None]] = {}
         self._last_call_at: float = 0.0
         self._session = requests.Session()
 
     # ----- public api ----------------------------------------------------
     def enrich_event(self, normalized: dict) -> None:
-        """Mutate ``normalized['raw_json']`` in place with Country /
-        City / ASN fields when the event is a UserLoggedIn with a
-        public client_ip. All errors are swallowed."""
+        """Mutate ``normalized['raw_json']`` in place with Country / City /
+        ASN and threat-intel fields (IsVPN, IsProxy, IsTor, IsDatacenter,
+        AbuserScore) for UserLoggedIn events with a public client_ip.
+        Threat fields are also written to the top-level ``normalized`` dict
+        so scoring rules can read them without parsing raw_json."""
         if normalized.get("event_type") != "UserLoggedIn":
             return
         client_ip = normalized.get("client_ip")
@@ -97,11 +106,22 @@ class GeoEnricher:
             return
         if not geo:
             return
-        # Only fill fields that aren't already present so a
-        # UAL-provided Country keeps precedence over the ipinfo hit.
+        # Write geo fields into raw_json. UAL-provided Country takes
+        # precedence; threat booleans always overwrite (they don't come
+        # from UAL and are safe to stamp unconditionally).
+        _THREAT_FIELDS = frozenset(
+            {"IsDatacenter", "IsVPN", "IsProxy", "IsTor", "AbuserScore"}
+        )
         for key, value in geo.items():
-            if value and not raw.get(key):
+            if value is None:
+                continue
+            if key in _THREAT_FIELDS or not raw.get(key):
                 raw[key] = value
+        # Also surface threat flags at the top level of the normalized
+        # event so scoring rules can do a simple dict lookup.
+        for key in _THREAT_FIELDS:
+            if key in geo and geo[key] is not None:
+                normalized[key] = geo[key]
 
     # ----- internals -----------------------------------------------------
     @staticmethod
@@ -147,6 +167,8 @@ class GeoEnricher:
         self._last_call_at = time.monotonic()
 
     def _lookup(self, ip: str) -> dict | None:
+        """Try ipapi.is → ipinfo.io → ip-api.com in order, caching the
+        first successful result."""
         if self._is_skippable(ip):
             return None
 
@@ -155,48 +177,133 @@ class GeoEnricher:
             return value
 
         self._rate_limit()
+
+        # --- primary: ipapi.is ---
+        if self._ipapi_is_key:
+            geo = self._lookup_ipapi_is(ip)
+            if geo:
+                self._cache_put(ip, geo)
+                return geo
+
+        # --- fallback 1: ipinfo.io ---
+        geo = self._lookup_ipinfo(ip)
+        if geo:
+            self._cache_put(ip, geo)
+            return geo
+
+        # --- fallback 2: ip-api.com (free, no key) ---
+        geo = self._lookup_fallback(ip)
+        if geo:
+            self._cache_put(ip, geo)
+            return geo
+
+        self._cache_put(ip, None)
+        return None
+
+    def _lookup_ipapi_is(self, ip: str) -> dict | None:
+        """Query ipapi.is and map the response to our geo dict shape."""
+        url = f"https://api.ipapi.is?q={ip}&key={self._ipapi_is_key}"
+        try:
+            resp = self._session.get(url, timeout=5)
+        except requests.RequestException as exc:
+            logger.debug("[geo] ipapi.is request failed ip=%s err=%s", ip, exc)
+            return None
+
+        if not resp.ok:
+            logger.debug(
+                "[geo] ipapi.is non-2xx ip=%s status=%s", ip, resp.status_code,
+            )
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+
+        location = data.get("location") or {}
+        company  = data.get("company")  or {}
+        asn_blk  = data.get("asn")      or {}
+
+        country = (
+            str(location.get("country_code") or "").strip()
+            or str((data.get("datacenter") or {}).get("country") or "").strip()
+            or None
+        )
+        city    = str(location.get("city") or "").strip() or None
+        asn     = (
+            str(company.get("name") or "").strip()
+            or str(asn_blk.get("org") or "").strip()
+            or None
+        )
+
+        geo: dict = {
+            "Country":     country,
+            "City":        city,
+            "ASN":         asn,
+            "IsDatacenter": bool(data.get("is_datacenter")),
+            "IsVPN":        bool(data.get("is_vpn")),
+            "IsProxy":      bool(data.get("is_proxy")),
+            "IsTor":        bool(data.get("is_tor")),
+            "AbuserScore":  company.get("abuser_score"),
+        }
+        if not any(v for v in (country, city, asn)):
+            return None
+        return geo
+
+    def _lookup_ipinfo(self, ip: str) -> dict | None:
+        """Query ipinfo.io (free or paid tier) and return a basic geo dict."""
         url = f"https://ipinfo.io/{ip}/json"
         params = {"token": self._token} if self._token else None
         try:
             resp = self._session.get(url, params=params, timeout=5)
         except requests.RequestException as exc:
             logger.debug("[geo] ipinfo request failed ip=%s err=%s", ip, exc)
-            # Don't cache transport errors -- retry on next cycle.
             return None
 
         if not resp.ok:
             logger.debug(
-                "[geo] ipinfo non-2xx ip=%s status=%s body=%s",
-                ip, resp.status_code, resp.text[:120],
+                "[geo] ipinfo non-2xx ip=%s status=%s", ip, resp.status_code,
             )
-            # 429 / 5xx: don't cache, we want to retry eventually.
-            # 4xx (other): negative-cache so we stop hammering it.
-            if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                self._cache_put(ip, None)
             return None
 
         try:
             data = resp.json()
         except ValueError:
-            self._cache_put(ip, None)
             return None
 
         country = str(data.get("country") or "").strip() or None
         city    = str(data.get("city")    or "").strip() or None
         org     = str(data.get("org")     or "").strip() or None
-        geo = {
-            "Country": country,
-            "City":    city,
-            "ASN":     org,
-        }
-        # If ipinfo returned an empty envelope (no usable fields) cache
-        # it as a negative so we don't keep retrying.
-        if not any(geo.values()):
-            self._cache_put(ip, None)
+        if not any((country, city, org)):
+            return None
+        return {"Country": country, "City": city, "ASN": org}
+
+    def _lookup_fallback(self, ip: str) -> dict | None:
+        """Query ip-api.com (free, no key required) as last-resort fallback."""
+        url = f"http://ip-api.com/json/{ip}?fields=country,city,org,status"
+        try:
+            resp = self._session.get(url, timeout=5)
+        except requests.RequestException as exc:
+            logger.debug("[geo] ip-api.com request failed ip=%s err=%s", ip, exc)
             return None
 
-        self._cache_put(ip, geo)
-        return geo
+        if not resp.ok:
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+
+        if data.get("status") != "success":
+            return None
+
+        country = str(data.get("country") or "").strip() or None
+        city    = str(data.get("city")    or "").strip() or None
+        org     = str(data.get("org")     or "").strip() or None
+        if not any((country, city, org)):
+            return None
+        return {"Country": country, "City": city, "ASN": org}
 
 
 # Module-level singleton. Constructed on first access so
@@ -208,7 +315,10 @@ _GEO_ENRICHER: GeoEnricher | None = None
 def _get_geo_enricher() -> GeoEnricher:
     global _GEO_ENRICHER
     if _GEO_ENRICHER is None:
-        _GEO_ENRICHER = GeoEnricher(token=os.environ.get("IPINFO_TOKEN") or None)
+        _GEO_ENRICHER = GeoEnricher(
+            token=os.environ.get("IPINFO_TOKEN") or None,
+            ipapi_is_key=os.environ.get("IPAPI_IS_KEY") or None,
+        )
     return _GEO_ENRICHER
 
 
@@ -436,8 +546,8 @@ class TenantIngestor:
                     )
                     continue
                 # Geo-enrich UserLoggedIn events in place before batching.
-                # Fail-open: any ipinfo error is swallowed inside enrich_event
-                # so a CTI outage never blocks UAL ingest.
+                # Fail-open: any geo-enrichment error is swallowed inside
+                # enrich_event so a service outage never blocks UAL ingest.
                 _get_geo_enricher().enrich_event(normalized)
                 batch.append(normalized)
 
