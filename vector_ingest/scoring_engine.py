@@ -2260,6 +2260,70 @@ class VPNLoginRule(CorrelationRule):
         if not login_ips:
             return miss
 
+        # Check ipapi.is threat flags from enriched events first
+        try:
+            rows = self._db.fetch_all(
+                """
+                SELECT client_ip,
+                       raw_json->>'IsVPN'        AS is_vpn,
+                       raw_json->>'IsProxy'      AS is_proxy,
+                       raw_json->>'IsTor'        AS is_tor,
+                       raw_json->>'IsDatacenter' AS is_datacenter,
+                       raw_json->>'ASN'          AS asn
+                FROM vector_events
+                WHERE tenant_id  = %s
+                  AND user_id    = %s
+                  AND event_type = 'UserLoggedIn'
+                  AND timestamp  > NOW() - %s
+                  AND client_ip  IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 20
+                """,
+                (tenant_id, user_id, self.LOOKBACK),
+            )
+        except Exception:
+            rows = []
+
+        for row in rows:
+            ip = row.get("client_ip") or ""
+            if not ip or self.is_excepted(tenant_id, {"ip": ip}):
+                continue
+            is_vpn  = str(row.get("is_vpn")  or "").lower() == "true"
+            is_proxy = str(row.get("is_proxy") or "").lower() == "true"
+            is_tor  = str(row.get("is_tor")  or "").lower() == "true"
+            is_dc   = str(row.get("is_datacenter") or "").lower() == "true"
+            asn     = row.get("asn") or ""
+
+            if is_vpn or is_proxy or is_tor:
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=20,
+                    fired=True,
+                    evidence={"user": user_id, "ip": ip, "asn_name": asn,
+                               "detection": "vpn/proxy/tor"},
+                )
+            if is_dc:
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=15,
+                    fired=True,
+                    evidence={"user": user_id, "ip": ip, "asn_name": asn,
+                               "detection": "datacenter"},
+                )
+            # Fallback: ASN name matching
+            name_lower = asn.lower()
+            matched_provider = next(
+                (p for p in self.VPN_PROVIDER_MARKERS if p in name_lower), None
+            )
+            if matched_provider:
+                return RuleResult(
+                    rule_name=self.rule_name,
+                    score_delta=self.SCORE_DELTA,
+                    fired=True,
+                    evidence={"user": user_id, "ip": ip, "asn_name": asn,
+                               "detection": matched_provider},
+                )
+
         for ip in login_ips:
             if self.is_excepted(tenant_id, {"ip": ip}):
                 continue
@@ -2271,11 +2335,7 @@ class VPNLoginRule(CorrelationRule):
             name_lower = asn_name.lower()
             is_hosting = asn_type == "hosting"
             matched_provider = next(
-                (
-                    p for p in self.VPN_PROVIDER_MARKERS
-                    if p in name_lower
-                ),
-                None,
+                (p for p in self.VPN_PROVIDER_MARKERS if p in name_lower), None,
             )
             if not is_hosting and matched_provider is None:
                 continue
@@ -2283,12 +2343,8 @@ class VPNLoginRule(CorrelationRule):
                 rule_name=self.rule_name,
                 score_delta=self.SCORE_DELTA,
                 fired=True,
-                evidence={
-                    "user":     user_id,
-                    "ip":       ip,
-                    "asn_name": asn_name or None,
-                    "asn_type": info.get("asn_type"),
-                },
+                evidence={"user": user_id, "ip": ip, "asn_name": asn_name or None,
+                           "asn_type": info.get("asn_type")},
             )
 
         return miss
