@@ -808,17 +808,20 @@ function _fmtEstTimestamp(iso) {
 
 function SharingFileModal({ row, onClose }) {
   const raw = row || {};
+  // Support both governance endpoint fields (snake_case) and events API (raw_json nested)
+  const rj = raw.raw_json || {};
   const eventType = raw.event_type || "";
-  const isAnon = eventType === "AnonymousLinkCreated" || eventType === "AnonymousLinkUsed";
+  const isAnon = (eventType === "AnonymousLinkCreated" || eventType === "AnonymousLinkUsed") &&
+    !(raw.event_data || rj?.EventData || "").includes("MembersCanShareApplied>True");
 
-  const fileName   = raw.file_name || raw.object_id?.split("/").pop() || "—";
-  const relPath    = raw.relative_url || null;
-  const siteHost   = _siteHostname(raw.site_url);
-  const linkType   = _parseEventDataType(raw.event_data) || raw.permission || null;
-  const sharedBy   = raw.user_id || null;
+  const fileName   = raw.file_name || rj.SourceFileName || raw.object_id?.split("/").pop() || rj.ObjectId?.split("/").pop() || "—";
+  const relPath    = raw.relative_url || rj.SourceRelativeUrl || null;
+  const siteHost   = _siteHostname(raw.site_url || rj.SiteUrl);
+  const linkType   = _parseEventDataType(raw.event_data || rj.EventData) || raw.permission || rj.Permission || null;
+  const sharedBy   = raw.user_id || rj.UserId || null;
   const sharedAt   = _fmtEstTimestamp(raw.timestamp);
-  const workload   = raw.workload || null;
-  const objectId   = raw.object_id || null;
+  const workload   = raw.workload || rj.Workload || null;
+  const objectId   = raw.object_id || rj.ObjectId || null;
   const canOpen    = _isValidHttpsUrl(objectId);
 
   useEffect(() => {
