@@ -774,6 +774,8 @@ const SHARING_EXPAND_COLUMNS = [
   UAL_COL_IP,
 ];
 
+
+// ---------------------------------------------------------------------------
 // SharingFileModal
 // ---------------------------------------------------------------------------
 
@@ -794,33 +796,31 @@ function _isValidHttpsUrl(str) {
 }
 
 function _fmtEstTimestamp(iso) {
-  if (!iso) return "—";
+  if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString("en-US", {
     timeZone: "America/New_York",
     month: "2-digit", day: "2-digit", year: "numeric",
     hour: "2-digit", minute: "2-digit", hour12: false,
-  }) + " EST";
+  }).replace(",", "");
 }
 
 function SharingFileModal({ row, onClose }) {
-function SharingFileModal({ row, onClose }) {
-  const raw = row?.raw_json || {};
-  const eventType = row?.event_type || "";
+  const raw = row || {};
+  const eventType = raw.event_type || "";
   const isAnon = eventType === "AnonymousLinkCreated" || eventType === "AnonymousLinkUsed";
 
-  const fileName    = raw.SourceFileName || filenameFromObjectId(raw.ObjectId) || "—";
-  const relPath     = raw.SourceRelativeUrl || null;
-  const siteHost    = _siteHostname(raw.SiteUrl);
-  const linkType    = _parseEventDataType(raw.EventData) || raw.Permission || null;
-  const sharedBy    = row?.user_id || null;
-  const sharedAt    = _fmtEstTimestamp(row?.timestamp);
-  const workload    = raw.Workload || null;
-  const objectId    = raw.ObjectId || null;
-  const canOpenFile = _isValidHttpsUrl(objectId);
+  const fileName   = raw.file_name || raw.object_id?.split("/").pop() || "—";
+  const relPath    = raw.relative_url || null;
+  const siteHost   = _siteHostname(raw.site_url);
+  const linkType   = _parseEventDataType(raw.event_data) || raw.permission || null;
+  const sharedBy   = raw.user_id || null;
+  const sharedAt   = _fmtEstTimestamp(raw.timestamp);
+  const workload   = raw.workload || null;
+  const objectId   = raw.object_id || null;
+  const canOpen    = _isValidHttpsUrl(objectId);
 
-  // Close on Escape
   useEffect(() => {
     function onKey(e) { if (e.key === "Escape") onClose(); }
     window.addEventListener("keydown", onKey);
@@ -838,67 +838,35 @@ function SharingFileModal({ row, onClose }) {
         style={{ backgroundColor: "#0f1117" }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* header */}
-        <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-white/8">
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-white/10">
           <div className="flex items-center gap-2">
             {isAnon ? (
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-500/15 text-red-400 border border-red-500/25">
-                ANONYMOUS
-              </span>
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-500/15 text-red-400 border border-red-500/25">ANONYMOUS</span>
             ) : (
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-yellow-500/15 text-yellow-400 border border-yellow-500/25">
-                EXTERNAL
-              </span>
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-yellow-500/15 text-yellow-400 border border-yellow-500/25">EXTERNAL</span>
             )}
-            <span className="font-semibold text-white/80 truncate max-w-[320px]" title={fileName}>
-              {fileName}
-            </span>
+            <span className="font-semibold text-white/80 truncate max-w-[300px]" title={fileName}>{fileName}</span>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-white/40 hover:text-white/70 text-lg leading-none ml-3 shrink-0"
-          >
-            ✕
-          </button>
+          <button type="button" onClick={onClose} className="text-white/40 hover:text-white/70 text-lg leading-none ml-3 shrink-0">✕</button>
         </div>
-
-        {/* anonymous warning */}
         {isAnon && (
           <div className="mx-5 mt-4 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/25 text-red-300 text-[11px]">
             ⚠ This file is publicly accessible to anyone with the link — no login required.
           </div>
         )}
-
-        {/* detail grid */}
         <div className="px-5 py-4 space-y-2.5">
-          {[
-            ["Relative path", relPath],
-            ["Site",          siteHost],
-            ["Link type",     linkType],
-            ["Shared by",     sharedBy],
-            ["Shared at",     sharedAt],
-            ["Source",        workload],
-          ].map(([label, value]) => (
+          {[["Path", relPath], ["Site", siteHost], ["Link type", linkType], ["Shared by", sharedBy], ["Shared at", sharedAt], ["Source", workload]].map(([label, value]) => (
             <div key={label} className="flex gap-3">
               <span className="w-24 shrink-0 text-white/35 text-[11px] pt-px">{label}</span>
               <span className="text-white/75 break-all">{value || <span className="text-white/25">—</span>}</span>
             </div>
           ))}
         </div>
-
-        {/* open file button */}
-        {canOpenFile && (
+        {canOpen && (
           <div className="px-5 pb-5">
-            <a
-              href={objectId}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-2 w-full py-2 rounded-lg font-semibold text-[11px] uppercase tracking-wider transition-colors"
-              style={{ backgroundColor: "#2563EB22", color: "#60A5FA", border: "1px solid #2563EB40" }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#2563EB40"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#2563EB22"; }}
-            >
+            <a href={objectId} target="_blank" rel="noopener noreferrer"
+              className="flex items-center justify-center gap-2 w-full py-2 rounded-lg font-semibold text-[11px] uppercase tracking-wider"
+              style={{ backgroundColor: "#2563EB22", color: "#60A5FA", border: "1px solid #2563EB40" }}>
               OPEN FILE →
             </a>
           </div>
@@ -909,9 +877,12 @@ function SharingFileModal({ row, onClose }) {
 }
 
 function SharingTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
+  const [openId, setOpenId]     = useState(null);
+  const [modalRow, setModalRow] = useState(null);
   return (
-    <TableCard>
+    <>
+      {modalRow && <SharingFileModal row={modalRow} onClose={() => setModalRow(null)} />}
+      <TableCard>
       <table className="w-full table-fixed text-[11px]">
         <thead>
           <tr>
