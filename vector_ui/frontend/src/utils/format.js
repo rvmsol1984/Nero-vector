@@ -21,7 +21,16 @@ export function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().replace("T", " ").slice(0, 19) + "Z";
+  return d.toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).replace(",", "");
 }
 
 export function fmtRelative(iso) {
