@@ -693,69 +693,218 @@ const SHARING_EXPAND_COLUMNS = [
   },
   UAL_COL_EVENT_TYPE,
   UAL_COL_IP,
+  {
+    key: "_details",
+    label: "",
+    render: () => (
+      <span className="text-[9px] text-primary-light opacity-60 hover:opacity-100">details →</span>
+    ),
+  },
 ];
 
-function SharingTable({ rows }) {
-  const [openId, setOpenId] = useState(null);
+// ---------------------------------------------------------------------------
+// SharingFileModal
+// ---------------------------------------------------------------------------
+
+function _parseEventDataType(eventData) {
+  if (!eventData) return null;
+  const m = String(eventData).match(/<Type>([^<]+)<\/Type>/i);
+  return m ? m[1].trim() : null;
+}
+
+function _siteHostname(siteUrl) {
+  if (!siteUrl) return null;
+  try { return new URL(siteUrl).hostname; } catch { return siteUrl; }
+}
+
+function _isValidHttpsUrl(str) {
+  if (!str) return false;
+  try { const u = new URL(str); return u.protocol === "https:"; } catch { return false; }
+}
+
+function _fmtEstTimestamp(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    month: "2-digit", day: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }) + " EST";
+}
+
+function SharingFileModal({ row, onClose }) {
+  const raw = row?.raw_json || {};
+  const eventType = row?.event_type || "";
+  const isAnon = eventType === "AnonymousLinkCreated" || eventType === "AnonymousLinkUsed";
+
+  const fileName    = raw.SourceFileName || filenameFromObjectId(raw.ObjectId) || "—";
+  const relPath     = raw.SourceRelativeUrl || null;
+  const siteHost    = _siteHostname(raw.SiteUrl);
+  const linkType    = _parseEventDataType(raw.EventData) || raw.Permission || null;
+  const sharedBy    = row?.user_id || null;
+  const sharedAt    = _fmtEstTimestamp(row?.timestamp);
+  const workload    = raw.Workload || null;
+  const objectId    = raw.ObjectId || null;
+  const canOpenFile = _isValidHttpsUrl(objectId);
+
+  // Close on Escape
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
-    <TableCard>
-      <table className="w-full table-fixed text-[11px]">
-        <thead>
-          <tr>
-            <Th>User</Th>
-            <Th align="right">Events</Th>
-            <Th>Event Type</Th>
-            <Th>Last Seen</Th>
-            <Th>Status</Th>
-            <Th>{""}</Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-white/5">
-          {rows.map((row) => {
-            const rowKey = `${row.entity_key}-${row.event_type}`;
-            const isOpen = openId === rowKey;
-            return (
-              <Fragment key={rowKey}>
-                <tr
-                  onClick={() => setOpenId(isOpen ? null : rowKey)}
-                  className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
-                >
-                  <td className="px-4 py-2.5">
-                    <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {fmtNumber(row.event_count)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/60" title={row.event_type}>
-                    {getEventLabel(row.event_type)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
-                    {fmtRelative(row.last_seen)}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <SeverityPill severity="monitor" />
-                  </td>
-                  <ChevronCell open={isOpen} />
-                </tr>
-                {isOpen && (
-                  <ExpandedPanel colSpan={6}>
-                    <UserEventsExpand
-                      entityKey={row.entity_key}
-                      eventTypes={row.event_type}
-                      columns={SHARING_EXPAND_COLUMNS}
-                      eventsParams={{
-                        user: row.user_id,
-                        event_type: row.event_type,
-                      }}
-                    />
-                  </ExpandedPanel>
-                )}
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-    </TableCard>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: "rgba(0,0,0,0.65)" }}
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-lg rounded-xl border border-white/10 shadow-2xl text-[12px]"
+        style={{ backgroundColor: "#0f1117" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* header */}
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-white/8">
+          <div className="flex items-center gap-2">
+            {isAnon ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-500/15 text-red-400 border border-red-500/25">
+                ANONYMOUS
+              </span>
+            ) : (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-yellow-500/15 text-yellow-400 border border-yellow-500/25">
+                EXTERNAL
+              </span>
+            )}
+            <span className="font-semibold text-white/80 truncate max-w-[320px]" title={fileName}>
+              {fileName}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-white/40 hover:text-white/70 text-lg leading-none ml-3 shrink-0"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* anonymous warning */}
+        {isAnon && (
+          <div className="mx-5 mt-4 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/25 text-red-300 text-[11px]">
+            ⚠ This file is publicly accessible to anyone with the link — no login required.
+          </div>
+        )}
+
+        {/* detail grid */}
+        <div className="px-5 py-4 space-y-2.5">
+          {[
+            ["Relative path", relPath],
+            ["Site",          siteHost],
+            ["Link type",     linkType],
+            ["Shared by",     sharedBy],
+            ["Shared at",     sharedAt],
+            ["Source",        workload],
+          ].map(([label, value]) => (
+            <div key={label} className="flex gap-3">
+              <span className="w-24 shrink-0 text-white/35 text-[11px] pt-px">{label}</span>
+              <span className="text-white/75 break-all">{value || <span className="text-white/25">—</span>}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* open file button */}
+        {canOpenFile && (
+          <div className="px-5 pb-5">
+            <a
+              href={objectId}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center gap-2 w-full py-2 rounded-lg font-semibold text-[11px] uppercase tracking-wider transition-colors"
+              style={{ backgroundColor: "#2563EB22", color: "#60A5FA", border: "1px solid #2563EB40" }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#2563EB40"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#2563EB22"; }}
+            >
+              OPEN FILE →
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SharingTable({ rows }) {
+  const [openId, setOpenId]       = useState(null);
+  const [modalRow, setModalRow]   = useState(null);
+
+  return (
+    <>
+      {modalRow && (
+        <SharingFileModal row={modalRow} onClose={() => setModalRow(null)} />
+      )}
+      <TableCard>
+        <table className="w-full table-fixed text-[11px]">
+          <thead>
+            <tr>
+              <Th>User</Th>
+              <Th align="right">Events</Th>
+              <Th>Event Type</Th>
+              <Th>Last Seen</Th>
+              <Th>Status</Th>
+              <Th>{""}</Th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {rows.map((row) => {
+              const rowKey = `${row.entity_key}-${row.event_type}`;
+              const isOpen = openId === rowKey;
+              return (
+                <Fragment key={rowKey}>
+                  <tr
+                    onClick={() => setOpenId(isOpen ? null : rowKey)}
+                    className={`cursor-pointer ${isOpen ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"}`}
+                  >
+                    <td className="px-4 py-2.5">
+                      <UserCell entityKey={row.entity_key} userId={row.user_id} clientName={row.client_name} />
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">
+                      {fmtNumber(row.event_count)}
+                    </td>
+                    <td className="px-4 py-2.5 text-white/60" title={row.event_type}>
+                      {getEventLabel(row.event_type)}
+                    </td>
+                    <td className="px-4 py-2.5 text-white/50 whitespace-nowrap">
+                      {fmtRelative(row.last_seen)}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <SeverityPill severity="monitor" />
+                    </td>
+                    <ChevronCell open={isOpen} />
+                  </tr>
+                  {isOpen && (
+                    <ExpandedPanel colSpan={6}>
+                      <UserEventsExpand
+                        entityKey={row.entity_key}
+                        eventTypes={row.event_type}
+                        columns={SHARING_EXPAND_COLUMNS}
+                        eventsParams={{
+                          user: row.user_id,
+                          event_type: row.event_type,
+                        }}
+                        onRowClick={setModalRow}
+                      />
+                    </ExpandedPanel>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </TableCard>
+    </>
   );
 }
 
@@ -1605,7 +1754,7 @@ function ExpandedFooterLinks({ entityKey, eventsParams }) {
 // Low-level renderer for the inner event table. `columns` is an array
 // of { key, label, render?(row) } cell definitions; `render` can return
 // any ReactNode.
-function InnerEventsTable({ rows, columns, emptyMessage = "no matching events" }) {
+function InnerEventsTable({ rows, columns, emptyMessage = "no matching events", onRowClick }) {
   if (rows == null) {
     return <div className="text-white/40 text-[11px] py-2">loading events…</div>;
   }
@@ -1629,7 +1778,11 @@ function InnerEventsTable({ rows, columns, emptyMessage = "no matching events" }
         </thead>
         <tbody className="divide-y divide-white/5">
           {rows.map((r, i) => (
-            <tr key={r.id || i} className="hover:bg-white/[0.02]">
+            <tr
+              key={r.id || i}
+              className={`hover:bg-white/[0.02] ${onRowClick ? "cursor-pointer" : ""}`}
+              onClick={onRowClick ? () => onRowClick(r) : undefined}
+            >
               {columns.map((c) => (
                 <td
                   key={c.key}
@@ -1657,6 +1810,7 @@ function UserEventsExpand({
   eventsParams,
   title = "Recent matching events",
   emptyMessage,
+  onRowClick,
 }) {
   const [rows, setRows] = useState(null);
 
@@ -1684,7 +1838,7 @@ function UserEventsExpand({
       <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
         {title}
       </div>
-      <InnerEventsTable rows={rows} columns={columns} emptyMessage={emptyMessage} />
+      <InnerEventsTable rows={rows} columns={columns} emptyMessage={emptyMessage} onRowClick={onRowClick} />
       <ExpandedFooterLinks entityKey={entityKey} eventsParams={eventsParams} />
     </>
   );

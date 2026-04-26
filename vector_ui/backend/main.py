@@ -1855,6 +1855,44 @@ def governance_sharing(
     )
 
 
+@app.get("/api/governance/external-sharing")
+def governance_external_sharing(
+    tenant: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+) -> list[dict]:
+    """Individual external-sharing events with file metadata for the detail modal."""
+    return db.fetch_all(
+        """
+        SELECT
+            entity_key,
+            user_id,
+            client_name,
+            event_type,
+            timestamp,
+            raw_json->>'SourceFileName'    AS file_name,
+            raw_json->>'SourceRelativeUrl' AS relative_url,
+            raw_json->>'SiteUrl'           AS site_url,
+            raw_json->>'ObjectId'          AS object_id,
+            raw_json->>'Permission'        AS permission,
+            raw_json->>'Workload'          AS workload,
+            raw_json->>'EventData'         AS event_data
+        FROM vector_events
+        WHERE event_type IN (
+            'AnonymousLinkCreated',
+            'AnonymousLinkUsed',
+            'SharingInvitationCreated',
+            'SharingInvitationAccepted',
+            'SharingLinkUsed',
+            'SharingLinkCreated'
+        )
+          AND (%s::text IS NULL OR client_name = %s)
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (tenant, tenant, limit),
+    )
+
+
 @app.get("/api/governance/downloads")
 def governance_downloads(
     tenant: str | None = Query(None),
