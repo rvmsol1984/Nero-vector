@@ -865,15 +865,7 @@ function SharingFileModal({ row, onClose }) {
             </div>
           ))}
         </div>
-        {canOpen && (
-          <div className="px-5 pb-5">
-            <a href={objectId} target="_blank" rel="noopener noreferrer"
-              className="flex items-center justify-center gap-2 w-full py-2 rounded-lg font-semibold text-[11px] uppercase tracking-wider"
-              style={{ backgroundColor: "#2563EB22", color: "#60A5FA", border: "1px solid #2563EB40" }}>
-              OPEN FILE →
-            </a>
-          </div>
-        )}
+
       </div>
     </div>
   );
