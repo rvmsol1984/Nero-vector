@@ -140,12 +140,23 @@ per_user AS (
         ) AS known_devices
     FROM events_30d
     GROUP BY tenant_id, user_id
+),
+first_seen_all AS (
+    -- Look back across ALL history (not just 30d) to find the true
+    -- earliest event for each user. Kept as a separate CTE so the
+    -- 30d window in events_30d doesn't affect the result.
+    SELECT tenant_id, user_id, MIN(timestamp) AS first_seen
+    FROM vector_events
+    WHERE user_id   IS NOT NULL
+      AND tenant_id IS NOT NULL
+    GROUP BY tenant_id, user_id
 )
 INSERT INTO vector_user_baselines (
     tenant_id, user_id, computed_at,
     login_hours, login_countries, login_asns,
     known_devices, known_ips,
-    avg_daily_events, avg_daily_logins, baseline_days
+    avg_daily_events, avg_daily_logins, baseline_days,
+    first_seen
 )
 SELECT
     u.tenant_id,
@@ -158,11 +169,15 @@ SELECT
     u.known_ips,
     u.avg_daily_events,
     u.avg_daily_logins,
-    u.baseline_days
+    u.baseline_days,
+    fs.first_seen
 FROM per_user u
 LEFT JOIN hourly h
     ON h.tenant_id = u.tenant_id
    AND h.user_id   = u.user_id
+LEFT JOIN first_seen_all fs
+    ON fs.tenant_id = u.tenant_id
+   AND fs.user_id   = u.user_id
 ON CONFLICT (tenant_id, user_id) DO UPDATE SET
     computed_at      = EXCLUDED.computed_at,
     login_hours      = EXCLUDED.login_hours,
@@ -172,7 +187,8 @@ ON CONFLICT (tenant_id, user_id) DO UPDATE SET
     known_ips        = EXCLUDED.known_ips,
     avg_daily_events = EXCLUDED.avg_daily_events,
     avg_daily_logins = EXCLUDED.avg_daily_logins,
-    baseline_days    = EXCLUDED.baseline_days
+    baseline_days    = EXCLUDED.baseline_days,
+    first_seen       = LEAST(EXCLUDED.first_seen, vector_user_baselines.first_seen)
 """
 
 
