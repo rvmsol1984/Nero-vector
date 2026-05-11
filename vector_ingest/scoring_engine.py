@@ -71,6 +71,31 @@ DEDUP_WINDOW = timedelta(hours=4)
 # shape, but the scaffold itself always uses this.
 DEFAULT_INCIDENT_TYPE = "score_based"
 
+# Minimum days of baseline history before profile-based rules fire.
+# Below this threshold, NewDevice/NewCountry/OffHours/ImpossibleTravel/VPN
+# rules return a miss to avoid false positives from cold-start users.
+MIN_BASELINE_DAYS = 30
+
+
+def _baseline_age_days(user_profile: dict) -> int:
+    """Days since first_seen for the user. Returns 0 on missing/invalid data
+    so rules fail open (still fire) rather than silently suppressed."""
+    try:
+        first_seen = user_profile.get("first_seen") if user_profile else None
+        if not first_seen:
+            return 0
+        if isinstance(first_seen, str):
+            from datetime import datetime
+            first_seen = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+        if first_seen.tzinfo is None:
+            from datetime import timezone
+            first_seen = first_seen.replace(tzinfo=timezone.utc)
+        from datetime import datetime, timezone
+        return (datetime.now(timezone.utc) - first_seen).days
+    except Exception:
+        return 0
+
+
 
 # ---------------------------------------------------------------------------
 # RuleResult
@@ -967,6 +992,8 @@ class NewCountryLoginRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
+        if _baseline_age_days(user_profile) < MIN_BASELINE_DAYS:
+            return miss
 
         # The engine only calls rules for users with recent
         # activity so events should always be non-empty, but be
@@ -1271,6 +1298,8 @@ class OffHoursLoginRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
+        if _baseline_age_days(user_profile) < MIN_BASELINE_DAYS:
+            return miss
         if not events:
             return miss
 
@@ -2228,6 +2257,8 @@ class VPNLoginRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
+        if _baseline_age_days(user_profile) < MIN_BASELINE_DAYS:
+            return miss
         if not events:
             return miss
 
@@ -2523,6 +2554,8 @@ class ImpossibleTravelRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
+        if _baseline_age_days(user_profile) < MIN_BASELINE_DAYS:
+            return miss
         if not events:
             return miss
 
@@ -3167,6 +3200,8 @@ class NewDeviceLoginRule(CorrelationRule):
         miss = RuleResult(
             rule_name=self.rule_name, score_delta=0, fired=False,
         )
+        if _baseline_age_days(user_profile) < MIN_BASELINE_DAYS:
+            return miss
         if not events:
             return miss
 
