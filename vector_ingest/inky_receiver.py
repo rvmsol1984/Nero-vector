@@ -88,6 +88,11 @@ EVENT_TYPE_MAP = {
     "Link Clicks":               "LinkClick",
     "User Reports":              "UserReport",
     "Outbound Analysis Results": "OutboundAnalysis",
+    # INKY actually sends these lowercase event_type values in production
+    "analysis_result":           "InboundAnalysis",
+    "link_click":                "LinkClick",
+    "user_report":               "UserReport",
+    "outbound_analysis_result":  "OutboundAnalysis",
 }
 
 SUPPORTED_CANONICAL = set(EVENT_TYPE_MAP.values())
@@ -259,6 +264,7 @@ async def ingest_inky(
         raise HTTPException(status_code=400, detail="invalid json body")
 
     events = _as_events(payload)
+    logger.info(f"[inky] received payload, event_count={len(events)}, sample={str(events[:1])[:500]}")
 
     accepted = 0
     stored = 0
@@ -298,8 +304,19 @@ async def ingest_inky(
             event, ("tenantId", "tenant_id", "TenantId", "customerId", "customer_id")
         )
         client_name = _first(
-            event, ("clientName", "client_name", "customerName")
-        ) or None
+            event, ("clientName", "client_name", "customerName", "teamid", "teamName")
+        )
+        # Map known INKY teamids to canonical Vector client names
+        INKY_TEAM_MAP = {
+            "gamechange": "GameChange Solar",
+            "gamechangesolar": "GameChange Solar",
+            "londonfischer": "London Fischer",
+            "london-fischer": "London Fischer",
+            "lf": "London Fischer",
+            "nero": "NERO",
+        }
+        if client_name:
+            client_name = INKY_TEAM_MAP.get(str(client_name).lower(), client_name) or None
         timestamp = _parse_timestamp(
             event.get("timestamp") or event.get("eventTime") or event.get("time")
         )
