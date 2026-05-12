@@ -278,7 +278,7 @@ function OpenIncidentsBadge({ count }) {
 // sidebar body (shared between desktop sidebar + mobile drawer)
 // ---------------------------------------------------------------------------
 
-function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
+function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents, watchlistActive }) {
   return (
     <>
       <div className="flex items-center justify-between px-5 py-5 border-b border-white/5">
@@ -345,6 +345,8 @@ function SidebarBody({ onNavigate, showCloseButton, onClose, openIncidents }) {
             </span>
             {item.to === "/incidents" && openIncidents > 0 ? (
               <OpenIncidentsBadge count={openIncidents} />
+            ) : item.to === "/watchlist" && watchlistActive > 0 ? (
+              <OpenIncidentsBadge count={watchlistActive} />
             ) : item.phase2 ? (
               <P2Badge />
             ) : null}
@@ -369,6 +371,7 @@ export default function Layout() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [openIncidents, setOpenIncidents] = useState(0);
+  const [watchlistActive, setWatchlistActive] = useState(0);
   const location = useLocation();
   const user = useAuth();
 
@@ -391,6 +394,17 @@ export default function Layout() {
         if (!cancel) setOpenIncidents(Number(stats?.open || 0));
       } catch {
         /* ignore -- keep last value */
+      }
+      try {
+        const wl = await api.watchlist();
+        if (!cancel) {
+          const active = (wl || []).filter(
+            (r) => (r.status || "").toLowerCase() === "active"
+          ).length;
+          setWatchlistActive(active);
+        }
+      } catch {
+        /* ignore */
       }
     }
     load();
@@ -539,7 +553,7 @@ export default function Layout() {
             borderRight: "1px solid rgba(255,255,255,0.05)",
           }}
         >
-          <SidebarBody openIncidents={openIncidents} />
+          <SidebarBody openIncidents={openIncidents} watchlistActive={watchlistActive} />
         </aside>
 
         <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-0 min-w-0">
@@ -600,6 +614,7 @@ export default function Layout() {
           showCloseButton
           onClose={() => setDrawerOpen(false)}
           openIncidents={openIncidents}
+          watchlistActive={watchlistActive}
         />
       </aside>
     </div>

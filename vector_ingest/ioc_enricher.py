@@ -94,7 +94,7 @@ GRAPHQL_TIMEOUT = 15
 # the right observable class by filter value; we then union-select the
 # value field from each type so the response shape is uniform.
 _GRAPHQL_QUERY = """
-query VectorIocLookup($value: String!) {
+query VectorIocLookup($value: Any!) {
   stixCyberObservables(
     filters: {
       mode: and,

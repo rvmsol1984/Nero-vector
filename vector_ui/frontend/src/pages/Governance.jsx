@@ -3030,9 +3030,11 @@ function ThreatLockerTable({ rows }) {
                   >
                     {row.username || <span className="text-white/30">—</span>}
                   </td>
-                  <td className="px-4 py-2.5 space-x-2">
-                    <ThreatLockerActionBadge row={row} />
-                    <SeverityPill severity={threatLockerActionPill(row)} />
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <ThreatLockerActionBadge row={row} />
+                      <SeverityPill severity={threatLockerActionPill(row)} />
+                    </div>
                   </td>
                   <td
                     className="px-4 py-2.5 text-white/70 truncate max-w-[180px]"

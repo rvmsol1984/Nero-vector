@@ -88,6 +88,9 @@ WITH events_30d AS (
     WHERE timestamp > NOW() - INTERVAL '30 days'
       AND user_id    IS NOT NULL
       AND tenant_id  IS NOT NULL
+      AND user_id LIKE '%@%'
+      AND user_id NOT LIKE '+%'
+      AND user_id NOT LIKE 'ServicePrincipal_%'
 ),
 hourly AS (
     SELECT tenant_id, user_id,

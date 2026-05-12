@@ -131,7 +131,7 @@ export default function Watchlist() {
     let cancel = false;
     function load() {
       api
-        .watchlist(statusFilter === "all" ? undefined : statusFilter)
+        .watchlist(undefined)
         .then((r) => {
           if (cancel) return;
           setRows(r || []);
@@ -150,7 +150,12 @@ export default function Watchlist() {
       cancel = true;
       clearInterval(tick);
     };
-  }, [statusFilter]);
+  }, []);
+
+  // Filter to displayed rows based on selected status
+  const filteredRows = statusFilter === "all"
+    ? rows
+    : rows.filter((r) => (r.status || "").toLowerCase() === statusFilter);
 
   // Count by status (for the header summary + filter pill counts).
   const countByStatus = rows.reduce(
@@ -167,7 +172,7 @@ export default function Watchlist() {
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="text-2xl font-bold">Watchlist</h1>
         <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider border border-status-waiting/40 bg-status-waiting/10 text-status-waiting tabular-nums">
-          {rows.length} {statusFilter === "all" ? "total" : statusFilter}
+          {filteredRows.length} {statusFilter === "all" ? "total" : statusFilter}
         </span>
       </div>
       <p className="text-white/50 text-sm -mt-3">
@@ -191,6 +196,16 @@ export default function Watchlist() {
               }`}
             >
               {f.label}
+              {f.id !== "all" && countByStatus[f.id] != null && (
+                <span className="ml-1.5 text-[10px] opacity-70 tabular-nums">
+                  {countByStatus[f.id]}
+                </span>
+              )}
+              {f.id === "all" && (
+                <span className="ml-1.5 text-[10px] opacity-70 tabular-nums">
+                  {rows.length}
+                </span>
+              )}
             </button>
           );
         })}
@@ -202,7 +217,7 @@ export default function Watchlist() {
         </div>
       )}
 
-      {!loading && rows.length === 0 && !err ? (
+      {!loading && filteredRows.length === 0 && !err ? (
         <div className="card py-14 flex flex-col items-center text-center gap-3">
           <ShieldIcon />
           <div className="text-white/50 text-sm">
@@ -226,7 +241,7 @@ export default function Watchlist() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {rows.map((row) => {
+                {filteredRows.map((row) => {
                   const status = (row.status || "").toLowerCase();
                   const isEscalated = status === "escalated";
                   const isExpired = status === "expired";
@@ -279,8 +294,15 @@ export default function Watchlist() {
                           )}
                         </div>
                       </td>
-                      <td className="px-4 py-2.5 text-white/80">
-                        {TRIGGER_LABELS[row.trigger_type] || row.trigger_type}
+                      <td className="px-4 py-2.5">
+                        <div className="text-white/80">
+                          {TRIGGER_LABELS[row.trigger_type] || row.trigger_type}
+                        </div>
+                        {row.trigger_details && (row.trigger_details.indicator || row.trigger_details.ioc_value) && (
+                          <div className="text-[10px] text-white/40 font-mono truncate max-w-[180px]" title={row.trigger_details.indicator || row.trigger_details.ioc_value}>
+                            {row.trigger_details.ioc_type ? `${row.trigger_details.ioc_type}: ` : ""}{row.trigger_details.indicator || row.trigger_details.ioc_value}
+                          </div>
+                        )}
                       </td>
                       <td
                         className="px-4 py-2.5 text-white/70 truncate max-w-[320px]"
